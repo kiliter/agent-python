@@ -1,0 +1,13 @@
+# #Created By AiCoding(codex)
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+/data/
+.scratch/
+frontend/node_modules/
+.idea/
+.DS_Store
+.backup/
+*.tsbuildinfo

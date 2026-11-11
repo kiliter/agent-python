@@ -1,0 +1,1969 @@
+<!DOCTYPE html>
+<!-- #Created By AiCoding(codex) 智能申告平台 · 中国移动政企生产级「既正式又硬核科技」视觉选型样板间（零渐变 · 零卡通感 · 精密数智中台美学） -->
+<html lang="zh-CN" data-preset="navy">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" href="data:," />
+  <title>政企数智中台视觉选型 · 智能申告平台</title>
+  <style>
+    /* ==========================================================================
+       方案 1 · 深海领航舱（中国移动政企旗舰风：深空藏蓝导轨 + 极净云白工作台 + 移动科技蓝）
+       最经典的运营商核心生产系统架构：左侧沉稳镇场，右侧明亮精密，领导与一线通吃
+       ========================================================================== */
+    html[data-preset="navy"] {
+      --body-bg: #f2f5f9;
+      --rail-bg: #0b1426;
+      --rail-border: #182642;
+      --rail-group: #5d7294;
+      --rail-fg: #9eb0cc;
+      --rail-fg-hover: #ffffff;
+      --rail-hover-bg: rgba(255, 255, 255, 0.055);
+      --rail-active-bg: #152542;
+      --rail-active-border: #253d69;
+      --rail-active-fg: #ffffff;
+      --rail-bar: #1677ff;
+      --rail-badge-bg: #15233b;
+      --rail-badge-fg: #8ba1c4;
+      --rail-title: #ffffff;
+      --rail-sub: #6c82a6;
+
+      --topbar-bg: #ffffff;
+      --card-bg: #ffffff;
+      --subtle-bg: #f7f9fc;
+      --recessed-bg: #eef2f7;
+      --hover-row: #f4f8ff;
+
+      --border-light: #eaeff6;
+      --border-mid: #dce3ee;
+      --border-strong: #c2cede;
+      --grid-dot: rgba(0, 82, 217, 0.09);
+
+      --text-1: #0d1626;
+      --text-2: #3e4c63;
+      --text-3: #718096;
+      --text-4: #9aa6b8;
+
+      --brand: #0052d9;
+      --brand-hover: #0042b3;
+      --brand-soft: #ecf3ff;
+      --brand-border: #bfd6ff;
+      --cta-bg: #0052d9;
+      --cta-fg: #ffffff;
+
+      --ok: #078855;
+      --ok-soft: #e8f7f0;
+      --ok-border: #b6e6d0;
+      --warn: #c86906;
+      --warn-soft: #fef5e7;
+      --warn-border: #f7d7a8;
+      --hl-bg: #fff1b8;
+      --hl-line: #d49b0b;
+
+      --shell-pad: 0;
+      --deck-radius: 0px;
+      --deck-border: none;
+      --card-radius: 6px;
+      --ctrl-radius: 4px;
+      --card-shadow: 0 1px 2px rgba(13, 22, 38, 0.035);
+      --kpi-top-line: 2px solid #0052d9;
+    }
+
+    /* ==========================================================================
+       方案 2 · 极昼云原生中台（对标华为云新一代控制台 / Stripe Enterprise）
+       全白昼银灰机柜 + 内嵌纯白主控舱，通透、现代、极具新一代数字化中台锐度
+       ========================================================================== */
+    html[data-preset="cloud"] {
+      --body-bg: #e9eef5;
+      --rail-bg: #e9eef5;
+      --rail-border: transparent;
+      --rail-group: #6e7d94;
+      --rail-fg: #3b4961;
+      --rail-fg-hover: #0c1524;
+      --rail-hover-bg: rgba(12, 21, 36, 0.05);
+      --rail-active-bg: #ffffff;
+      --rail-active-border: #cfd8e6;
+      --rail-active-fg: #0052d9;
+      --rail-bar: #0052d9;
+      --rail-badge-bg: #dde4ef;
+      --rail-badge-fg: #4b5b75;
+      --rail-title: #0c1524;
+      --rail-sub: #6b7a91;
+
+      --topbar-bg: #ffffff;
+      --card-bg: #ffffff;
+      --subtle-bg: #f7f9fc;
+      --recessed-bg: #eef2f8;
+      --hover-row: #f3f7fe;
+
+      --border-light: #e8eef6;
+      --border-mid: #d7e0ed;
+      --border-strong: #bcc9dc;
+      --grid-dot: rgba(0, 82, 217, 0.1);
+
+      --text-1: #0c1524;
+      --text-2: #3d4b63;
+      --text-3: #6f7f96;
+      --text-4: #9ba8bc;
+
+      --brand: #0052d9;
+      --brand-hover: #003fa8;
+      --brand-soft: #ebf3ff;
+      --brand-border: #bdd4ff;
+      --cta-bg: #0c1524;
+      --cta-fg: #ffffff;
+
+      --ok: #078855;
+      --ok-soft: #e8f7f0;
+      --ok-border: #b6e6d0;
+      --warn: #c86906;
+      --warn-soft: #fef5e7;
+      --warn-border: #f7d7a8;
+      --hl-bg: #fff1b8;
+      --hl-line: #d49b0b;
+
+      --shell-pad: 8px 8px 8px 0;
+      --deck-radius: 10px;
+      --deck-border: 1px solid #d2dceb;
+      --card-radius: 6px;
+      --ctrl-radius: 5px;
+      --card-shadow: 0 1px 2px rgba(12, 21, 36, 0.03);
+      --kpi-top-line: 1px solid #d7e0ed;
+    }
+
+    /* ==========================================================================
+       方案 3 · 省网智慧运营大屏（中国移动 NOC 指挥中心暗色模式：深海钛黑 + 移动冰蓝）
+       严肃、冷静、高密度数据大屏感，无任何游戏霓虹，专为汇报演示与监控大厅打造
+       ========================================================================== */
+    html[data-preset="noc"] {
+      --body-bg: #080d17;
+      --rail-bg: #0a111e;
+      --rail-border: #182438;
+      --rail-group: #526685;
+      --rail-fg: #8fa3c2;
+      --rail-fg-hover: #f0f5fc;
+      --rail-hover-bg: rgba(56, 139, 255, 0.08);
+      --rail-active-bg: #122038;
+      --rail-active-border: #233c66;
+      --rail-active-fg: #ffffff;
+      --rail-bar: #2b7fff;
+      --rail-badge-bg: #131f33;
+      --rail-badge-fg: #7e94b5;
+      --rail-title: #f0f5fc;
+      --rail-sub: #5b7194;
+
+      --topbar-bg: #0d1525;
+      --card-bg: #101a2c;
+      --subtle-bg: #0c1422;
+      --recessed-bg: #09101c;
+      --hover-row: rgba(43, 127, 255, 0.07);
+
+      --border-light: #18253b;
+      --border-mid: #20314d;
+      --border-strong: #2f4870;
+      --grid-dot: rgba(64, 150, 255, 0.14);
+
+      --text-1: #ebf2fc;
+      --text-2: #9eb1cc;
+      --text-3: #647896;
+      --text-4: #41536e;
+
+      --brand: #3b8aff;
+      --brand-hover: #5ca0ff;
+      --brand-soft: rgba(59, 138, 255, 0.14);
+      --brand-border: rgba(59, 138, 255, 0.36);
+      --cta-bg: #1a68ff;
+      --cta-fg: #ffffff;
+
+      --ok: #19be7d;
+      --ok-soft: rgba(25, 190, 125, 0.14);
+      --ok-border: rgba(25, 190, 125, 0.34);
+      --warn: #f59e0b;
+      --warn-soft: rgba(245, 158, 11, 0.15);
+      --warn-border: rgba(245, 158, 11, 0.36);
+      --hl-bg: rgba(245, 179, 11, 0.22);
+      --hl-line: #e5a00d;
+
+      --shell-pad: 0;
+      --deck-radius: 0px;
+      --deck-border: none;
+      --card-radius: 5px;
+      --ctrl-radius: 4px;
+      --card-shadow: none;
+      --kpi-top-line: 2px solid #2b7fff;
+    }
+
+    /* ==========================================================================
+       方案 4 · 稽核卷宗金石风（墨玉深灰导轨 + 暖调公文纸白 + 政务深钴蓝）
+       兼顾工信部/10080 申诉核查公文的严谨纸张质感与现代金融终端的数据精度
+       ========================================================================== */
+    html[data-preset="audit"] {
+      --body-bg: #f1f2f5;
+      --rail-bg: #161920;
+      --rail-border: #262b36;
+      --rail-group: #687082;
+      --rail-fg: #a2aab8;
+      --rail-fg-hover: #ffffff;
+      --rail-hover-bg: rgba(255, 255, 255, 0.055);
+      --rail-active-bg: #232834;
+      --rail-active-border: #363d4f;
+      --rail-active-fg: #ffffff;
+      --rail-bar: #3b76f6;
+      --rail-badge-bg: #222630;
+      --rail-badge-fg: #8e96a6;
+      --rail-title: #f5f6f8;
+      --rail-sub: #757d8f;
+
+      --topbar-bg: #fcfcfd;
+      --card-bg: #ffffff;
+      --subtle-bg: #f7f8fa;
+      --recessed-bg: #eef0f4;
+      --hover-row: #f4f6fb;
+
+      --border-light: #e8eaef;
+      --border-mid: #d8dce5;
+      --border-strong: #bcc2d0;
+      --grid-dot: rgba(26, 68, 168, 0.09);
+
+      --text-1: #12151c;
+      --text-2: #414754;
+      --text-3: #737b8c;
+      --text-4: #9da4b3;
+
+      --brand: #1849b8;
+      --brand-hover: #123891;
+      --brand-soft: #edf2fc;
+      --brand-border: #c2d2f5;
+      --cta-bg: #161920;
+      --cta-fg: #ffffff;
+
+      --ok: #137a4b;
+      --ok-soft: #eaf5ef;
+      --ok-border: #b8dfc9;
+      --warn: #b8620a;
+      --warn-soft: #fdf4e7;
+      --warn-border: #f0d2a8;
+      --hl-bg: #fceda6;
+      --hl-line: #c99612;
+
+      --shell-pad: 0;
+      --deck-radius: 0px;
+      --deck-border: none;
+      --card-radius: 4px;
+      --ctrl-radius: 4px;
+      --card-shadow: 0 1px 2px rgba(18, 21, 28, 0.04);
+      --kpi-top-line: 2px solid #1849b8;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    :root {
+      --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+      --font-mono: "JetBrains Mono", "SF Mono", "DIN Alternate", "SFMono-Regular", Consolas, monospace;
+    }
+
+    html, body {
+      height: 100%;
+      overflow: hidden;
+      font-family: var(--font-sans);
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--text-1);
+      background: var(--body-bg);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .num {
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* ==================== 100vh 政企中台标准骨架 ==================== */
+    .platform-shell {
+      display: flex;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: var(--body-bg);
+    }
+
+    /* 左侧权威主导航栏（无左上角黑块图标，纯端庄中文排版 + 在线状态指示） */
+    .nav-rail {
+      width: 216px;
+      background: var(--rail-bg);
+      border-right: 1px solid var(--rail-border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      user-select: none;
+      transition: width 0.18s ease, background-color 0.16s ease;
+    }
+
+    .nav-rail.collapsed {
+      width: 60px;
+    }
+
+    .rail-header {
+      height: 50px;
+      padding: 0 16px;
+      border-bottom: 1px solid var(--rail-border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+
+    html[data-preset="cloud"] .rail-header {
+      border-bottom-color: #dbe3ef;
+    }
+
+    .rail-title-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+
+    .rail-title {
+      font-size: 14px;
+      font-weight: 650;
+      color: var(--rail-title);
+      letter-spacing: 0.01em;
+      line-height: 1.25;
+    }
+
+    .rail-subtitle {
+      font-size: 11px;
+      color: var(--rail-sub);
+      line-height: 1.2;
+    }
+
+    .rail-ver-tag {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 600;
+      padding: 1px 6px;
+      border-radius: 3px;
+      background: rgba(25, 190, 125, 0.16);
+      color: #27c987;
+      border: 1px solid rgba(39, 201, 135, 0.3);
+    }
+
+    html[data-preset="cloud"] .rail-ver-tag {
+      background: var(--ok-soft);
+      color: var(--ok);
+      border-color: var(--ok-border);
+    }
+
+    .rail-short {
+      display: none;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--rail-title);
+    }
+
+    .nav-rail.collapsed .rail-title-wrap,
+    .nav-rail.collapsed .rail-ver-tag {
+      display: none;
+    }
+
+    .nav-rail.collapsed .rail-header {
+      justify-content: center;
+      padding: 0;
+    }
+
+    .nav-rail.collapsed .rail-short {
+      display: inline;
+    }
+
+    .rail-menu {
+      flex: 1;
+      padding: 12px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      overflow-y: auto;
+    }
+
+    .menu-group {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .menu-group-label {
+      padding: 0 10px 4px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--rail-group);
+      letter-spacing: 0.04em;
+    }
+
+    .nav-rail.collapsed .menu-group-label,
+    .nav-rail.collapsed .menu-text,
+    .nav-rail.collapsed .menu-badge {
+      display: none;
+    }
+
+    .nav-rail.collapsed .menu-group + .menu-group {
+      padding-top: 8px;
+      border-top: 1px solid var(--rail-border);
+    }
+
+    .menu-btn {
+      appearance: none;
+      width: 100%;
+      height: 34px;
+      padding: 0 10px;
+      border-radius: var(--ctrl-radius);
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--rail-fg);
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      cursor: pointer;
+      position: relative;
+      text-align: left;
+      transition: background-color 0.12s, color 0.12s, border-color 0.12s;
+    }
+
+    .nav-rail.collapsed .menu-btn {
+      justify-content: center;
+      padding: 0;
+    }
+
+    .menu-btn:hover:not(.active) {
+      background: var(--rail-hover-bg);
+      color: var(--rail-fg-hover);
+    }
+
+    .menu-btn.active {
+      background: var(--rail-active-bg);
+      border-color: var(--rail-active-border);
+      color: var(--rail-active-fg);
+      font-weight: 600;
+    }
+
+    .menu-btn.active::before {
+      content: '';
+      position: absolute;
+      left: -1px;
+      top: 7px;
+      bottom: 7px;
+      width: 3px;
+      border-radius: 0 2px 2px 0;
+      background: var(--rail-bar);
+    }
+
+    .menu-icon {
+      width: 15px;
+      height: 15px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      opacity: 0.85;
+    }
+
+    .menu-btn.active .menu-icon {
+      opacity: 1;
+      color: var(--rail-bar);
+    }
+
+    .menu-badge {
+      margin-left: auto;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 0 6px;
+      line-height: 17px;
+      border-radius: 3px;
+      background: var(--rail-badge-bg);
+      color: var(--rail-badge-fg);
+    }
+
+    .menu-btn.active .menu-badge {
+      background: rgba(22, 119, 255, 0.2);
+      color: #69adff;
+    }
+
+    html[data-preset="cloud"] .menu-btn.active .menu-badge {
+      background: var(--brand-soft);
+      color: var(--brand);
+    }
+
+    .rail-footer {
+      height: 40px;
+      padding: 0 14px;
+      border-top: 1px solid var(--rail-border);
+      display: flex;
+      align-items: center;
+    }
+
+    html[data-preset="cloud"] .rail-footer {
+      border-top-color: #dbe3ef;
+    }
+
+    .collapse-btn {
+      appearance: none;
+      width: 100%;
+      border: none;
+      background: transparent;
+      color: var(--rail-fg);
+      font-family: inherit;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+    }
+
+    .nav-rail.collapsed .collapse-btn {
+      justify-content: center;
+    }
+
+    .collapse-btn:hover {
+      color: var(--rail-fg-hover);
+    }
+
+    /* ==================== 右侧主工作台区域 ==================== */
+    .workspace-outer {
+      flex: 1;
+      min-width: 0;
+      padding: var(--shell-pad);
+      display: flex;
+      overflow: hidden;
+    }
+
+    .workspace-deck {
+      flex: 1;
+      min-width: 0;
+      background: var(--body-bg);
+      border: var(--deck-border);
+      border-radius: var(--deck-radius);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    html[data-preset="cloud"] .workspace-deck {
+      background: #f5f8fc;
+    }
+
+    /* 顶栏（50px 与侧栏头部严丝合缝，无方形头像图标，规范政企信息展示） */
+    .top-header {
+      height: 50px;
+      padding: 0 20px;
+      background: var(--topbar-bg);
+      border-bottom: 1px solid var(--border-mid);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-shrink: 0;
+    }
+
+    .header-left, .header-right {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .breadcrumb-nav {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 13px;
+    }
+
+    .bc-parent {
+      color: var(--text-3);
+      cursor: pointer;
+    }
+
+    .bc-parent:hover {
+      color: var(--brand);
+    }
+
+    .bc-cur {
+      color: var(--text-1);
+      font-weight: 600;
+    }
+
+    .v-divider {
+      width: 1px;
+      height: 14px;
+      background: var(--border-mid);
+    }
+
+    .prod-status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 10px;
+      border-radius: var(--ctrl-radius);
+      background: var(--ok-soft);
+      border: 1px solid var(--ok-border);
+      color: var(--ok);
+      font-size: 12px;
+      font-weight: 550;
+    }
+
+    .status-pulse {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--ok);
+    }
+
+    .global-search {
+      width: 260px;
+      height: 30px;
+      padding: 0 8px 0 11px;
+      border-radius: var(--ctrl-radius);
+      border: 1px solid var(--border-mid);
+      background: var(--subtle-bg);
+      color: var(--text-3);
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+
+    .global-search:hover {
+      border-color: var(--brand);
+    }
+
+    .shortcut-key {
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      padding: 0 5px;
+      border-radius: 3px;
+      background: var(--card-bg);
+      border: 1px solid var(--border-mid);
+      color: var(--text-3);
+    }
+
+    .gateway-metric {
+      font-size: 12px;
+      color: var(--text-2);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    /* 用户胶囊：已移除方形头像，端庄简洁 */
+    .account-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      height: 30px;
+      padding: 0 11px;
+      border-radius: var(--ctrl-radius);
+      border: 1px solid var(--border-mid);
+      background: var(--subtle-bg);
+      color: var(--text-1);
+      font-size: 12.5px;
+      cursor: pointer;
+    }
+
+    .account-role {
+      font-size: 11px;
+      padding: 1px 6px;
+      border-radius: 3px;
+      background: var(--brand-soft);
+      color: var(--brand);
+      font-weight: 500;
+    }
+
+    /* 通用标准按钮 */
+    .btn {
+      appearance: none;
+      height: 30px;
+      padding: 0 13px;
+      border-radius: var(--ctrl-radius);
+      border: 1px solid var(--border-mid);
+      background: var(--card-bg);
+      color: var(--text-1);
+      font-family: inherit;
+      font-size: 12.5px;
+      font-weight: 500;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      transition: border-color 0.12s, background-color 0.12s;
+    }
+
+    .btn:hover {
+      border-color: var(--brand);
+      color: var(--brand);
+    }
+
+    .btn-primary {
+      background: var(--cta-bg);
+      color: var(--cta-fg);
+      border-color: var(--cta-bg);
+      font-weight: 550;
+    }
+
+    .btn-primary:hover {
+      opacity: 0.92;
+      color: var(--cta-fg);
+      border-color: var(--cta-bg);
+    }
+
+    /* 页面内容视图切换 */
+    .page-stage {
+      display: none;
+      flex: 1;
+      min-height: 0;
+      flex-direction: column;
+      padding: 14px 20px 16px;
+      gap: 12px;
+      overflow: hidden;
+    }
+
+    .page-stage.active {
+      display: flex;
+    }
+
+    /* ==================== 既正式又炫酷核心 1：4 联数智运营指标卡（真实矢量折线图与环形仪表） ==================== */
+    .kpi-row {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      flex-shrink: 0;
+    }
+
+    .kpi-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border-mid);
+      border-top: var(--kpi-top-line);
+      border-radius: var(--card-radius);
+      box-shadow: var(--card-shadow);
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .kpi-meta {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .kpi-label {
+      font-size: 12px;
+      color: var(--text-3);
+      font-weight: 500;
+    }
+
+    .kpi-value-line {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+    }
+
+    .kpi-big {
+      font-family: var(--font-mono);
+      font-size: 21px;
+      font-weight: 700;
+      color: var(--text-1);
+      line-height: 1.15;
+    }
+
+    .kpi-unit {
+      font-size: 12px;
+      color: var(--text-3);
+    }
+
+    .kpi-trend {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--ok);
+      font-weight: 600;
+    }
+
+    .kpi-viz {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* ==================== 列表主卡片 ==================== */
+    .main-table-card {
+      flex: 1;
+      min-height: 0;
+      background: var(--card-bg);
+      border: 1px solid var(--border-mid);
+      border-radius: var(--card-radius);
+      box-shadow: var(--card-shadow);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .card-toolbar {
+      height: 48px;
+      padding: 0 16px;
+      border-bottom: 1px solid var(--border-light);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+
+    .seg-group {
+      display: inline-flex;
+      padding: 3px;
+      border-radius: var(--ctrl-radius);
+      background: var(--recessed-bg);
+      gap: 2px;
+    }
+
+    .seg-item {
+      appearance: none;
+      height: 25px;
+      padding: 0 11px;
+      border: none;
+      border-radius: calc(var(--ctrl-radius) - 1px);
+      background: transparent;
+      color: var(--text-2);
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .seg-item.active {
+      background: var(--card-bg);
+      color: var(--brand);
+      font-weight: 600;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+    }
+
+    .table-scroll-area {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+    }
+
+    table.enterprise-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .enterprise-table th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: var(--subtle-bg);
+      color: var(--text-2);
+      font-size: 12px;
+      font-weight: 600;
+      text-align: left;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border-mid);
+      white-space: nowrap;
+    }
+
+    .enterprise-table td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border-light);
+      color: var(--text-1);
+      font-size: 13px;
+      vertical-align: middle;
+    }
+
+    .enterprise-table tbody tr {
+      cursor: pointer;
+      transition: background-color 0.1s;
+    }
+
+    .enterprise-table tbody tr:hover td {
+      background: var(--hover-row);
+    }
+
+    .id-pill {
+      display: inline-block;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 3px;
+      background: var(--brand-soft);
+      border: 1px solid var(--brand-border);
+      color: var(--brand);
+      white-space: nowrap;
+    }
+
+    .name-primary {
+      font-weight: 600;
+      color: var(--text-1);
+    }
+
+    .name-desc {
+      font-size: 11.5px;
+      color: var(--text-3);
+      margin-top: 2px;
+    }
+
+    .status-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 2px 9px;
+      border-radius: 3px;
+      font-size: 12px;
+      font-weight: 550;
+      white-space: nowrap;
+    }
+
+    .status-tag.pub {
+      background: var(--ok-soft);
+      border: 1px solid var(--ok-border);
+      color: var(--ok);
+    }
+
+    .status-tag.pub-draft {
+      background: var(--warn-soft);
+      border: 1px solid var(--warn-border);
+      color: var(--warn);
+    }
+
+    .status-tag.draft {
+      background: var(--recessed-bg);
+      border: 1px solid var(--border-mid);
+      color: var(--text-3);
+    }
+
+    .skill-wrap {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+    }
+
+    .skill-badge {
+      padding: 2px 8px;
+      border-radius: 3px;
+      background: var(--subtle-bg);
+      border: 1px solid var(--border-mid);
+      color: var(--text-2);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    /* 金融/电信级精密准确率进度条（取代游戏感小方块） */
+    .accuracy-box {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      white-space: nowrap;
+    }
+
+    .progress-track {
+      width: 68px;
+      height: 5px;
+      border-radius: 99px;
+      background: var(--recessed-bg);
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+
+    .progress-fill {
+      height: 100%;
+      border-radius: 99px;
+      background: var(--brand);
+    }
+
+    .action-links {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      white-space: nowrap;
+    }
+
+    .link-btn {
+      color: var(--brand);
+      font-size: 12.5px;
+      font-weight: 550;
+      cursor: pointer;
+    }
+
+    .link-btn:hover {
+      text-decoration: underline;
+    }
+
+    /* ==================== 视图 2：工作台 · 全中文规范页签 + 4 阶证据溯源拓扑流 ==================== */
+    .wb-card-head {
+      background: var(--card-bg);
+      border: 1px solid var(--border-mid);
+      border-radius: var(--card-radius);
+      box-shadow: var(--card-shadow);
+      padding: 12px 18px 0;
+      flex-shrink: 0;
+    }
+
+    .wb-top-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 10px;
+      gap: 12px;
+    }
+
+    .wb-tabs-row {
+      display: flex;
+      align-items: center;
+      gap: 24px;
+      border-top: 1px solid var(--border-light);
+    }
+
+    .wb-tab {
+      appearance: none;
+      border: none;
+      background: transparent;
+      padding: 9px 0 10px;
+      color: var(--text-2);
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .wb-tab:hover {
+      color: var(--brand);
+    }
+
+    .wb-tab.active {
+      color: var(--brand);
+      font-weight: 600;
+    }
+
+    .wb-tab.active::after {
+      content: '';
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: -1px;
+      height: 2px;
+      background: var(--brand);
+    }
+
+    .tab-badge {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 0 5px;
+      line-height: 16px;
+      border-radius: 3px;
+      background: var(--recessed-bg);
+      color: var(--text-3);
+    }
+
+    .wb-tab.active .tab-badge {
+      background: var(--brand-soft);
+      color: var(--brand);
+    }
+
+    .wb-dual-grid {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 1fr 1.08fr;
+      gap: 12px;
+      overflow: hidden;
+    }
+
+    .editor-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border-mid);
+      border-radius: var(--card-radius);
+      box-shadow: var(--card-shadow);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .sub-card-head {
+      height: 38px;
+      padding: 0 16px;
+      background: var(--subtle-bg);
+      border-bottom: 1px solid var(--border-light);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--text-1);
+      flex-shrink: 0;
+    }
+
+    .code-body {
+      flex: 1;
+      padding: 14px 0;
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      line-height: 2.05;
+      overflow: auto;
+    }
+
+    .code-ln {
+      display: flex;
+      padding-right: 16px;
+    }
+
+    .code-ln.cur {
+      background: var(--brand-soft);
+    }
+
+    .ln-no {
+      width: 42px;
+      text-align: right;
+      padding-right: 14px;
+      color: var(--text-4);
+      font-size: 11px;
+      user-select: none;
+      flex-shrink: 0;
+    }
+
+    .j2-tag {
+      color: var(--ok);
+      font-weight: 600;
+    }
+
+    .j2-slot {
+      display: inline-block;
+      padding: 0 6px;
+      margin: 0 2px;
+      border-radius: 3px;
+      background: var(--brand-soft);
+      border: 1px solid var(--brand-border);
+      color: var(--brand);
+      font-weight: 600;
+      line-height: 1.5;
+    }
+
+    /* 既正式又炫酷核心 2：右侧政企核查报告装帧台 + 4 阶智能体取证拓扑流 */
+    .report-stage {
+      flex: 1;
+      position: relative;
+      background: var(--recessed-bg);
+      padding: 14px 18px;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .stage-dots {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    /* 4 阶智能体执行拓扑流（严肃可解释 AI 科技感） */
+    .pipeline-bar {
+      position: relative;
+      z-index: 2;
+      background: var(--card-bg);
+      border: 1px solid var(--border-mid);
+      border-radius: var(--ctrl-radius);
+      padding: 8px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      font-size: 11.5px;
+      white-space: nowrap;
+    }
+
+    .pipe-step {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      color: var(--text-2);
+      font-weight: 500;
+    }
+
+    .pipe-idx {
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: var(--brand-soft);
+      border: 1px solid var(--brand-border);
+      color: var(--brand);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .pipe-arrow {
+      color: var(--text-4);
+      font-family: var(--font-mono);
+      font-size: 11px;
+    }
+
+    /* 中国移动标准核查报告单据纸面 */
+    .official-report-sheet {
+      position: relative;
+      z-index: 2;
+      background: var(--card-bg);
+      border: 1px solid var(--border-strong);
+      border-top: 3px solid var(--brand);
+      border-radius: var(--ctrl-radius);
+      box-shadow: var(--card-shadow);
+      padding: 20px 24px 24px;
+      color: var(--text-1);
+    }
+
+    .sheet-doc-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 10px;
+      margin-bottom: 14px;
+      border-bottom: 1px solid var(--border-light);
+      font-size: 11.5px;
+      color: var(--text-3);
+    }
+
+    .official-report-sheet p {
+      font-size: 13.5px;
+      line-height: 2.15;
+      margin-bottom: 10px;
+    }
+
+    .ev-span {
+      position: relative;
+      padding: 1px 6px;
+      margin: 0 2px;
+      border-radius: 3px;
+      background: var(--brand-soft);
+      border-bottom: 1.5px solid var(--brand);
+      color: var(--brand);
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .ev-span.focus {
+      background: var(--hl-bg);
+      border-bottom-color: var(--hl-line);
+      color: var(--text-1);
+    }
+
+    .ev-span.unfound {
+      background: var(--warn-soft);
+      border-bottom: 1.5px dashed var(--warn);
+      color: var(--warn);
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+    }
+
+    .ev-src-tag {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      padding: 0 4px;
+      margin-left: 3px;
+      border-radius: 2px;
+      background: var(--card-bg);
+      border: 1px solid var(--brand-border);
+      color: var(--brand);
+      vertical-align: 1px;
+    }
+
+    .ev-span:hover::after {
+      content: "字段 Key：" attr(data-key) " ｜ 证据来源：" attr(data-src);
+      position: absolute;
+      left: 0;
+      bottom: calc(100% + 6px);
+      white-space: nowrap;
+      padding: 5px 10px;
+      border-radius: 4px;
+      background: #0d1626;
+      color: #ffffff;
+      font-size: 11.5px;
+      font-weight: 500;
+      line-height: 1.4;
+      z-index: 40;
+      pointer-events: none;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+    }
+
+    /* ==================== 底部悬浮方案切换器 ==================== */
+    .scheme-dock {
+      position: fixed;
+      bottom: 14px;
+      left: calc(50% + 90px);
+      transform: translateX(-50%);
+      width: max-content;
+      z-index: 100;
+      background: #0b1322;
+      color: #e6ecf5;
+      border: 1px solid #243552;
+      border-radius: 999px;
+      padding: 4px 6px 4px 14px;
+      box-shadow: 0 10px 28px rgba(5, 10, 20, 0.3);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 12px;
+      white-space: nowrap;
+      user-select: none;
+    }
+
+    .dock-lbl {
+      font-size: 11.5px;
+      color: #7c90b0;
+      margin-right: 4px;
+      font-weight: 500;
+    }
+
+    .dock-btn {
+      appearance: none;
+      height: 28px;
+      padding: 0 12px;
+      border-radius: 999px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: #a3b4cf;
+      font-family: inherit;
+      font-size: 12px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .dock-btn:hover {
+      color: #ffffff;
+      background: #17253d;
+    }
+
+    .dock-btn.active {
+      background: #0052d9;
+      color: #ffffff;
+      font-weight: 600;
+    }
+
+    .dock-swatch {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      border: 1px solid rgba(255, 255, 255, 0.35);
+      flex-shrink: 0;
+    }
+
+    .dock-sep {
+      width: 1px;
+      height: 14px;
+      background: #253652;
+      margin: 0 4px;
+    }
+
+    .dock-toggle {
+      appearance: none;
+      height: 28px;
+      padding: 0 12px;
+      border-radius: 999px;
+      border: 1px solid #2d4263;
+      background: #152238;
+      color: #dce6f5;
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .dock-toggle:hover {
+      border-color: #4f73ab;
+      color: #ffffff;
+    }
+  </style>
+</head>
+<body>
+  <div class="platform-shell">
+    <!-- 左侧主导航：端庄政企规范中文 + 在线版本基线标识（已去除左上角图标） -->
+    <aside class="nav-rail" id="rail">
+      <div class="rail-header" onclick="openStage('list')">
+        <span class="rail-short">申告</span>
+        <div class="rail-title-wrap">
+          <span class="rail-title">智能申告核查平台</span>
+          <span class="rail-subtitle">业务支撑 · 数智稽核中台</span>
+        </div>
+        <span class="rail-ver-tag">r43</span>
+      </div>
+
+      <nav class="rail-menu">
+        <div class="menu-group">
+          <div class="menu-group-label">编排资产</div>
+          <button class="menu-btn active" data-nav="tpl" onclick="openStage('list', this)" title="模板">
+            <span class="menu-icon">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>
+            </span>
+            <span class="menu-text">核查模板</span>
+            <span class="menu-badge">4</span>
+          </button>
+          <button class="menu-btn" onclick="openStage('wb', this)" title="Skill 库">
+            <span class="menu-icon">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+            </span>
+            <span class="menu-text">Skill 能力库</span>
+            <span class="menu-badge">6</span>
+          </button>
+          <button class="menu-btn" onclick="openStage('wb', this)" title="接口库">
+            <span class="menu-icon">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            </span>
+            <span class="menu-text">CRM 接口库</span>
+            <span class="menu-badge">12</span>
+          </button>
+        </div>
+
+        <div class="menu-group">
+          <div class="menu-group-label">执行与稽核</div>
+          <button class="menu-btn" onclick="openStage('wb', this)" title="运行记录">
+            <span class="menu-icon">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+            </span>
+            <span class="menu-text">运行流水记录</span>
+          </button>
+          <button class="menu-btn" onclick="openStage('list', this)" title="批量回归">
+            <span class="menu-icon">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+            </span>
+            <span class="menu-text">基准回归测试</span>
+          </button>
+        </div>
+
+        <div class="menu-group">
+          <div class="menu-group-label">发布与治理</div>
+          <button class="menu-btn" onclick="openStage('list', this)" title="发布版本">
+            <span class="menu-icon">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>
+            </span>
+            <span class="menu-text">发布版本基线</span>
+            <span class="menu-badge">r43</span>
+          </button>
+          <button class="menu-btn" onclick="openStage('list', this)" title="系统设置">
+            <span class="menu-icon">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            </span>
+            <span class="menu-text">引擎与系统设置</span>
+          </button>
+        </div>
+      </nav>
+
+      <div class="rail-footer">
+        <button class="collapse-btn" onclick="document.getElementById('rail').classList.toggle('collapsed')">
+          <span>⇤</span>
+          <span class="menu-text">收起导航栏</span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- 右侧主工作台 -->
+    <div class="workspace-outer">
+      <div class="workspace-deck">
+        <!-- 顶栏：规范面包屑 + 生产基线状态 + 全局检索 + 网关时延 + 纯文字账号胶囊 -->
+        <header class="top-header">
+          <div class="header-left">
+            <nav class="breadcrumb-nav">
+              <span class="bc-parent" onclick="openStage('list')">核查模板</span>
+              <span id="bc-sep" style="display: none; color: var(--text-4)">/</span>
+              <span class="bc-cur" id="bc-sub">模板编排总览</span>
+            </nav>
+            <div class="v-divider"></div>
+            <span class="prod-status-pill">
+              <span class="status-pulse"></span>
+              <span>生产基线 r43 · 运行正常</span>
+            </span>
+          </div>
+
+          <div class="global-search" onclick="toggleStage()">
+            <span>搜索模板编号、Skill 或流水号...</span>
+            <span class="shortcut-key">⌘K</span>
+          </div>
+
+          <div class="header-right">
+            <span class="gateway-metric num">
+              <span style="color: var(--text-3)">CRM 网关时延</span>
+              <strong style="color: var(--ok)">118ms</strong>
+            </span>
+            <div class="v-divider"></div>
+            <div class="account-pill">
+              <span style="font-weight: 600">管理员</span>
+              <span class="account-role">省级系统维护</span>
+              <span style="font-size: 10px; color: var(--text-3)">▾</span>
+            </div>
+          </div>
+        </header>
+
+        <!-- ==================== 视图 1：数智运营总览 + 模板编排列表 ==================== -->
+        <section class="page-stage active" id="stage-list">
+          <!-- 4 联金融/电信级数智指标卡（内置纯矢量趋势线与环形仪表，正式且极具科技感） -->
+          <div class="kpi-row">
+            <div class="kpi-card">
+              <div class="kpi-meta">
+                <span class="kpi-label">在线生产模板数</span>
+                <div class="kpi-value-line">
+                  <span class="kpi-big">3</span>
+                  <span class="kpi-unit">/ 共 4 个模板</span>
+                </div>
+                <span class="num" style="font-size: 11px; color: var(--text-3)">最近发版：11-11 10:00 (r43)</span>
+              </div>
+              <div class="kpi-viz">
+                <svg width="56" height="32" viewBox="0 0 56 32" fill="none">
+                  <rect x="4" y="16" width="8" height="14" rx="1.5" fill="var(--brand-border)" />
+                  <rect x="17" y="12" width="8" height="18" rx="1.5" fill="var(--brand-border)" />
+                  <rect x="30" y="8" width="8" height="22" rx="1.5" fill="var(--brand)" />
+                  <rect x="43" y="4" width="8" height="26" rx="1.5" fill="var(--brand)" />
+                </svg>
+              </div>
+            </div>
+
+            <div class="kpi-card">
+              <div class="kpi-meta">
+                <span class="kpi-label">近 7 日核查工单量</span>
+                <div class="kpi-value-line">
+                  <span class="kpi-big">862</span>
+                  <span class="kpi-unit">单</span>
+                  <span class="kpi-trend">▲ +18.4%</span>
+                </div>
+                <span class="num" style="font-size: 11px; color: var(--text-3)">线上 API 自动触发占比 94.2%</span>
+              </div>
+              <div class="kpi-viz">
+                <svg width="76" height="32" viewBox="0 0 76 32" fill="none">
+                  <polyline points="2,26 14,22 26,24 38,15 50,17 62,8 74,5" stroke="var(--brand)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                  <circle cx="74" cy="5" r="3" fill="var(--brand)" />
+                </svg>
+              </div>
+            </div>
+
+            <div class="kpi-card">
+              <div class="kpi-meta">
+                <span class="kpi-label">字段证据自动命中率</span>
+                <div class="kpi-value-line">
+                  <span class="kpi-big">98.8%</span>
+                  <span class="kpi-trend">达标</span>
+                </div>
+                <span class="num" style="font-size: 11px; color: var(--text-3)">原文引用 74% · 规则推导 26%</span>
+              </div>
+              <div class="kpi-viz">
+                <svg width="38" height="38" viewBox="0 0 38 38">
+                  <circle cx="19" cy="19" r="15" fill="none" stroke="var(--recessed-bg)" stroke-width="4" />
+                  <circle cx="19" cy="19" r="15" fill="none" stroke="var(--ok)" stroke-width="4" stroke-dasharray="92 100" stroke-linecap="round" transform="rotate(-90 19 19)" />
+                </svg>
+              </div>
+            </div>
+
+            <div class="kpi-card">
+              <div class="kpi-meta">
+                <span class="kpi-label">单均核查成稿耗时</span>
+                <div class="kpi-value-line">
+                  <span class="kpi-big">14.2</span>
+                  <span class="kpi-unit">秒</span>
+                </div>
+                <span class="num" style="font-size: 11px; color: var(--text-3)">平均调用 2.1 次 CRM 业务接口</span>
+              </div>
+              <div class="kpi-viz">
+                <svg width="72" height="32" viewBox="0 0 72 32" fill="none">
+                  <polyline points="2,10 15,14 28,13 41,18 54,17 70,21" stroke="var(--ok)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                  <circle cx="70" cy="21" r="3" fill="var(--ok)" />
+                </svg>
+              </div>
+            </div>
+          </div>
+
+          <!-- 模板数据主表 -->
+          <div class="main-table-card">
+            <div class="card-toolbar">
+              <div style="display: flex; align-items: center; gap: 12px">
+                <div class="seg-group">
+                  <button class="seg-item active">全部模板 <span class="num">4</span></button>
+                  <button class="seg-item">已上线 <span class="num">3</span></button>
+                  <button class="seg-item">含待发草稿 <span class="num">1</span></button>
+                  <button class="seg-item">草稿 <span class="num">1</span></button>
+                </div>
+                <span style="font-size: 12px; color: var(--text-3)">点击任意模板行可查看「双栏模板编排与 4 阶证据溯源报告」 →</span>
+              </div>
+
+              <div style="display: flex; align-items: center; gap: 8px">
+                <button class="btn">刷新数据</button>
+                <button class="btn">从已有模板复制</button>
+                <button class="btn btn-primary">+ 新建核查模板</button>
+              </div>
+            </div>
+
+            <div class="table-scroll-area">
+              <table class="enterprise-table">
+                <thead>
+                  <tr>
+                    <th style="width: 92px">模板编号</th>
+                    <th style="width: 230px">模板名称与核查范围</th>
+                    <th style="width: 155px">当前状态</th>
+                    <th>关联核查 Skill</th>
+                    <th style="width: 72px">基准用例</th>
+                    <th style="width: 195px">近 7 日准确率 / 运行量</th>
+                    <th style="width: 140px">最近发布信息</th>
+                    <th style="width: 130px; text-align: right">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr onclick="openStage('wb')">
+                    <td><span class="id-pill">1001</span></td>
+                    <td>
+                      <div class="name-primary">业务办理争议类</div>
+                      <div class="name-desc">套餐订购、服务密码鉴权与二次确认短信核查</div>
+                    </td>
+                    <td><span class="status-tag pub-draft">● 已发布（含草稿）</span></td>
+                    <td>
+                      <div class="skill-wrap">
+                        <span class="skill-badge">办理短信核查</span>
+                        <span class="skill-badge">账单资费核查</span>
+                      </div>
+                    </td>
+                    <td class="num">5 个</td>
+                    <td>
+                      <div class="accuracy-box num">
+                        <div class="progress-track"><div class="progress-fill" style="width: 98.8%"></div></div>
+                        <strong>98.8%</strong>
+                        <span style="color: var(--text-3); font-size: 11.5px">482单</span>
+                      </div>
+                    </td>
+                    <td class="num" style="font-size: 12px">
+                      11-11 10:00
+                      <div style="font-family: var(--font-sans); font-size: 11px; color: var(--text-3)">陈晓芸 · r43</div>
+                    </td>
+                    <td style="text-align: right">
+                      <div class="action-links">
+                        <span class="link-btn">编排</span>
+                        <span class="link-btn">试运行</span>
+                        <span class="link-btn" style="color: var(--text-3)">复制</span>
+                      </div>
+                    </td>
+                  </tr>
+
+                  <tr onclick="openStage('wb')">
+                    <td><span class="id-pill">1002</span></td>
+                    <td>
+                      <div class="name-primary">套餐资费退费争议类</div>
+                      <div class="name-desc">月度出账明细、营销减免合约与标准资费核对</div>
+                    </td>
+                    <td><span class="status-tag pub">● 已发布（r43）</span></td>
+                    <td>
+                      <div class="skill-wrap">
+                        <span class="skill-badge">账单资费核查</span>
+                      </div>
+                    </td>
+                    <td class="num">3 个</td>
+                    <td>
+                      <div class="accuracy-box num">
+                        <div class="progress-track"><div class="progress-fill" style="width: 99.1%"></div></div>
+                        <strong>99.1%</strong>
+                        <span style="color: var(--text-3); font-size: 11.5px">216单</span>
+                      </div>
+                    </td>
+                    <td class="num" style="font-size: 12px">
+                      11-09 15:20
+                      <div style="font-family: var(--font-sans); font-size: 11px; color: var(--text-3)">李明哲 · r42</div>
+                    </td>
+                    <td style="text-align: right">
+                      <div class="action-links">
+                        <span class="link-btn">编排</span>
+                        <span class="link-btn">试运行</span>
+                        <span class="link-btn" style="color: var(--text-3)">复制</span>
+                      </div>
+                    </td>
+                  </tr>
+
+                  <tr onclick="openStage('wb')">
+                    <td><span class="id-pill">1003</span></td>
+                    <td>
+                      <div class="name-primary">增值业务退订核查类</div>
+                      <div class="name-desc">掌厅动态验证码凭据、订购告知与退订时间核验</div>
+                    </td>
+                    <td><span class="status-tag pub">● 已发布（r43）</span></td>
+                    <td>
+                      <div class="skill-wrap">
+                        <span class="skill-badge">增值订购核查</span>
+                        <span class="skill-badge">验证码日志核查</span>
+                      </div>
+                    </td>
+                    <td class="num">4 个</td>
+                    <td>
+                      <div class="accuracy-box num">
+                        <div class="progress-track"><div class="progress-fill" style="width: 97.6%"></div></div>
+                        <strong>97.6%</strong>
+                        <span style="color: var(--text-3); font-size: 11.5px">164单</span>
+                      </div>
+                    </td>
+                    <td class="num" style="font-size: 12px">
+                      11-06 09:40
+                      <div style="font-family: var(--font-sans); font-size: 11px; color: var(--text-3)">陈晓芸 · r41</div>
+                    </td>
+                    <td style="text-align: right">
+                      <div class="action-links">
+                        <span class="link-btn">编排</span>
+                        <span class="link-btn">试运行</span>
+                        <span class="link-btn" style="color: var(--text-3)">复制</span>
+                      </div>
+                    </td>
+                  </tr>
+
+                  <tr onclick="openStage('wb')">
+                    <td><span class="id-pill" style="color: var(--text-3); border-color: var(--border-mid); background: var(--subtle-bg)">1004</span></td>
+                    <td>
+                      <div class="name-primary">宽带装维履约超时核查类</div>
+                      <div class="name-desc">预约上门时段、改约记录与装维回单轨迹核查</div>
+                    </td>
+                    <td><span class="status-tag draft">○ 草稿待验证</span></td>
+                    <td>
+                      <div class="skill-wrap">
+                        <span class="skill-badge">装维工单轨迹</span>
+                      </div>
+                    </td>
+                    <td class="num">2 个</td>
+                    <td>
+                      <span style="color: var(--text-4); font-size: 12px">尚未上线运行</span>
+                    </td>
+                    <td style="font-size: 12px; color: var(--text-4)">
+                      未发布
+                      <div style="font-size: 11px; color: var(--text-3)">管理员</div>
+                    </td>
+                    <td style="text-align: right">
+                      <div class="action-links">
+                        <span class="link-btn">编排</span>
+                        <span class="link-btn">试运行</span>
+                        <span class="link-btn" style="color: var(--text-3)">复制</span>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- ==================== 视图 2：模板编排工作台 + 4 阶智能体取证链路预览 ==================== -->
+        <section class="page-stage" id="stage-wb">
+          <div class="wb-card-head">
+            <div class="wb-top-bar">
+              <div style="display: flex; align-items: center; gap: 10px">
+                <button class="btn" onclick="openStage('list')">← 返回列表</button>
+                <span class="id-pill">1001</span>
+                <strong style="font-size: 16px">业务办理争议类</strong>
+                <span class="status-tag pub-draft">● 已发布（含未发草稿）</span>
+              </div>
+
+              <div style="display: flex; align-items: center; gap: 8px">
+                <button class="btn">保存草稿 <span class="shortcut-key">⌘S</span></button>
+                <button class="btn">模板语法校验</button>
+                <button class="btn">▷ 在线试运行</button>
+                <button class="btn btn-primary">发布至生产环境</button>
+              </div>
+            </div>
+
+            <div class="wb-tabs-row">
+              <button class="wb-tab active">正文模板编排</button>
+              <button class="wb-tab">字段取证规则 <span class="tab-badge">17</span></button>
+              <button class="wb-tab">输入参数契约 <span class="tab-badge">4</span></button>
+              <button class="wb-tab">关联核查 Skill <span class="tab-badge">2</span></button>
+              <button class="wb-tab">回归测试用例 <span class="tab-badge">5</span></button>
+              <button class="wb-tab">试运行与证据定位</button>
+              <button class="wb-tab">版本变更历史 <span class="tab-badge">5</span></button>
+            </div>
+          </div>
+
+          <div class="wb-dual-grid">
+            <!-- 左侧：规范 Jinja2 模板编辑器 -->
+            <div class="editor-card">
+              <div class="sub-card-head">
+                <span>正文模板编辑器（Jinja2 语法）</span>
+                <span style="font-size: 11.5px; font-weight: 400; color: var(--text-3)">输入 {{ 唤出字段变量补全 · 支持跨模板引用</span>
+              </div>
+              <div class="code-body">
+                <div class="code-ln"><span class="ln-no">1</span><span><span class="j2-tag">{% if 争议类型 == "业务办理" %}</span></span></div>
+                <div class="code-ln"><span class="ln-no">2</span><span>服务争议点1：业务办理争议类</span></div>
+                <div class="code-ln"><span class="ln-no">3</span><span>&nbsp;</span></div>
+                <div class="code-ln"><span class="ln-no">4</span><span>经核查，客户号码办理业务/套餐如下：</span></div>
+                <div class="code-ln cur"><span class="ln-no">5</span><span><span class="j2-slot">{{受理日期}}</span>通过<span class="j2-slot">{{受理方式}}</span>经<span class="j2-slot">{{鉴权方式}}</span>办理“<span class="j2-slot">{{商品名称}}</span>”，</span></div>
+                <div class="code-ln"><span class="ln-no">6</span><span>资费结构：标准资费<span class="j2-slot">{{标准资费}}</span>，套餐包含：<span class="j2-slot">{{业务套餐内容}}</span>。</span></div>
+                <div class="code-ln"><span class="ln-no">7</span><span>&nbsp;</span></div>
+                <div class="code-ln"><span class="ln-no">8</span><span><span class="j2-tag">{% if 受理方式 == "热线" %}</span></span></div>
+                <div class="code-ln"><span class="ln-no">9</span><span>本次业务通过短信二次确认方式办理，系统下发确认短信如下：</span></div>
+                <div class="code-ln"><span class="ln-no">10</span><span><span class="j2-slot">{{二次确认短信}}</span></span></div>
+                <div class="code-ln"><span class="ln-no">11</span><span><span class="j2-tag">{% endif %}</span></span></div>
+                <div class="code-ln"><span class="ln-no">12</span><span>&nbsp;</span></div>
+                <div class="code-ln"><span class="ln-no">13</span><span>业务办理成功后，我公司已下发成功办理告知短信：</span></div>
+                <div class="code-ln"><span class="ln-no">14</span><span><span class="j2-slot">{{订购告知短信}}</span></span></div>
+                <div class="code-ln"><span class="ln-no">15</span><span><span class="j2-tag">{% endif %}</span></span></div>
+              </div>
+            </div>
+
+            <!-- 右侧：4 阶智能体取证链路 + 正式申告核查单据纸面 -->
+            <div class="editor-card">
+              <div class="sub-card-head">
+                <span>核查报告成稿与证据溯源预览（悬浮字段查看 Key 与取证来源）</span>
+                <span class="num" style="font-size: 12px; color: var(--ok)">已溯源 7 / 8 项</span>
+              </div>
+              <div class="report-stage">
+                <svg class="stage-dots" xmlns="http://www.w3.org/2000/svg">
+                  <defs>
+                    <pattern id="eng-grid" width="18" height="18" patternUnits="userSpaceOnUse">
+                      <circle cx="2" cy="2" r="1" fill="var(--grid-dot)" />
+                    </pattern>
+                  </defs>
+                  <rect width="100%" height="100%" fill="url(#eng-grid)" />
+                </svg>
+
+                <!-- 可解释 AI 4 阶取证执行拓扑条 -->
+                <div class="pipeline-bar">
+                  <span class="pipe-step"><span class="pipe-idx">1</span>入参校验(4项)</span>
+                  <span class="pipe-arrow">→</span>
+                  <span class="pipe-step"><span class="pipe-idx">2</span>Skill调度(短信核查)</span>
+                  <span class="pipe-arrow">→</span>
+                  <span class="pipe-step"><span class="pipe-idx">3</span>CRM接口取证(118ms)</span>
+                  <span class="pipe-arrow">→</span>
+                  <span class="pipe-step" style="color: var(--ok)"><span class="pipe-idx" style="color: var(--ok); border-color: var(--ok-border); background: var(--ok-soft)">✓</span>成稿核验通过</span>
+                </div>
+
+                <!-- 正式电信申告核查单据 -->
+                <article class="official-report-sheet">
+                  <div class="sheet-doc-meta num">
+                    <span>工单核查流水：2026111116140469760bojew</span>
+                    <span>核查基线：1001 · r43 生产标准版</span>
+                  </div>
+                  <p><strong style="font-size: 14.5px">服务争议点1：业务办理争议类</strong></p>
+                  <p>经核查，客户号码办理业务/套餐如下：</p>
+                  <p>
+                    <span class="ev-span focus" data-key="受理日期" data-src="入参推导 · 业务月份">2026年11月5号<span class="ev-src-tag">推导</span></span>
+                    通过
+                    <span class="ev-span" data-key="受理方式" data-src="CRM接口 querySMSSendInfo 第1行">热线<span class="ev-src-tag">CRM接口</span></span>
+                    经
+                    <span class="ev-span unfound" data-key="鉴权方式" data-src="未检索到鉴权凭据（按规则保留占位）">{{鉴权方式}}</span>
+                    办理“<span class="ev-span" data-key="商品名称" data-src="工单原文 · 第3行">5G智享套餐（个人版）<span class="ev-src-tag">单据L3</span></span>”，资费结构：标准资费
+                    <span class="ev-span" data-key="标准资费" data-src="工单原文 · 第4行">129元/月<span class="ev-src-tag">单据L4</span></span>，套餐包含：
+                    <span class="ev-span" data-key="业务套餐内容" data-src="工单原文 · 第5行">国内通用流量40GB、国内通话500分钟<span class="ev-src-tag">单据L5</span></span>。
+                  </p>
+                  <p style="margin-bottom: 0">
+                    本次业务通过短信二次确认方式办理，系统下发确认短信如下：<br />
+                    <span class="ev-span" data-key="二次确认短信" data-src="CRM接口 querySMSSendInfo #1">【订购确认提醒】尊敬的客户，您正在通过热线办理5G智享套餐，请24小时内回复“是”确认办理。<span class="ev-src-tag">短信记录#1</span></span>
+                  </p>
+                </article>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- 底部悬浮切换台：4 套专为中国移动政企生产打造的「正式+科技」方案 -->
+  <div class="scheme-dock">
+    <span class="dock-lbl">风格选型</span>
+    <button class="dock-btn active" data-p="navy" onclick="selectPreset('navy')">
+      <span class="dock-swatch" style="background: #0b1426"></span>
+      <span>1 · 深海领航舱（推荐）</span>
+    </button>
+    <button class="dock-btn" data-p="cloud" onclick="selectPreset('cloud')">
+      <span class="dock-swatch" style="background: #e9eef5"></span>
+      <span>2 · 极昼云原生</span>
+    </button>
+    <button class="dock-btn" data-p="noc" onclick="selectPreset('noc')">
+      <span class="dock-swatch" style="background: #2b7fff"></span>
+      <span>3 · 省网指挥大屏（深色）</span>
+    </button>
+    <button class="dock-btn" data-p="audit" onclick="selectPreset('audit')">
+      <span class="dock-swatch" style="background: #161920"></span>
+      <span>4 · 稽核卷宗金石</span>
+    </button>
+    <span class="dock-sep"></span>
+    <button class="dock-toggle" id="stage-btn" onclick="toggleStage()">查看编排与溯源工作台 ▷</button>
+  </div>
+
+  <script>
+    let activeStage = 'list'
+
+    function selectPreset(p) {
+      document.documentElement.setAttribute('data-preset', p)
+      document.querySelectorAll('.dock-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.p === p)
+      })
+    }
+
+    function openStage(s, btn) {
+      activeStage = s
+      const isWb = s === 'wb'
+      document.getElementById('stage-list').classList.toggle('active', !isWb)
+      document.getElementById('stage-wb').classList.toggle('active', isWb)
+      document.getElementById('bc-sep').style.display = isWb ? 'inline' : 'none'
+      document.getElementById('bc-sub').textContent = isWb ? '1001 业务办理争议类' : '模板编排总览'
+      document.getElementById('stage-btn').textContent = isWb ? '◁ 返回数智总览列表' : '查看编排与溯源工作台 ▷'
+
+      document.querySelectorAll('.menu-btn').forEach(m => m.classList.remove('active'))
+      if (btn) {
+        btn.classList.add('active')
+      } else {
+        document.querySelector('.menu-btn[data-nav="tpl"]').classList.add('active')
+      }
+    }
+
+    function toggleStage() {
+      openStage(activeStage === 'list' ? 'wb' : 'list')
+    }
+
+    document.querySelectorAll('.wb-tab').forEach(t => {
+      t.addEventListener('click', () => {
+        document.querySelectorAll('.wb-tab').forEach(x => x.classList.remove('active'))
+        t.classList.add('active')
+      })
+    })
+
+    document.querySelectorAll('.seg-item').forEach(t => {
+      t.addEventListener('click', () => {
+        document.querySelectorAll('.seg-item').forEach(x => x.classList.remove('active'))
+        t.classList.add('active')
+      })
+    })
+
+    window.addEventListener('keydown', e => {
+      if (e.key === '1') selectPreset('navy')
+      if (e.key === '2') selectPreset('cloud')
+      if (e.key === '3') selectPreset('noc')
+      if (e.key === '4') selectPreset('audit')
+    })
+  </script>
+</body>
+</html>

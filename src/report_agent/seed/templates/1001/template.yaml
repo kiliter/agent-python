@@ -1,0 +1,100 @@
+# #Created By AiCoding(codex) 示例模板：业务办理争议类
+id: 1001
+name: 业务办理争议类
+description: 客户对已办理的业务、套餐或营销活动有争议时，说明办理时间、渠道、鉴权方式、资费与确认短信。
+skills:
+  - business-sms-check
+  - document-match
+inputs:
+  - key: 手机号码
+    required: true
+    pattern: '^1\d{10}$'
+    description: 客户手机号，11 位
+    sample: '13900001234'
+  - key: 业务名称
+    required: true
+    description: 本次争议的业务、套餐或活动名称
+    sample: 5G智享套餐（个人版）
+  - key: 创建时间
+    required: true
+    pattern: '^\d{14}$'
+    description: 工单创建时间 yyyyMMddHHmmss，短信按这一天查询
+    sample: '20261105103012'
+  - key: 业务月份
+    required: false
+    pattern: '^\d{8}$'
+    description: 业务办理日期 yyyyMMdd；热线、掌上营业厅办理时用作受理日期
+    sample: '20261105'
+fields:
+  - name: 订购短信
+    evidence: quote
+    quoteWhole: true
+    description: 本次业务办理成功后下发给客户的告知短信正文，必须原样引用，不得删改任何字符。
+  - name: 二次确认短信
+    evidence: quote
+    quoteWhole: true
+    description: 本次业务的二次确认短信正文（客户需回复确认的那条），原样引用。
+  - name: 验证码短信
+    evidence: quote
+    quoteWhole: true
+    description: 本次业务的验证码短信正文，原样引用。
+  - name: 受理渠道
+    visible: false
+    type: enum
+    values: [热线, 掌上营业厅, 其他]
+    evidence: derive
+    whenMissing: value
+    defaultValue: 其他
+    description: 根据订购短信判断办理渠道，判断方法见 Skill business-sms-check。模板用它决定展示二次确认短信还是验证码短信。
+  - name: 争议类型
+    visible: false
+    type: enum
+    values: [业务, 营销活动]
+    evidence: derive
+    whenMissing: value
+    defaultValue: 业务
+    description: 单据或订购短信表明办理的是营销活动、优惠活动（有活动时间、活动内容、违约责任等）时为“营销活动”，否则为“业务”。模板据此选择正文段落。
+  - name: 受理网点
+    visible: false
+    evidence: quote
+    whenMissing: empty
+    description: 单据中的受理网点或营业厅名称；单据不属于本次业务时为空。
+  - name: 鉴权方式
+    evidence: quote
+    description: 单据中记录的客户身份鉴权方式，如“服务密码”“短信验证码”“身份证”。
+  - name: 标准资费
+    evidence: quote
+    description: 取到“xx元/月”。优先从属于本次业务的单据中取；单据中没有时，从订购短信中取。
+  - name: 业务套餐内容
+    evidence: quote
+    description: 单据中本业务或套餐包含的内容。
+  - name: 活动时间
+    evidence: quote
+    description: 营销活动的起止时间。
+  - name: 活动内容
+    evidence: quote
+    description: 营销活动内容。
+  - name: 客户承诺
+    evidence: quote
+    description: 客户在活动中承诺的条件与违约责任。
+  - name: 商品名称
+    evidence: input
+    description: 等于入参“业务名称”。
+  - name: 受理日期
+    type: date
+    format: yyyy年M月d号
+    evidence: derive
+    description: 受理渠道为“热线”或“掌上营业厅”时，取入参“业务月份”用 format_date 转换为“yyyy年M月d号”（如 20261005 → 2026年10月5号）；业务月份缺失或格式不对时找不到。其他渠道只从属于本次业务的单据中取受理日期。任何情况下都不得使用短信发送时间、创建时间或其他日期代替。
+  - name: 受理方式
+    evidence: derive
+    description: 受理网点不为空时填受理网点，否则填受理渠道。
+  - name: 是否录音
+    type: enum
+    values: ['|录音', '|其他']
+    evidence: derive
+    whenMissing: value
+    defaultValue: '|其他'
+    description: 受理渠道为“热线”时填“|录音”，否则填“|其他”。
+  - name: 业务名称
+    evidence: input
+    description: 等于入参“业务名称”。

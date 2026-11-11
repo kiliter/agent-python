@@ -1,0 +1,4594 @@
+<!DOCTYPE html>
+<!-- #Created By AiCoding(codex) 智能申告核查平台 · 核查模板专业 IDE 工作台高保真可交互原型（对标 IDEA / VS Code + 中国移动政企双主题） -->
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" href="data:," />
+  <title>模板工作台 IDE 高保真原型 · 智能申告核查平台</title>
+  <style>
+    /* ==========================================================================
+       1. 双主题设计令牌（亮色「极昼云原生」 + 暗色「省网指挥大屏」）
+       严守铁律：纯色平面表面、清晰 1px 建筑分割线、零阴影泛滥、零模糊
+       ========================================================================== */
+    :root {
+      --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+      --font-mono: "JetBrains Mono", "SF Mono", "DIN Alternate", "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+
+      --left-panel-w: 192px;
+      --right-panel-w: 288px;
+      --debug-pane-h: 278px;
+    }
+
+    html[data-theme="light"] {
+      --body-bg: #e9eef5;
+      --rail-bg: #e9eef5;
+      --rail-border: #d5dfec;
+      --rail-group: #6e7d94;
+      --rail-fg: #3b4961;
+      --rail-fg-hover: #0c1524;
+      --rail-hover-bg: rgba(12, 21, 36, 0.055);
+      --rail-active-bg: #ffffff;
+      --rail-active-border: #cfd8e6;
+      --rail-active-fg: #0052d9;
+      --rail-bar: #0052d9;
+      --rail-badge-bg: #dde4ef;
+      --rail-badge-fg: #4b5b75;
+      --rail-title: #0c1524;
+      --rail-sub: #6b7a91;
+
+      --topbar-bg: #ffffff;
+      --card-bg: #ffffff;
+      --subtle-bg: #f7f9fc;
+      --recessed-bg: #eef2f8;
+      --ide-bar-bg: #f3f6fb;
+      --editor-bg: #fcfdff;
+      --editor-gutter-bg: #f4f7fc;
+      --editor-active-line: #edf4ff;
+      --hover-row: #f2f6fe;
+      --selected-row: #e8f1ff;
+
+      --border-light: #e6ecf5;
+      --border-mid: #d5dfec;
+      --border-strong: #b9c7dc;
+      --grid-dot: rgba(0, 82, 217, 0.11);
+
+      --text-1: #0c1524;
+      --text-2: #3d4b63;
+      --text-3: #6c7c95;
+      --text-4: #96a4b8;
+
+      --brand: #0052d9;
+      --brand-hover: #003fa8;
+      --brand-soft: #ebf3ff;
+      --brand-border: #bdd4ff;
+      --cta-bg: #0c1524;
+      --cta-hover: #1b2942;
+      --cta-fg: #ffffff;
+
+      --ok: #078855;
+      --ok-soft: #e8f7f0;
+      --ok-border: #b6e6d0;
+      --warn: #c86906;
+      --warn-soft: #fef5e7;
+      --warn-border: #f7d7a8;
+      --err: #cf2a2a;
+      --err-soft: #fdeeee;
+      --err-border: #f5c2c2;
+      --purple: #5b3cc4;
+      --purple-soft: #f2effc;
+      --purple-border: #d5ccf5;
+
+      --hl-bg: #fff2b2;
+      --hl-line: #d49b0b;
+      --diff-add-bg: #e8f8ef;
+      --diff-add-fg: #0b6e43;
+      --diff-del-bg: #fdeeee;
+      --diff-del-fg: #b82525;
+
+      --tooltip-bg: #ffffff;
+      --tooltip-border: #0052d9;
+      --tooltip-shadow: 0 6px 18px rgba(12, 21, 36, 0.12);
+      --popup-shadow: 0 8px 24px rgba(12, 21, 36, 0.14);
+
+      --shell-pad: 6px 6px 6px 0;
+      --deck-radius: 10px;
+      --deck-border: 1px solid #d0dceb;
+      --statusbar-bg: #eef3fa;
+      --statusbar-fg: #3d4b63;
+    }
+
+    html[data-theme="dark"] {
+      --body-bg: #080d17;
+      --rail-bg: #0a111e;
+      --rail-border: #182438;
+      --rail-group: #526685;
+      --rail-fg: #8fa3c2;
+      --rail-fg-hover: #f0f5fc;
+      --rail-hover-bg: rgba(59, 138, 255, 0.09);
+      --rail-active-bg: #122038;
+      --rail-active-border: #233c66;
+      --rail-active-fg: #ffffff;
+      --rail-bar: #2b7fff;
+      --rail-badge-bg: #131f33;
+      --rail-badge-fg: #7e94b5;
+      --rail-title: #f0f5fc;
+      --rail-sub: #5b7194;
+
+      --topbar-bg: #0d1525;
+      --card-bg: #101a2c;
+      --subtle-bg: #0c1422;
+      --recessed-bg: #09101c;
+      --ide-bar-bg: #0b1322;
+      --editor-bg: #0b1320;
+      --editor-gutter-bg: #09101c;
+      --editor-active-line: #13223b;
+      --hover-row: rgba(43, 127, 255, 0.08);
+      --selected-row: rgba(59, 138, 255, 0.17);
+
+      --border-light: #18253b;
+      --border-mid: #20314d;
+      --border-strong: #2f4870;
+      --grid-dot: rgba(59, 138, 255, 0.16);
+
+      --text-1: #ebf2fc;
+      --text-2: #9eb1cc;
+      --text-3: #687d9c;
+      --text-4: #465975;
+
+      --brand: #3b8aff;
+      --brand-hover: #5ca0ff;
+      --brand-soft: rgba(59, 138, 255, 0.15);
+      --brand-border: rgba(59, 138, 255, 0.38);
+      --cta-bg: #2b7fff;
+      --cta-hover: #428dff;
+      --cta-fg: #ffffff;
+
+      --ok: #19be7d;
+      --ok-soft: rgba(25, 190, 125, 0.14);
+      --ok-border: rgba(25, 190, 125, 0.36);
+      --warn: #f59e0b;
+      --warn-soft: rgba(245, 158, 11, 0.15);
+      --warn-border: rgba(245, 158, 11, 0.36);
+      --err: #f87171;
+      --err-soft: rgba(248, 113, 113, 0.14);
+      --err-border: rgba(248, 113, 113, 0.36);
+      --purple: #a78bfa;
+      --purple-soft: rgba(167, 139, 250, 0.14);
+      --purple-border: rgba(167, 139, 250, 0.35);
+
+      --hl-bg: rgba(245, 179, 11, 0.24);
+      --hl-line: #f59e0b;
+      --diff-add-bg: rgba(25, 190, 125, 0.15);
+      --diff-add-fg: #4ade80;
+      --diff-del-bg: rgba(248, 113, 113, 0.15);
+      --diff-del-fg: #fca5a5;
+
+      --tooltip-bg: #142038;
+      --tooltip-border: #3b8aff;
+      --tooltip-shadow: 0 8px 22px rgba(0, 0, 0, 0.48);
+      --popup-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+
+      --shell-pad: 0;
+      --deck-radius: 0px;
+      --deck-border: none;
+      --statusbar-bg: #09101d;
+      --statusbar-fg: #8fa3c2;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body {
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      font-family: var(--font-sans);
+      font-size: 12.5px;
+      line-height: 1.45;
+      color: var(--text-1);
+      background: var(--body-bg);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body.is-resizing-col {
+      cursor: col-resize !important;
+      user-select: none !important;
+    }
+
+    body.is-resizing-row {
+      cursor: row-resize !important;
+      user-select: none !important;
+    }
+
+    .mono {
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+    }
+
+    button, select, input, textarea {
+      font-family: inherit;
+      font-size: inherit;
+      color: inherit;
+    }
+
+    button {
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    /* 细滚动条样式 */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: var(--border-strong);
+      border-radius: 3px;
+    }
+
+    /* ==========================================================================
+       2. 外层平台壳层（支持「带左侧平台主菜单栏」与「全屏专注 IDE」一键切换）
+       ========================================================================== */
+    .app-shell {
+      display: flex;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: var(--body-bg);
+    }
+
+    .platform-rail {
+      width: 158px;
+      background: var(--rail-bg);
+      border-right: 1px solid var(--rail-border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      user-select: none;
+      transition: width 0.16s ease;
+    }
+
+    .platform-rail.is-collapsed {
+      width: 52px;
+    }
+
+    .rail-brand {
+      height: 42px;
+      padding: 0 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--rail-border);
+      gap: 6px;
+    }
+
+    .rail-brand-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--rail-title);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .rail-brand-short {
+      display: none;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--brand);
+      margin: 0 auto;
+    }
+
+    .platform-rail.is-collapsed .rail-brand-title,
+    .platform-rail.is-collapsed .rail-ver-pill,
+    .platform-rail.is-collapsed .p-nav-label,
+    .platform-rail.is-collapsed .p-nav-group-title,
+    .platform-rail.is-collapsed .p-nav-count {
+      display: none;
+    }
+
+    .platform-rail.is-collapsed .rail-brand-short {
+      display: inline-block;
+    }
+
+    .rail-ver-pill {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 1px 6px;
+      border-radius: 3px;
+      background: var(--rail-badge-bg);
+      color: var(--rail-badge-fg);
+      border: 1px solid var(--border-mid);
+      flex-shrink: 0;
+    }
+
+    .p-nav-scroll {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 8px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .p-nav-group {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .p-nav-group-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--rail-group);
+      padding: 2px 8px 4px;
+    }
+
+    .p-nav-btn {
+      appearance: none;
+      border: 1px solid transparent;
+      background: transparent;
+      height: 31px;
+      padding: 0 8px;
+      border-radius: 5px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--rail-fg);
+      cursor: pointer;
+      position: relative;
+      text-align: left;
+    }
+
+    .platform-rail.is-collapsed .p-nav-btn {
+      justify-content: center;
+      padding: 0;
+    }
+
+    .p-nav-btn:hover {
+      background: var(--rail-hover-bg);
+      color: var(--rail-fg-hover);
+    }
+
+    .p-nav-btn.active {
+      background: var(--rail-active-bg);
+      border-color: var(--rail-active-border);
+      color: var(--rail-active-fg);
+      font-weight: 600;
+    }
+
+    .p-nav-btn.active::before {
+      content: "";
+      position: absolute;
+      left: -1px;
+      top: 6px;
+      bottom: 6px;
+      width: 3px;
+      border-radius: 0 2px 2px 0;
+      background: var(--rail-bar);
+    }
+
+    .p-nav-icon {
+      width: 15px;
+      height: 15px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .p-nav-label {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-size: 12.5px;
+    }
+
+    .p-nav-count {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 0 5px;
+      border-radius: 99px;
+      background: var(--rail-badge-bg);
+      color: var(--rail-badge-fg);
+    }
+
+    .rail-foot {
+      padding: 8px;
+      border-top: 1px solid var(--rail-border);
+    }
+
+    .rail-collapse-btn {
+      width: 100%;
+      height: 28px;
+      border: 1px solid var(--border-mid);
+      background: var(--subtle-bg);
+      color: var(--text-2);
+      border-radius: 4px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      font-size: 12px;
+    }
+
+    .rail-collapse-btn:hover {
+      border-color: var(--brand);
+      color: var(--brand);
+    }
+
+    /* 主工作舱包裹层 */
+    .main-wrapper {
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      padding: var(--shell-pad);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .main-deck {
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      background: var(--card-bg);
+      border: var(--deck-border);
+      border-radius: var(--deck-radius);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* 全屏专注 IDE 视口态：隐藏外层平台菜单栏与平台顶栏，100vw x 100vh 零边距铺满 */
+    .app-shell.is-focus-fullscreen .platform-rail,
+    .app-shell.is-focus-fullscreen .platform-topbar {
+      display: none !important;
+    }
+
+    .app-shell.is-focus-fullscreen .main-wrapper {
+      padding: 0 !important;
+    }
+
+    .app-shell.is-focus-fullscreen .main-deck {
+      border: none !important;
+      border-radius: 0 !important;
+    }
+
+    /* 外层平台顶栏（含双主题切换与视口态模拟切换） */
+    .platform-topbar {
+      height: 38px;
+      padding: 0 12px;
+      background: var(--topbar-bg);
+      border-bottom: 1px solid var(--border-mid);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+
+    .topbar-left,
+    .topbar-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .bc-trail {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12.5px;
+      white-space: nowrap;
+    }
+
+    .bc-muted {
+      color: var(--text-3);
+      cursor: pointer;
+    }
+
+    .bc-muted:hover {
+      color: var(--brand);
+    }
+
+    .bc-active {
+      font-weight: 600;
+      color: var(--text-1);
+    }
+
+    .proto-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 2px 8px;
+      border-radius: 3px;
+      background: var(--brand-soft);
+      border: 1px solid var(--brand-border);
+      color: var(--brand);
+      font-size: 11.5px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .seg-switch {
+      display: inline-flex;
+      align-items: center;
+      background: var(--recessed-bg);
+      border: 1px solid var(--border-mid);
+      border-radius: 4px;
+      padding: 1px;
+      gap: 1px;
+      flex-shrink: 0;
+    }
+
+    .seg-btn {
+      appearance: none;
+      border: none;
+      background: transparent;
+      height: 24px;
+      padding: 0 9px;
+      border-radius: 3px;
+      font-size: 12px;
+      color: var(--text-2);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-weight: 500;
+    }
+
+    .seg-btn:hover {
+      color: var(--text-1);
+    }
+
+    .seg-btn.active {
+      background: var(--card-bg);
+      color: var(--brand);
+      font-weight: 600;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+    }
+
+    html[data-theme="dark"] .seg-btn.active {
+      background: var(--rail-active-bg);
+      color: #ffffff;
+    }
+
+    /* ==========================================================================
+       3. 核心通用按钮与表单控件
+       ========================================================================== */
+    .ide-btn {
+      appearance: none;
+      height: 26px;
+      padding: 0 8px;
+      border-radius: 4px;
+      border: 1px solid var(--border-mid);
+      background: var(--card-bg);
+      color: var(--text-1);
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      white-space: nowrap;
+      flex-shrink: 0;
+      transition: border-color 0.12s, background-color 0.12s, color 0.12s;
+    }
+
+    .ide-btn:hover {
+      border-color: var(--brand);
+      color: var(--brand);
+      background: var(--hover-row);
+    }
+
+    .ide-btn.is-active {
+      background: var(--brand-soft);
+      border-color: var(--brand);
+      color: var(--brand);
+      font-weight: 600;
+    }
+
+    .ide-btn-primary {
+      background: var(--cta-bg);
+      border-color: var(--cta-bg);
+      color: var(--cta-fg);
+      font-weight: 600;
+    }
+
+    .ide-btn-primary:hover {
+      background: var(--cta-hover);
+      border-color: var(--cta-hover);
+      color: var(--cta-fg);
+    }
+
+    .ide-btn-brand {
+      background: var(--brand);
+      border-color: var(--brand);
+      color: #ffffff;
+      font-weight: 600;
+    }
+
+    .ide-btn-brand:hover {
+      background: var(--brand-hover);
+      border-color: var(--brand-hover);
+      color: #ffffff;
+    }
+
+    .ide-btn-danger {
+      color: var(--err);
+      border-color: var(--err-border);
+      background: var(--err-soft);
+    }
+
+    .ide-btn-danger:hover {
+      border-color: var(--err);
+      color: var(--err);
+    }
+
+    .ide-btn-xs {
+      height: 22px;
+      padding: 0 6px;
+      font-size: 11.5px;
+      border-radius: 3px;
+    }
+
+    .kbd-tag {
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      padding: 0 4px;
+      border-radius: 3px;
+      border: 1px solid var(--border-mid);
+      background: var(--subtle-bg);
+      color: var(--text-3);
+      line-height: 1.35;
+    }
+
+    .ide-input,
+    .ide-select,
+    .ide-textarea {
+      width: 100%;
+      border: 1px solid var(--border-mid);
+      background: var(--card-bg);
+      color: var(--text-1);
+      border-radius: 4px;
+      padding: 5px 8px;
+      font-size: 12px;
+      outline: none;
+      transition: border-color 0.12s;
+    }
+
+    .ide-input:focus,
+    .ide-select:focus,
+    .ide-textarea:focus {
+      border-color: var(--brand);
+    }
+
+    .ide-input,
+    .ide-select {
+      height: 28px;
+      padding: 0 8px;
+    }
+
+    .ide-textarea {
+      resize: vertical;
+      line-height: 1.5;
+    }
+
+    /* ==========================================================================
+       4. 模板 IDE 四大核心分区 + 拖拽分隔条 + 24px 底部状态栏
+       ========================================================================== */
+    .ide-workbench {
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--card-bg);
+    }
+
+    .ide-body {
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      display: flex;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* 拖拽分隔条 */
+    .splitter-v {
+      width: 4px;
+      background: var(--border-light);
+      border-left: 1px solid var(--border-mid);
+      cursor: col-resize;
+      flex-shrink: 0;
+      position: relative;
+      z-index: 5;
+      transition: background-color 0.12s;
+    }
+
+    .splitter-v:hover,
+    .splitter-v.is-dragging {
+      background: var(--brand);
+      border-left-color: var(--brand);
+    }
+
+    .splitter-h {
+      height: 4px;
+      background: var(--border-light);
+      border-top: 1px solid var(--border-mid);
+      cursor: row-resize;
+      flex-shrink: 0;
+      position: relative;
+      z-index: 5;
+      transition: background-color 0.12s;
+    }
+
+    .splitter-h:hover,
+    .splitter-h.is-dragging {
+      background: var(--brand);
+      border-top-color: var(--brand);
+    }
+
+    /* -------------------- 分区 1：左侧区域（竖向双列） -------------------- */
+    .ide-left-zone {
+      display: flex;
+      min-height: 0;
+      flex-shrink: 0;
+      overflow: hidden;
+    }
+
+    /* 左小列：50px 窄切换条（Activity / Tool Window Bar） */
+    .ide-activity-bar {
+      width: 50px;
+      background: var(--ide-bar-bg);
+      border-right: 1px solid var(--border-mid);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 6px 4px;
+      gap: 4px;
+      flex-shrink: 0;
+      user-select: none;
+    }
+
+    .act-back-btn {
+      width: 40px;
+      height: 30px;
+      border-radius: 4px;
+      border: 1px solid var(--border-mid);
+      background: var(--card-bg);
+      color: var(--text-2);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 4px;
+    }
+
+    .act-back-btn:hover {
+      border-color: var(--brand);
+      color: var(--brand);
+    }
+
+    .act-divider {
+      width: 28px;
+      height: 1px;
+      background: var(--border-mid);
+      margin: 2px 0;
+    }
+
+    .act-tab-btn {
+      appearance: none;
+      width: 42px;
+      padding: 6px 2px 5px;
+      border-radius: 5px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--text-2);
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      position: relative;
+    }
+
+    .act-tab-btn:hover {
+      background: var(--hover-row);
+      color: var(--text-1);
+    }
+
+    .act-tab-btn.active {
+      background: var(--card-bg);
+      border-color: var(--border-mid);
+      color: var(--brand);
+      font-weight: 600;
+    }
+
+    .act-tab-btn.active::before {
+      content: "";
+      position: absolute;
+      left: -4px;
+      top: 8px;
+      bottom: 8px;
+      width: 3px;
+      border-radius: 0 2px 2px 0;
+      background: var(--brand);
+    }
+
+    .act-tab-label {
+      font-size: 11px;
+      line-height: 1.15;
+    }
+
+    .act-tab-count {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      padding: 0 4px;
+      border-radius: 99px;
+      background: var(--recessed-bg);
+      color: var(--text-3);
+      line-height: 1.35;
+    }
+
+    .act-tab-btn.active .act-tab-count {
+      background: var(--brand-soft);
+      color: var(--brand);
+    }
+
+    /* 左二列：资源列表面板（Explorer Panel） */
+    .ide-explorer {
+      width: var(--left-panel-w);
+      min-width: 172px;
+      max-width: 360px;
+      background: var(--subtle-bg);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .ide-explorer.is-collapsed {
+      display: none;
+    }
+
+    .explorer-head {
+      height: 36px;
+      padding: 0 8px 0 10px;
+      border-bottom: 1px solid var(--border-mid);
+      background: var(--ide-bar-bg);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .explorer-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-1);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .explorer-search-bar {
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--border-light);
+      position: relative;
+      flex-shrink: 0;
+    }
+
+    .explorer-search-input {
+      height: 26px;
+      padding-left: 8px;
+      padding-right: 22px;
+      font-size: 12px;
+    }
+
+    .search-clear-btn {
+      position: absolute;
+      right: 12px;
+      top: 50%;
+      transform: translateY(-50%);
+      border: none;
+      background: transparent;
+      color: var(--text-3);
+      cursor: pointer;
+      font-size: 12px;
+      padding: 2px;
+      display: none;
+    }
+
+    .search-clear-btn.visible {
+      display: inline-block;
+    }
+
+    .explorer-list {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 4px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .res-item {
+      padding: 6px 7px;
+      border-radius: 4px;
+      border: 1px solid transparent;
+      background: transparent;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      position: relative;
+    }
+
+    .res-item:hover {
+      background: var(--hover-row);
+    }
+
+    .res-item.active {
+      background: var(--selected-row);
+      border-color: var(--brand-border);
+    }
+
+    .res-item.drag-over {
+      border-top: 2px solid var(--brand);
+    }
+
+    .drag-grip {
+      color: var(--text-4);
+      font-size: 11px;
+      cursor: grab;
+      user-select: none;
+      flex-shrink: 0;
+      line-height: 1;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .status-dot.ok {
+      background: var(--ok);
+    }
+
+    .status-dot.warn {
+      background: var(--warn);
+    }
+
+    .status-dot.err {
+      background: var(--err);
+    }
+
+    .status-dot.muted {
+      background: var(--text-4);
+    }
+
+    .res-main {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+
+    .res-name-row {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .res-name {
+      font-size: 12px;
+      font-weight: 550;
+      color: var(--text-1);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .res-sub {
+      font-size: 11px;
+      color: var(--text-3);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .ev-micro-tag {
+      font-size: 10.5px;
+      font-weight: 600;
+      padding: 0 4px;
+      border-radius: 3px;
+      line-height: 1.4;
+      flex-shrink: 0;
+    }
+
+    .ev-quote {
+      background: var(--brand-soft);
+      color: var(--brand);
+      border: 1px solid var(--brand-border);
+    }
+
+    .ev-input {
+      background: var(--ok-soft);
+      color: var(--ok);
+      border: 1px solid var(--ok-border);
+    }
+
+    .ev-derive {
+      background: var(--purple-soft);
+      color: var(--purple);
+      border: 1px solid var(--purple-border);
+    }
+
+    .ref-count-tag {
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+      flex-shrink: 0;
+    }
+
+    .quick-insert-btn {
+      opacity: 0;
+      height: 20px;
+      padding: 0 5px;
+      font-size: 10.5px;
+      border-radius: 3px;
+      border: 1px solid var(--brand-border);
+      background: var(--card-bg);
+      color: var(--brand);
+      cursor: pointer;
+    }
+
+    .res-item:hover .quick-insert-btn,
+    .res-item.active .quick-insert-btn {
+      opacity: 1;
+    }
+
+    .quick-insert-btn:hover {
+      background: var(--brand);
+      color: #ffffff;
+    }
+
+    /* -------------------- 中间主工作区（上：模板区域 + 下：调试区域） -------------------- */
+    .ide-center {
+      flex: 1;
+      min-width: 420px;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      position: relative;
+      background: var(--card-bg);
+    }
+
+    /* 分区 2：中间上方 · 模板区域 */
+    .ide-template-pane {
+      flex: 1;
+      min-width: 0;
+      min-height: 160px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .tpl-toolbar {
+      height: 36px;
+      padding: 0 8px;
+      background: var(--ide-bar-bg);
+      border-bottom: 1px solid var(--border-mid);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .tpl-toolbar-left {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    .tpl-toolbar-right {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      flex-shrink: 0;
+    }
+
+    .tpl-toolbar .ide-btn {
+      height: 25px;
+      padding: 0 6px;
+      font-size: 11.5px;
+      gap: 3px;
+    }
+
+    .tpl-toolbar .seg-btn {
+      height: 23px;
+      padding: 0 7px;
+      font-size: 11.5px;
+    }
+
+    .snapshot-banner-pill {
+      display: none;
+      align-items: center;
+      gap: 4px;
+      height: 24px;
+      padding: 0 6px;
+      border-radius: 4px;
+      background: var(--warn-soft);
+      border: 1px solid var(--warn-border);
+      color: var(--warn);
+      font-size: 11px;
+      font-weight: 600;
+      white-space: nowrap;
+      min-width: 0;
+      max-width: 100%;
+      overflow: hidden;
+    }
+
+    .snapshot-banner-pill.visible {
+      display: inline-flex;
+    }
+
+    .snapshot-banner-text {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .snapshot-exit-btn {
+      border: none;
+      background: var(--card-bg);
+      color: var(--text-1);
+      border: 1px solid var(--warn-border);
+      border-radius: 3px;
+      padding: 0 5px;
+      height: 18px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    .snapshot-exit-btn:hover {
+      border-color: var(--brand);
+      color: var(--brand);
+    }
+
+    .tpl-canvas {
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      display: flex;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* 模板编辑器视图（原文态 & 双栏左半） */
+    .editor-surface {
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      background: var(--editor-bg);
+      overflow: hidden;
+      position: relative;
+    }
+
+    .editor-subbar {
+      height: 28px;
+      padding: 0 10px;
+      background: var(--subtle-bg);
+      border-bottom: 1px solid var(--border-light);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 11.5px;
+      color: var(--text-3);
+      flex-shrink: 0;
+    }
+
+    .editor-scroll {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      padding: 6px 0 16px;
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      line-height: 1.68;
+      position: relative;
+    }
+
+    .code-line {
+      display: flex;
+      align-items: baseline;
+      padding: 0 12px 0 0;
+      min-height: 21px;
+      cursor: text;
+    }
+
+    .code-line.is-active {
+      background: var(--editor-active-line);
+    }
+
+    .code-gutter {
+      width: 42px;
+      padding-right: 10px;
+      text-align: right;
+      color: var(--text-4);
+      background: var(--editor-gutter-bg);
+      border-right: 1px solid var(--border-light);
+      margin-right: 12px;
+      user-select: none;
+      flex-shrink: 0;
+      font-size: 11.5px;
+    }
+
+    .code-line.is-active .code-gutter {
+      color: var(--brand);
+      font-weight: 700;
+    }
+
+    .code-content {
+      flex: 1;
+      min-width: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: var(--text-1);
+    }
+
+    .cm-heading {
+      font-weight: 700;
+      color: var(--brand);
+    }
+
+    .cm-jinja-ctrl {
+      color: var(--purple);
+      font-weight: 600;
+    }
+
+    .cm-field-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 0 5px;
+      margin: 0 1px;
+      border-radius: 3px;
+      background: var(--brand-soft);
+      border: 1px solid var(--brand-border);
+      color: var(--brand);
+      font-weight: 600;
+      cursor: pointer;
+      line-height: 1.38;
+      transition: background-color 0.12s, border-color 0.12s;
+    }
+
+    .cm-field-chip:hover,
+    .cm-field-chip.is-selected {
+      background: var(--brand);
+      border-color: var(--brand);
+      color: #ffffff;
+    }
+
+    .cm-field-chip.is-undefined {
+      background: var(--err-soft);
+      border-color: var(--err-border);
+      color: var(--err);
+    }
+
+    /* 源码实时编辑模式（支持直接键入 {{ 呼出唯一自动补全浮层） */
+    .raw-textarea-wrap {
+      flex: 1;
+      min-height: 0;
+      display: none;
+      position: relative;
+    }
+
+    .raw-textarea-wrap.visible {
+      display: flex;
+    }
+
+    .raw-code-textarea {
+      flex: 1;
+      width: 100%;
+      height: 100%;
+      border: none;
+      outline: none;
+      resize: none;
+      padding: 10px 14px;
+      background: var(--editor-bg);
+      color: var(--text-1);
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      line-height: 1.68;
+    }
+
+    /* {{ 自动补全浮层 */
+    .cm-ac-popup {
+      position: fixed;
+      z-index: 90;
+      width: 268px;
+      max-height: 228px;
+      background: var(--card-bg);
+      border: 1px solid var(--brand);
+      border-radius: 6px;
+      box-shadow: var(--popup-shadow);
+      display: none;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .cm-ac-popup.visible {
+      display: flex;
+    }
+
+    .cm-ac-head {
+      padding: 5px 8px;
+      background: var(--ide-bar-bg);
+      border-bottom: 1px solid var(--border-light);
+      font-size: 11px;
+      color: var(--text-3);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .cm-ac-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 3px;
+    }
+
+    .cm-ac-item {
+      padding: 5px 8px;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+
+    .cm-ac-item:hover,
+    .cm-ac-item.is-active {
+      background: var(--selected-row);
+      color: var(--brand);
+    }
+
+    /* 报告预览画布（纯内联 SVG 工程点阵底板 + 顶部 3px 移动蓝冠线稽核报告单） */
+    .preview-stage {
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      position: relative;
+      background: var(--recessed-bg);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .split-left-border {
+      border-left: 1px solid var(--border-mid);
+    }
+
+    .stage-dots {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .preview-scroll {
+      position: relative;
+      z-index: 1;
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 14px 16px 20px;
+    }
+
+    .audit-report-sheet {
+      max-width: 760px;
+      margin: 0 auto;
+      background: var(--card-bg);
+      border: 1px solid var(--border-mid);
+      border-top: 3px solid var(--brand);
+      border-radius: 4px;
+      padding: 14px 18px 18px;
+    }
+
+    .sheet-eyebrow {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding-bottom: 10px;
+      margin-bottom: 12px;
+      border-bottom: 1px solid var(--border-light);
+      flex-wrap: wrap;
+    }
+
+    .sheet-meta-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11.5px;
+      color: var(--text-3);
+      flex-wrap: wrap;
+    }
+
+    .sheet-badge {
+      padding: 1px 7px;
+      border-radius: 3px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .sheet-badge.pass {
+      background: var(--ok-soft);
+      border: 1px solid var(--ok-border);
+      color: var(--ok);
+    }
+
+    .sheet-badge.partial {
+      background: var(--warn-soft);
+      border: 1px solid var(--warn-border);
+      color: var(--warn);
+    }
+
+    .sheet-hint-bar {
+      font-size: 11px;
+      color: var(--text-3);
+      background: var(--subtle-bg);
+      border: 1px solid var(--border-light);
+      border-radius: 3px;
+      padding: 4px 8px;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .sheet-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text-1);
+      margin-bottom: 10px;
+      letter-spacing: 0.2px;
+    }
+
+    .sheet-section {
+      margin-top: 10px;
+      font-size: 12.8px;
+      line-height: 1.78;
+      color: var(--text-1);
+    }
+
+    .sheet-sec-head {
+      font-size: 12.5px;
+      font-weight: 700;
+      color: var(--text-2);
+      margin-bottom: 4px;
+    }
+
+    .report-field-val {
+      display: inline-block;
+      padding: 0 5px;
+      margin: 0 1px;
+      border-radius: 3px;
+      background: var(--brand-soft);
+      border-bottom: 1.5px solid var(--brand);
+      color: var(--brand);
+      font-weight: 600;
+      cursor: pointer;
+      line-height: 1.45;
+      transition: background-color 0.12s, color 0.12s;
+    }
+
+    .report-field-val:hover,
+    .report-field-val.is-active {
+      background: var(--brand);
+      color: #ffffff;
+    }
+
+    .report-field-val.is-missing {
+      background: var(--warn-soft);
+      border-bottom: 1.5px dashed var(--warn);
+      color: var(--warn);
+    }
+
+    .report-field-val.is-missing:hover,
+    .report-field-val.is-missing.is-active {
+      background: var(--warn);
+      color: #ffffff;
+    }
+
+    /* 悬浮字段值气泡 .report-field-tooltip */
+    .report-field-tooltip {
+      position: fixed;
+      z-index: 95;
+      pointer-events: none;
+      background: var(--tooltip-bg);
+      border: 1px solid var(--tooltip-border);
+      border-radius: 5px;
+      padding: 6px 10px;
+      box-shadow: var(--tooltip-shadow);
+      display: none;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 170px;
+    }
+
+    .report-field-tooltip.visible {
+      display: flex;
+    }
+
+    /* 历史版本行级 Diff 视图 */
+    .diff-surface {
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      background: var(--editor-bg);
+      overflow: hidden;
+    }
+
+    .diff-head-bar {
+      height: 30px;
+      padding: 0 12px;
+      background: var(--subtle-bg);
+      border-bottom: 1px solid var(--border-light);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12px;
+    }
+
+    .diff-scroll {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.65;
+      padding: 6px 0;
+    }
+
+    .diff-row {
+      display: flex;
+      padding: 1px 12px;
+    }
+
+    .diff-row.add {
+      background: var(--diff-add-bg);
+      color: var(--diff-add-fg);
+    }
+
+    .diff-row.del {
+      background: var(--diff-del-bg);
+      color: var(--diff-del-fg);
+    }
+
+    .diff-sign {
+      width: 20px;
+      flex-shrink: 0;
+      user-select: none;
+      font-weight: 700;
+    }
+
+    /* -------------------- 分区 4：中间下方 · 调试区域（原试运行） -------------------- */
+    .ide-debug-pane {
+      height: var(--debug-pane-h);
+      min-height: 36px;
+      display: flex;
+      flex-direction: column;
+      background: var(--card-bg);
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+
+    .ide-debug-pane.is-collapsed {
+      height: 36px !important;
+    }
+
+    .ide-debug-pane.is-collapsed .debug-body {
+      display: none;
+    }
+
+    /* 页内全屏：调试区域向上铺满整个中间工作区 */
+    .ide-center.is-debug-maximized .ide-template-pane,
+    .ide-center.is-debug-maximized #split-debug {
+      display: none !important;
+    }
+
+    .ide-center.is-debug-maximized .ide-debug-pane {
+      flex: 1 !important;
+      height: auto !important;
+    }
+
+    .debug-toolbar {
+      height: 36px;
+      padding: 0 8px;
+      background: var(--ide-bar-bg);
+      border-top: 1px solid var(--border-light);
+      border-bottom: 1px solid var(--border-mid);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .debug-tabs,
+    .debug-actions {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .dbg-tab-btn {
+      appearance: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      background: transparent;
+      height: 34px;
+      padding: 0 7px;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-2);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .dbg-tab-btn:hover {
+      color: var(--text-1);
+    }
+
+    .dbg-tab-btn.active {
+      color: var(--brand);
+      border-bottom-color: var(--brand);
+      font-weight: 600;
+    }
+
+    .dbg-pill {
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      padding: 0 5px;
+      border-radius: 99px;
+      background: var(--recessed-bg);
+      color: var(--text-2);
+    }
+
+    .dbg-tab-btn.active .dbg-pill {
+      background: var(--brand-soft);
+      color: var(--brand);
+    }
+
+    .debug-body {
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      display: flex;
+      overflow: hidden;
+    }
+
+    /* 调试运行记录左窄栏（185px） */
+    .debug-runs-col {
+      width: 185px;
+      flex-shrink: 0;
+      background: var(--subtle-bg);
+      border-right: 1px solid var(--border-mid);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .debug-runs-head {
+      height: 28px;
+      padding: 0 8px;
+      border-bottom: 1px solid var(--border-light);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--text-2);
+      flex-shrink: 0;
+    }
+
+    .debug-runs-list {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 4px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .dbg-run-item {
+      padding: 6px 8px;
+      border-radius: 4px;
+      border: 1px solid transparent;
+      background: transparent;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .dbg-run-item:hover {
+      background: var(--hover-row);
+    }
+
+    .dbg-run-item.active {
+      background: var(--selected-row);
+      border-color: var(--brand-border);
+    }
+
+    .dbg-run-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 4px;
+    }
+
+    .dbg-run-time {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-1);
+    }
+
+    .dbg-run-target {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      padding: 0 4px;
+      border-radius: 3px;
+      background: var(--card-bg);
+      border: 1px solid var(--border-light);
+      color: var(--text-3);
+    }
+
+    .dbg-run-metrics {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text-3);
+      padding-left: 12px;
+    }
+
+    /* 调试右侧主内容区 */
+    .debug-main-col {
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 10px 12px;
+      background: var(--card-bg);
+    }
+
+    .dbg-inputs-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .field-lbl {
+      display: block;
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--text-2);
+      margin-bottom: 3px;
+    }
+
+    .req-star {
+      color: var(--err);
+      margin-left: 2px;
+    }
+
+    /* 智能体轨迹卡片 */
+    .trace-list {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+
+    .trace-step {
+      border: 1px solid var(--border-mid);
+      border-left: 3px solid var(--brand);
+      border-radius: 4px;
+      background: var(--subtle-bg);
+      padding: 7px 10px;
+    }
+
+    .trace-step.ok {
+      border-left-color: var(--ok);
+    }
+
+    .trace-step.warn {
+      border-left-color: var(--warn);
+    }
+
+    .trace-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      cursor: pointer;
+    }
+
+    .trace-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-1);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .trace-detail {
+      margin-top: 6px;
+      padding: 6px 8px;
+      border-radius: 3px;
+      background: var(--editor-bg);
+      border: 1px solid var(--border-light);
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      color: var(--text-2);
+      white-space: pre-wrap;
+      line-height: 1.5;
+    }
+
+    /* 字段核验明细表 */
+    .dbg-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    .dbg-table th {
+      text-align: left;
+      padding: 6px 8px;
+      background: var(--subtle-bg);
+      border-bottom: 1px solid var(--border-mid);
+      color: var(--text-2);
+      font-weight: 600;
+      white-space: nowrap;
+      position: sticky;
+      top: -10px;
+    }
+
+    .dbg-table td {
+      padding: 5px 8px;
+      border-bottom: 1px solid var(--border-light);
+      vertical-align: middle;
+    }
+
+    .dbg-table tr:hover td {
+      background: var(--hover-row);
+    }
+
+    /* -------------------- 分区 3：右侧区域 · 常驻上下文检查器与内联属性编辑器 -------------------- */
+    .ide-inspector {
+      width: var(--right-panel-w);
+      min-width: 268px;
+      max-width: 460px;
+      flex-shrink: 0;
+      background: var(--subtle-bg);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .inspector-head {
+      height: 36px;
+      padding: 0 8px;
+      background: var(--ide-bar-bg);
+      border-bottom: 1px solid var(--border-mid);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .inspector-scroll {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 10px 12px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .insp-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border-mid);
+      border-radius: 5px;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .insp-title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--border-light);
+    }
+
+    .insp-title {
+      font-size: 12.5px;
+      font-weight: 700;
+      color: var(--text-1);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .form-row-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .ev-code-box {
+      background: var(--editor-bg);
+      border: 1px solid var(--border-mid);
+      border-radius: 4px;
+      padding: 8px;
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      line-height: 1.6;
+      color: var(--text-2);
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    mark.ev-hl {
+      background: var(--hl-bg);
+      color: var(--text-1);
+      border-bottom: 2px solid var(--hl-line);
+      padding: 0 2px;
+      border-radius: 2px;
+      font-weight: 600;
+    }
+
+    /* -------------------- 分区 5：底部 24px IDE 状态栏 -------------------- */
+    .ide-statusbar {
+      height: 24px;
+      padding: 0 10px;
+      background: var(--statusbar-bg);
+      border-top: 1px solid var(--border-mid);
+      color: var(--statusbar-fg);
+      font-size: 11.5px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-shrink: 0;
+      user-select: none;
+    }
+
+    .sb-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+      white-space: nowrap;
+    }
+
+    .sb-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      white-space: nowrap;
+    }
+
+    .sb-sep {
+      width: 1px;
+      height: 11px;
+      background: var(--border-mid);
+    }
+
+    .sb-btn {
+      appearance: none;
+      border: none;
+      background: transparent;
+      color: var(--brand);
+      font-size: 11.5px;
+      font-weight: 600;
+      cursor: pointer;
+      padding: 0 4px;
+      height: 18px;
+      border-radius: 3px;
+    }
+
+    .sb-btn:hover {
+      background: var(--brand-soft);
+    }
+
+    /* ==========================================================================
+       5. 轻量下拉菜单、发布校验弹窗与右上角通知 Toast
+       ========================================================================== */
+    .dropdown-menu {
+      position: fixed;
+      z-index: 92;
+      min-width: 168px;
+      background: var(--card-bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 5px;
+      box-shadow: var(--popup-shadow);
+      padding: 4px;
+      display: none;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .dropdown-menu.visible {
+      display: flex;
+    }
+
+    .dropdown-item {
+      appearance: none;
+      border: none;
+      background: transparent;
+      text-align: left;
+      padding: 6px 10px;
+      border-radius: 4px;
+      font-size: 12px;
+      color: var(--text-1);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .dropdown-item:hover {
+      background: var(--hover-row);
+      color: var(--brand);
+    }
+
+    .modal-mask {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      background: rgba(8, 13, 23, 0.48);
+      display: none;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .modal-mask.visible {
+      display: flex;
+    }
+
+    .modal-card {
+      width: 440px;
+      background: var(--card-bg);
+      border: 1px solid var(--border-strong);
+      border-top: 3px solid var(--brand);
+      border-radius: 6px;
+      box-shadow: var(--popup-shadow);
+      padding: 16px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .toast-stack {
+      position: fixed;
+      bottom: 32px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 120;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      pointer-events: none;
+    }
+
+    .toast-msg {
+      background: var(--card-bg);
+      border: 1px solid var(--brand);
+      border-left: 3px solid var(--brand);
+      color: var(--text-1);
+      padding: 7px 12px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 500;
+      box-shadow: var(--tooltip-shadow);
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell" id="app-shell">
+    <!-- ==================== 外层平台左侧主菜单栏（可收起，也可通过专注全屏彻底隐藏） ==================== -->
+    <aside class="platform-rail" id="platform-rail">
+      <div class="rail-brand">
+        <span class="rail-brand-short">申告</span>
+        <span class="rail-brand-title">智能申告核查平台</span>
+        <span class="rail-ver-pill">r43</span>
+      </div>
+
+      <nav class="p-nav-scroll">
+        <div class="p-nav-group">
+          <div class="p-nav-group-title">编排资产</div>
+          <button class="p-nav-btn active" type="button" onclick="showToast('当前位于：核查模板 IDE 工作台')">
+            <span class="p-nav-icon">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            </span>
+            <span class="p-nav-label">核查模板</span>
+            <span class="p-nav-count">4</span>
+          </button>
+          <button class="p-nav-btn" type="button" onclick="switchLeftSection('skills'); showToast('已在 IDE 左侧定位至已绑定规程 Skill')">
+            <span class="p-nav-icon">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+            </span>
+            <span class="p-nav-label">Skill 能力库</span>
+            <span class="p-nav-count">6</span>
+          </button>
+          <button class="p-nav-btn" type="button" onclick="openEvidenceTab('api'); showToast('已在右侧打开 CRM 接口报文契约')">
+            <span class="p-nav-icon">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            </span>
+            <span class="p-nav-label">CRM 接口库</span>
+            <span class="p-nav-count">12</span>
+          </button>
+        </div>
+
+        <div class="p-nav-group">
+          <div class="p-nav-group-title">执行与稽核</div>
+          <button class="p-nav-btn" type="button" onclick="focusDebugPane('timeline'); showToast('已定位至下方调试运行流水与智能体轨迹')">
+            <span class="p-nav-icon">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+            </span>
+            <span class="p-nav-label">运行流水记录</span>
+          </button>
+          <button class="p-nav-btn" type="button" onclick="switchLeftSection('cases'); showToast('已在 IDE 左侧打开基准回归用例')">
+            <span class="p-nav-icon">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+            </span>
+            <span class="p-nav-label">基准回归测试</span>
+          </button>
+        </div>
+
+        <div class="p-nav-group">
+          <div class="p-nav-group-title">发布与治理</div>
+          <button class="p-nav-btn" type="button" onclick="switchLeftSection('history'); showToast('已在 IDE 左侧打开模板版本历史')">
+            <span class="p-nav-icon">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M6 3v12"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>
+            </span>
+            <span class="p-nav-label">发布版本基线</span>
+            <span class="p-nav-count">r43</span>
+          </button>
+        </div>
+      </nav>
+
+      <div class="rail-foot">
+        <button class="rail-collapse-btn" type="button" id="rail-collapse-btn" onclick="togglePlatformRail()">
+          <span id="rail-collapse-icon">⇤</span>
+          <span class="p-nav-label">收起菜单栏</span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- ==================== 右侧平台主工作舱 ==================== -->
+    <div class="main-wrapper">
+      <div class="main-deck">
+        <!-- 外层平台顶栏：面包屑 + 高保真原型视口切换 + 双主题一键切换 -->
+        <header class="platform-topbar">
+          <div class="topbar-left">
+            <nav class="bc-trail">
+              <span class="bc-muted" onclick="showToast('模拟返回：核查模板总览列表')">核查模板</span>
+              <span style="color: var(--text-4)">/</span>
+              <span class="bc-active">套餐变更营销规范核查</span>
+              <span class="mono" style="color: var(--text-3); font-size: 11.5px">(tpl_package_change)</span>
+            </nav>
+            <span class="proto-badge">IDE 工作台高保真原型 · 待确认</span>
+          </div>
+
+          <div class="topbar-right">
+            <!-- 视口态切换：带左侧平台主菜单栏 vs 全屏专注 IDE -->
+            <div class="seg-switch" role="group" aria-label="视口模式切换">
+              <button class="seg-btn active" type="button" id="vp-btn-shell" onclick="setFocusFullscreen(false)">带平台主菜单栏</button>
+              <button class="seg-btn" type="button" id="vp-btn-ide" onclick="setFocusFullscreen(true)">全屏专注 IDE</button>
+            </div>
+
+            <!-- 双主题一键切换：极昼云原生 vs 省网指挥大屏 -->
+            <div class="seg-switch" role="group" aria-label="双主题切换">
+              <button class="seg-btn active" type="button" id="theme-btn-light" onclick="setTheme('light')">亮色 · 极昼云原生</button>
+              <button class="seg-btn" type="button" id="theme-btn-dark" onclick="setTheme('dark')">暗色 · 省网指挥大屏</button>
+            </div>
+          </div>
+        </header>
+
+        <!-- ==================== 核查模板专业 IDE 工作台（四大分区 + 底部状态栏） ==================== -->
+        <div class="ide-workbench">
+          <div class="ide-body">
+            <!-- ========== 1. 左侧区域（左小列 50px 切换条 + 左二列 214px 资源列表） ========== -->
+            <section class="ide-left-zone" aria-label="左侧资源管理区">
+              <div class="ide-activity-bar">
+                <button class="act-back-btn" type="button" title="返回模板列表" onclick="handleBackList()">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+                </button>
+                <div class="act-divider"></div>
+
+                <button class="act-tab-btn active" type="button" data-sec="fields" onclick="onActivityTabClick('fields')" title="核查字段清单（再次点击可折叠列表）">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+                  <span class="act-tab-label">字段</span>
+                  <span class="act-tab-count" id="cnt-fields">17</span>
+                </button>
+
+                <button class="act-tab-btn" type="button" data-sec="inputs" onclick="onActivityTabClick('inputs')" title="调用入参契约">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+                  <span class="act-tab-label">入参</span>
+                  <span class="act-tab-count" id="cnt-inputs">4</span>
+                </button>
+
+                <button class="act-tab-btn" type="button" data-sec="skills" onclick="onActivityTabClick('skills')" title="已绑定 Skill 取证规程">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+                  <span class="act-tab-label">规程</span>
+                  <span class="act-tab-count" id="cnt-skills">2</span>
+                </button>
+
+                <button class="act-tab-btn" type="button" data-sec="cases" onclick="onActivityTabClick('cases')" title="基准回归测试用例">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85"><path d="M9 3h6"/><path d="M10 3v5.4a2 2 0 0 1-.5 1.3L4.7 16a2 2 0 0 0 1.5 3.3h11.6a2 2 0 0 0 1.5-3.3l-4.8-6.3a2 2 0 0 1-.5-1.3V3"/></svg>
+                  <span class="act-tab-label">用例</span>
+                  <span class="act-tab-count" id="cnt-cases">2</span>
+                </button>
+
+                <button class="act-tab-btn" type="button" data-sec="history" onclick="onActivityTabClick('history')" title="修订版本历史与对比">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                  <span class="act-tab-label">历史</span>
+                  <span class="act-tab-count" id="cnt-history">3</span>
+                </button>
+              </div>
+
+              <!-- 左二列：当前分类的资源列表 -->
+              <div class="ide-explorer" id="ide-explorer">
+                <div class="explorer-head">
+                  <span class="explorer-title" id="explorer-title">核查字段清单 (17)</span>
+                  <button class="ide-btn ide-btn-xs" type="button" id="explorer-add-btn" onclick="handleExplorerCreate()">+ 新建</button>
+                </div>
+                <div class="explorer-search-bar">
+                  <input
+                    id="explorer-search"
+                    class="ide-input explorer-search-input"
+                    type="text"
+                    placeholder="过滤字段名称 / 说明..."
+                    oninput="onExplorerSearch(this.value)"
+                  />
+                  <button class="search-clear-btn" type="button" id="search-clear-btn" onclick="clearExplorerSearch()">✕</button>
+                </div>
+                <div class="explorer-list" id="explorer-list"></div>
+              </div>
+            </section>
+
+            <!-- 左竖向拖拽分隔条 -->
+            <div class="splitter-v" id="split-left" title="拖拽调整左侧资源栏宽度"></div>
+
+            <!-- ========== 中间区域（上方：模板区域 + 下方：调试区域） ========== -->
+            <main class="ide-center" id="ide-center">
+              <!-- ===== 2. 中间上方：模板区域 ===== -->
+              <section class="ide-template-pane" id="ide-template-pane" aria-label="模板正文与报告预览区">
+                <div class="tpl-toolbar">
+                  <div class="tpl-toolbar-left">
+                    <!-- 原文 / 预览 / 双栏 切换按钮组 -->
+                    <div class="seg-switch" role="group" aria-label="模板展示模式">
+                      <button class="seg-btn" type="button" id="mode-btn-code" onclick="setTemplateMode('code')">原文</button>
+                      <button class="seg-btn" type="button" id="mode-btn-preview" onclick="setTemplateMode('preview')">预览</button>
+                      <button class="seg-btn active" type="button" id="mode-btn-split" onclick="setTemplateMode('split')">双栏</button>
+                    </div>
+
+                    <!-- 调试快照预览提示胶囊 -->
+                    <div class="snapshot-banner-pill" id="snapshot-banner">
+                      <span class="snapshot-banner-text" id="snapshot-banner-text">正在预览调试快照 · 21:10:18 (15/17 命中)</span>
+                      <button class="snapshot-exit-btn" type="button" onclick="exitDebugSnapshot()">切回静态预览</button>
+                    </div>
+                  </div>
+
+                  <!-- 右上角操作按钮组 -->
+                  <div class="tpl-toolbar-right">
+                    <button class="ide-btn" type="button" id="btn-insert-field" onclick="openInsertFieldMenu(event)">+ 插入字段</button>
+                    <button class="ide-btn" type="button" onclick="runSyntaxCheck()">语法校验</button>
+                    <button class="ide-btn" type="button" onclick="saveDraft()">
+                      <span>保存草稿</span>
+                      <span class="kbd-tag">⌘S</span>
+                    </button>
+                    <button class="ide-btn ide-btn-primary" type="button" onclick="openPublishDialog()">发布上线</button>
+                    <button class="ide-btn" type="button" id="btn-focus-fs" onclick="toggleFocusFullscreen()" title="快捷键 Esc 可退出全屏专注">
+                      <span id="btn-focus-fs-label">专注全屏</span>
+                    </button>
+                    <button class="ide-btn" type="button" style="padding: 0 7px" onclick="openMoreMenu(event)" title="更多模板与原型操作">⋯</button>
+                  </div>
+                </div>
+
+                <!-- 模板画布：由 JS 按 code / preview / split / diff 四种状态渲染 -->
+                <div class="tpl-canvas" id="tpl-canvas">
+                  <!-- 左半：Jinja2 代码编辑器 -->
+                  <div class="editor-surface" id="editor-surface">
+                    <div class="editor-subbar">
+                      <span>Jinja2 核查正文 · 点击 <strong style="color: var(--brand)">{{字段}}</strong> 联动右侧编辑规则</span>
+                      <div style="display: flex; align-items: center; gap: 6px">
+                        <button class="ide-btn ide-btn-xs" type="button" id="btn-trigger-ac" onclick="openAutocompleteDemo(event)">触发 {{ 补全</button>
+                        <button class="ide-btn ide-btn-xs" type="button" id="btn-toggle-raw" onclick="toggleRawEditMode()">编辑源码</button>
+                      </div>
+                    </div>
+
+                    <!-- 结构化高亮行视图 -->
+                    <div class="editor-scroll" id="editor-lines-view"></div>
+
+                    <!-- 实时源码编辑框（输入 {{ 自动弹出唯一补全浮层） -->
+                    <div class="raw-textarea-wrap" id="raw-textarea-wrap">
+                      <textarea
+                        id="raw-code-textarea"
+                        class="raw-code-textarea"
+                        spellcheck="false"
+                        oninput="onRawTextareaInput(event)"
+                        onkeydown="onRawTextareaKeydown(event)"
+                      ></textarea>
+                    </div>
+                  </div>
+
+                  <!-- 右半：纯内联 SVG 点阵底板 + 移动蓝顶冠稽核报告预览 -->
+                  <div class="preview-stage split-left-border" id="preview-stage">
+                    <svg class="stage-dots" aria-hidden="true">
+                      <defs>
+                        <pattern id="ide-audit-dot-pattern" width="16" height="16" patternUnits="userSpaceOnUse">
+                          <circle cx="2" cy="2" r="1" fill="var(--grid-dot)" />
+                        </pattern>
+                      </defs>
+                      <rect width="100%" height="100%" fill="url(#ide-audit-dot-pattern)" />
+                    </svg>
+                    <div class="preview-scroll" id="preview-scroll"></div>
+                  </div>
+
+                  <!-- 历史版本行级 Diff 画布（点击左侧历史版本时展示） -->
+                  <div class="diff-surface" id="diff-surface" style="display: none">
+                    <div class="diff-head-bar">
+                      <span id="diff-title-label" style="font-weight: 600; color: var(--text-1)">版本行级差异对比：工作草稿 vs r2 (线上基线)</span>
+                      <div style="display: flex; align-items: center; gap: 6px">
+                        <span class="mono" style="font-size: 11.5px; color: var(--ok)">+3 新增</span>
+                        <span class="mono" style="font-size: 11.5px; color: var(--err)">-2 移除</span>
+                        <button class="ide-btn ide-btn-xs" type="button" onclick="setTemplateMode('split')">退出 Diff 返回编辑</button>
+                      </div>
+                    </div>
+                    <div class="diff-scroll" id="diff-scroll"></div>
+                  </div>
+                </div>
+              </section>
+
+              <!-- 中间横向拖拽分隔条 -->
+              <div class="splitter-h" id="split-debug" title="拖拽调整下方调试区域高度"></div>
+
+              <!-- ===== 4. 中间下方：调试区域（原试运行） ===== -->
+              <section class="ide-debug-pane" id="ide-debug-pane" aria-label="模板调试与轨迹核验区">
+                <div class="debug-toolbar">
+                  <div class="debug-tabs" role="tablist">
+                    <button class="dbg-tab-btn" type="button" data-dbgtab="inputs" onclick="setDebugTab('inputs')">
+                      <span>入参与单据</span>
+                    </button>
+                    <button class="dbg-tab-btn active" type="button" data-dbgtab="timeline" onclick="setDebugTab('timeline')">
+                      <span>智能体轨迹</span>
+                      <span class="dbg-pill" id="dbg-round-pill">4 轮</span>
+                    </button>
+                    <button class="dbg-tab-btn" type="button" data-dbgtab="fields" onclick="setDebugTab('fields')">
+                      <span id="dbg-fields-tab-label">字段核验明细 (15/17)</span>
+                    </button>
+                  </div>
+
+                  <div class="debug-actions">
+                    <select id="dbg-target-ver" class="ide-select" style="width: 86px; height: 26px; padding: 0 5px; font-size: 11.5px" aria-label="调试目标版本">
+                      <option value="当前草稿">当前草稿</option>
+                      <option value="线上 r2">线上 r2</option>
+                    </select>
+                    <button class="ide-btn ide-btn-brand" type="button" id="btn-run-debug" onclick="runSimulatedDebug()">▶ 运行调试</button>
+                    <button class="ide-btn" type="button" onclick="saveCurrentDebugAsCase()">存为用例</button>
+                    <button class="ide-btn" type="button" id="btn-debug-max" onclick="toggleDebugMaximize()" title="将调试区域在工作区内全屏展开（Esc 还原）">页内全屏</button>
+                    <button class="ide-btn" type="button" id="btn-debug-collapse" onclick="toggleDebugCollapse()">折叠</button>
+                  </div>
+                </div>
+
+                <div class="debug-body">
+                  <!-- 左窄栏：调试运行记录（宽 185px，点击切换上方报告预览快照） -->
+                  <aside class="debug-runs-col">
+                    <div class="debug-runs-head">
+                      <span>调试运行记录</span>
+                      <span class="mono" id="dbg-runs-count" style="color: var(--text-3)">3</span>
+                    </div>
+                    <div class="debug-runs-list" id="debug-runs-list"></div>
+                  </aside>
+
+                  <!-- 右主内容区：按 入参与单据 / 智能体轨迹 / 字段核验明细 切换 -->
+                  <div class="debug-main-col" id="debug-main-col"></div>
+                </div>
+              </section>
+            </main>
+
+            <!-- 右竖向拖拽分隔条 -->
+            <div class="splitter-v" id="split-right" title="拖拽调整右侧检查器宽度"></div>
+
+            <!-- ========== 3. 右侧区域：常驻上下文检查器与内联属性编辑器 ========== -->
+            <aside class="ide-inspector" id="ide-inspector" aria-label="右侧属性配置与证据溯源检查器">
+              <div class="inspector-head">
+                <div class="seg-switch" role="tablist" aria-label="右侧检查器上下文切换">
+                  <button class="seg-btn active" type="button" id="insp-tab-props" onclick="setInspectorTab('props')">属性配置</button>
+                  <button class="seg-btn" type="button" id="insp-tab-evidence" onclick="setInspectorTab('evidence')">证据溯源</button>
+                </div>
+                <span class="mono" id="inspector-ctx-tag" style="font-size: 11px; color: var(--text-3)">字段规则</span>
+              </div>
+              <div class="inspector-scroll" id="inspector-scroll"></div>
+            </aside>
+          </div>
+
+          <!-- ========== 5. 底部 24px IDE 状态栏 ========== -->
+          <footer class="ide-statusbar">
+            <div class="sb-group">
+              <span class="sb-item mono" style="font-weight: 600; color: var(--text-1)">tpl_package_change</span>
+              <span class="sb-sep"></span>
+              <span class="sb-item" id="sb-draft-state">
+                <span class="status-dot warn" id="sb-draft-dot"></span>
+                <span id="sb-draft-text">草稿待保存 · 基于线上 r2</span>
+              </span>
+              <span class="sb-sep"></span>
+              <span class="sb-item mono" id="sb-counts">字段 17 · 入参 4 · 规程 2 · 用例 2</span>
+              <span class="sb-sep"></span>
+              <span class="sb-item" id="sb-syntax-health" style="color: var(--ok)">✓ Jinja2 语法健康 (0 未定义引用)</span>
+            </div>
+
+            <div class="sb-group">
+              <span class="sb-item mono" id="sb-cursor">Ln 5, Col 1 · UTF-8</span>
+              <span class="sb-sep"></span>
+              <span class="sb-item" style="color: var(--text-3)">⌘S 保存 · {{ 补全 · Esc 还原全屏</span>
+              <span class="sb-sep"></span>
+              <button class="sb-btn" type="button" id="sb-theme-toggle" onclick="toggleThemeQuick()">切换暗色大屏</button>
+              <button class="sb-btn" type="button" id="sb-shell-toggle" onclick="toggleFocusFullscreen()" style="display: none">显示平台菜单</button>
+            </div>
+          </footer>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 悬浮气泡：预览报告字段值悬浮显示对应 {{Key}} -->
+  <div class="report-field-tooltip" id="report-field-tooltip"></div>
+
+  <!-- {{ 自动补全单浮层 -->
+  <div class="cm-ac-popup" id="cm-ac-popup">
+    <div class="cm-ac-head">
+      <span>插入模板取证字段 <strong class="mono">{{}}</strong></span>
+      <span class="mono">↑↓ / Enter / Esc</span>
+    </div>
+    <div class="cm-ac-list" id="cm-ac-list"></div>
+  </div>
+
+  <!-- 快捷下拉菜单（+ 插入字段 / ⋯ 更多） -->
+  <div class="dropdown-menu" id="dropdown-menu"></div>
+
+  <!-- 发布上线校验确认弹窗 -->
+  <div class="modal-mask" id="publish-modal" onclick="closePublishDialog()">
+    <div class="modal-card" onclick="event.stopPropagation()">
+      <div style="display: flex; align-items: center; justify-content: space-between">
+        <span style="font-size: 14px; font-weight: 700">发布核查模板至生产基线 (r3)</span>
+        <button class="ide-btn ide-btn-xs" type="button" onclick="closePublishDialog()">✕</button>
+      </div>
+      <div style="font-size: 12px; color: var(--text-2); line-height: 1.6; background: var(--subtle-bg); border: 1px solid var(--border-light); padding: 10px; border-radius: 4px">
+        <div>✓ Jinja2 模板语法校验通过（共引用核查字段 <strong class="mono" id="pub-field-cnt">17</strong> 项）</div>
+        <div>✓ 已绑定取证规程 Skill：<strong class="mono">办理短信核查</strong>、<strong class="mono">业务单据核对</strong></div>
+        <div>✓ 最新调试快照核验：<strong class="mono">15/17 命中</strong>（缺失项均已配置合规兜底策略）</div>
+      </div>
+      <div>
+        <label class="field-lbl">本次发布变更说明 *</label>
+        <input id="publish-note-input" class="ide-input" type="text" value="新增违约金告知与二次确认短信整条原样引用核验规则" />
+      </div>
+      <div style="display: flex; justify-content: flex-end; gap: 8px">
+        <button class="ide-btn" type="button" onclick="closePublishDialog()">取消</button>
+        <button class="ide-btn ide-btn-primary" type="button" onclick="confirmPublish()">确认发布 r3</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 右上角轻量提示栈 -->
+  <div class="toast-stack" id="toast-stack"></div>
+
+  <script>
+    // =========================================================================
+    // 1. 真实政企核查模板核心状态与领域数据（中国移动套餐变更营销规范核查）
+    // =========================================================================
+    const state = {
+      theme: 'light',
+      isFocusFullscreen: false,
+      isPlatformRailCollapsed: false,
+
+      leftSection: 'fields', // 'fields' | 'inputs' | 'skills' | 'cases' | 'history'
+      isExplorerCollapsed: false,
+      searchQuery: '',
+
+      selectedFieldIndex: 0,
+      selectedInputIndex: 0,
+      selectedSkillIndex: 0,
+      selectedCaseIndex: 0,
+      selectedHistoryIndex: 0,
+
+      tplMode: 'split', // 'code' | 'preview' | 'split' | 'diff'
+      rawEditMode: false,
+      activeLine: 5,
+      draftSaved: false,
+      lastSavedAt: '21:08:12',
+
+      inspectorTab: 'props', // 'props' | 'evidence'
+      evidenceSubTab: 'doc', // 'doc' | 'api' | 'chain'
+      evidenceFieldName: '短信下发时间',
+
+      debugTab: 'timeline', // 'inputs' | 'timeline' | 'fields'
+      isDebugCollapsed: false,
+      isDebugMaximized: false,
+      activeDebugRunId: 'run_211018', // null 表示静态默认预览，非空表示正在查看某次调试运行
+      isPreviewSnapshot: false,
+      isRunningDebug: false,
+
+      acVisible: false,
+      acActiveIdx: 0,
+      acFilter: '',
+      dragFieldIdx: null,
+
+      bodyText: [
+        '# 中国移动套餐变更业务营销规范核查报告',
+        '',
+        '一、工单受理基础信息',
+        '兹核查客户号码 {{客户号码}} 于 {{受理日期}} 通过 {{办理渠道}}（受理工号：{{工号编码}}）办理业务变更。',
+        '经提取业务受理单据核实，客户由原套餐「{{原主资费}}」变更为「{{目标套餐}}」，变更后标准月租为 {{标准资费}}，约定合约期 {{合约期}}（{{低消承诺}}）。',
+        '',
+        '二、客户鉴权与二次确认溯源',
+        '系统核查本次业务鉴权方式为「{{鉴权方式}}」。经调取短彩信网关接口核验，二次确认短信下发时间为 {{短信下发时间}}，客户上行确认回复原文为：「{{确认回复内容}}」，二次确认合规性判定：{{二次确认合规}}。',
+        '',
+        '三、资费履约告知与录音质检',
+        '资费变动推导摘要：{{资费差额说明}}。协议违约金条款告知核验：{{违约金告知}}；关联外呼录音流水索引：{{录音流水号}}。',
+        '',
+        '{% if 稽核结论 == "核查无异常" %}',
+        '四、综合稽核结论：【{{稽核结论}}】全链路鉴权与告知留痕完整，符合省公司营销规范。',
+        '{% else %}',
+        '四、综合稽核结论：【{{稽核结论}}】发现部分告知留痕待补齐，建议转派专席回访确认。',
+        '{% endif %}'
+      ].join('\n'),
+
+      fields: [
+        { name: '受理日期', visible: true, type: '日期', format: 'yyyy年M月d号', enumValues: [], evidenceType: 'quote', quoteWhole: false, whenMissing: '保留占位', defaultValue: '', description: '从CRM业务受理单据头部提取实际业务受理日期，统一格式化为 yyyy年M月d号。', refBy: ['稽核结论'] },
+        { name: '客户号码', visible: true, type: '文本', format: '', enumValues: [], evidenceType: 'input', quoteWhole: false, whenMissing: '保留占位', defaultValue: '', description: '直接读取调用入参中的业务受理手机号 mobile，核对与单据受理工单一致。', refBy: [] },
+        { name: '原主资费', visible: true, type: '文本', format: '', enumValues: [], evidenceType: 'quote', quoteWhole: false, whenMissing: '保留占位', defaultValue: '', description: '从受理单据「变更前产品」栏位原样摘取原主套餐全称与档位。', refBy: ['资费差额说明'] },
+        { name: '目标套餐', visible: true, type: '文本', format: '', enumValues: [], evidenceType: 'quote', quoteWhole: false, whenMissing: '保留占位', defaultValue: '', description: '从受理单据「变更后产品」及 queryCRMOrderDetail 报文中提取新生效主套餐名称。', refBy: ['资费差额说明'] },
+        { name: '标准资费', visible: true, type: '数值', format: '', enumValues: [], evidenceType: 'quote', quoteWhole: false, whenMissing: '默认值', defaultValue: '待核实资费', description: '提取变更后主套餐月基本费金额（含单位元/月），不得折算首月优惠。', refBy: ['资费差额说明'] },
+        { name: '合约期', visible: true, type: '枚举', format: '', enumValues: ['无合约', '12个月', '24个月', '36个月'], evidenceType: 'quote', quoteWhole: false, whenMissing: '默认值', defaultValue: '无合约', description: '核查捆绑营销活动协议期限，匹配枚举项：无合约 / 12个月 / 24个月 / 36个月。', refBy: ['稽核结论'] },
+        { name: '低消承诺', visible: true, type: '文本', format: '', enumValues: [], evidenceType: 'quote', quoteWhole: false, whenMissing: '置空', defaultValue: '', description: '摘取融合套餐协议中的月最低消费承诺条款原文。', refBy: [] },
+        { name: '办理渠道', visible: true, type: '文本', format: '', enumValues: [], evidenceType: 'input', quoteWhole: false, whenMissing: '保留占位', defaultValue: '', description: '依据入参 channelCode 映射渠道标准中文名称（如 10086人工外呼专席 / 江苏掌厅）。', refBy: [] },
+        { name: '工号编码', visible: true, type: '文本', format: '', enumValues: [], evidenceType: 'quote', quoteWhole: false, whenMissing: '保留占位', defaultValue: '', description: '提取业务受理单据右下角操作员工号编码。', refBy: [] },
+        { name: '鉴权方式', visible: true, type: '枚举', format: '', enumValues: ['短信随机码', '服务密码', '实名人脸', '免密工单'], evidenceType: 'quote', quoteWhole: false, whenMissing: '保留占位', defaultValue: '', description: '结合受理单鉴权日志核实客户身份校验方式。', refBy: ['二次确认合规'] },
+        { name: '短信下发时间', visible: true, type: '日期', format: 'yyyy-MM-dd HH:mm:ss', enumValues: [], evidenceType: 'quote', quoteWhole: false, whenMissing: '保留占位', defaultValue: '', description: '调用 querySMSSendInfo 接口，提取业务办理前 30 分钟内下发的二次确认短信 SendTime。', refBy: ['二次确认合规'] },
+        { name: '确认回复内容', visible: true, type: '文本', format: '', enumValues: [], evidenceType: 'quote', quoteWhole: true, whenMissing: '保留占位', defaultValue: '', description: '从 querySMSSendInfo 接口 ReplyContent 节点整条原样摘取客户回复内容，严禁删改。', refBy: ['二次确认合规'] },
+        { name: '二次确认合规', visible: true, type: '枚举', format: '', enumValues: ['合规', '存疑', '违规缺失'], evidenceType: 'derive', quoteWhole: false, whenMissing: '默认值', defaultValue: '存疑', description: '综合鉴权方式、短信下发时间早于订单竣工时间且客户明确回复 Y 判定为「合规」。', refBy: ['稽核结论'] },
+        { name: '违约金告知', visible: true, type: '枚举', format: '', enumValues: ['已明确告知', '未明确告知', '不涉及'], evidenceType: 'quote', quoteWhole: false, whenMissing: '保留占位', defaultValue: '', description: '核查电子单据风险抄录区或外呼摘要中是否包含提前解约违约金标准说明。', refBy: ['稽核结论'] },
+        { name: '录音流水号', visible: true, type: '文本', format: '', enumValues: [], evidenceType: 'quote', quoteWhole: false, whenMissing: '默认值', defaultValue: '[待补调外呼录音索引]', description: '外呼渠道办理时必须提取对应呼叫中心录音流水号，缺失时输出默认兜底提示。', refBy: ['稽核结论'] },
+        { name: '资费差额说明', visible: false, type: '文本', format: '', enumValues: [], evidenceType: 'derive', quoteWhole: false, whenMissing: '置空', defaultValue: '', description: '对比原主资费与目标套餐标准资费，自动计算月租差额与新增权益摘要。', refBy: [] },
+        { name: '稽核结论', visible: true, type: '枚举', format: '', enumValues: ['核查无异常', '存在瑕疵需回访', '违规办理建议退费'], evidenceType: 'derive', quoteWhole: false, whenMissing: '默认值', defaultValue: '存在瑕疵需回访', description: '当二次确认合规且违约金已明确告知时输出「核查无异常」；若缺违约金告知或录音索引输出「存在瑕疵需回访」。', refBy: [] }
+      ],
+
+      inputs: [
+        { key: 'mobile', label: '客户手机号码', required: true, format: '11位中国移动手机号', sample: '13800138000', desc: '投诉或稽核目标客户的业务办理手机号码，用于串联CRM订单与短信网关查询。' },
+        { key: 'acceptDate', label: '业务受理日期', required: true, format: 'YYYY-MM-DD', sample: '2026-11-05', desc: '工单受理自然日，限定接口检索时间窗口。' },
+        { key: 'orderId', label: 'CRM受理流水号', required: true, format: '2开头18位流水号', sample: '202611051430098812', desc: '核心CRM订单唯一流水号，传入 queryCRMOrderDetail。' },
+        { key: 'channelCode', label: '触点渠道编码', required: false, format: '标准渠道字典编码', sample: 'CH_10086_OUTBOUND', desc: '区分10086人工外呼、掌上营业厅或实体厅店办理场景。' }
+      ],
+
+      skills: [
+        {
+          id: 'skill_sms_verify',
+          name: '办理短信核查',
+          version: 'v3',
+          apis: ['querySMSSendInfo', 'queryUserAuthLog'],
+          summary: '按受理工单时间窗（前30分钟至竣工后5分钟）检索10086短彩信网关下发及上行确认回执，自动校验短信模板编号与回复关键字 Y/确认。',
+          markdown: '### 规程步骤\n1. 读取入参 `mobile` 与 `acceptDate` 构造起止时间窗；\n2. 调用 `querySMSSendInfo` 获取下发流水与 `ReplyContent`；\n3. 比对短信下发时间是否早于 `orderId` 生效时间戳。'
+        },
+        {
+          id: 'skill_order_sheet_audit',
+          name: '业务单据核对',
+          version: 'v5',
+          apis: ['queryCRMOrderDetail', 'queryProductTariff'],
+          summary: '解析无纸化电子免填单与CRM订单主资费、合约期、低消承诺及风险告知抄录栏位，交叉核验套餐档位与违约金条款完整性。',
+          markdown: '### 规程步骤\n1. 调用 `queryCRMOrderDetail(orderId)` 拉取变更前后产商品快照；\n2. 对照无纸化单据原文核验「合约期」「低消承诺」「违约金告知」三要素；\n3. 输出字段级原文证据行号映射。'
+        }
+      ],
+
+      cases: [
+        {
+          id: 'CASE-01',
+          name: '外呼升档199融合_缺违约金告知',
+          lastStatus: '通过',
+          inputs: { mobile: '13800138000', acceptDate: '2026-11-05', orderId: '202611051430098812', channelCode: '10086人工外呼专席' },
+          documentText: '【江苏移动业务受理单】流水号：202611051430098812\n受理时间：2026年11月5日 14:35:02  操作工号：JSNJ8842  受理渠道：10086人工外呼专席\n客户号码：13800138000  鉴权方式：短信随机码校验通过\n变更前主套餐：5G智享套餐128元档\n变更后主套餐：5G畅享融合套餐199元档（标准资费：199元/月，含千兆宽带+30GB国内流量）\n营销协议约定：合约期24个月，月最低消费199元。\n风险告知栏：[未采集到提前解约违约金标准说明；外呼录音索引待同步]',
+          expectedSummary: '15/17 字段命中 · 违约金告知与录音流水号触发缺失兜底 · 结论为「存在瑕疵需回访」'
+        },
+        {
+          id: 'CASE-02',
+          name: '掌厅自主改128套餐_全链路合规',
+          lastStatus: '通过',
+          inputs: { mobile: '13951006688', acceptDate: '2026-11-09', orderId: '202611091015220391', channelCode: '中国移动江苏掌厅App' },
+          documentText: '【江苏移动电子受理单】流水号：202611091015220391\n受理时间：2026年11月9日 10:15:22  操作工号：APP_SELF_01  受理渠道：中国移动江苏掌厅App\n客户号码：13951006688  鉴权方式：实名人脸+短信随机码\n变更前主套餐：4G飞享套餐88元档 -> 变更后主套餐：5G智享套餐128元档（标准资费：128元/月）\n合约期：12个月（月最低消费128元）；违约金告知：已明确告知（电子签章确认违约金按未履约月数10%计收）；流水索引：APP-SIGN-99201',
+          expectedSummary: '17/17 字段全命中 · 结论为「核查无异常」'
+        }
+      ],
+
+      history: [
+        { rev: 'draft', tag: '工作草稿', author: '张佳林', time: '2026-11-11 21:10', base: 'r2', summary: '补充违约金告知与外呼录音流水号缺失兜底规则，优化综合稽核结论条件分支。', diffStats: '+3 行 / -2 行 · 调整字段 2 项' },
+        { rev: 'r2', tag: '线上基线', author: '张佳林', time: '2026-11-10 18:20', base: 'r1', summary: '新增 querySMSSendInfo 二次确认回复内容整条原样引用强制约束。', diffStats: '当前生产在线版本' },
+        { rev: 'r1', tag: '历史归档', author: '李明', time: '2026-11-02 10:05', base: '—', summary: '套餐变更营销规范核查模板首次建模发布（15项基础核查字段）。', diffStats: '-5 行 / +1 行（较当前草稿）' }
+      ],
+
+      debugInputs: {
+        mobile: '13800138000',
+        acceptDate: '2026-11-05',
+        orderId: '202611051430098812',
+        channelCode: '10086人工外呼专席',
+        documentText: '【江苏移动业务受理单】流水号：202611051430098812\n受理时间：2026年11月5日 14:35:02  操作工号：JSNJ8842  受理渠道：10086人工外呼专席\n客户号码：13800138000  鉴权方式：短信随机码校验通过\n变更前主套餐：5G智享套餐128元档\n变更后主套餐：5G畅享融合套餐199元档（标准资费：199元/月，含千兆宽带+30GB国内流量）\n营销协议约定：合约期24个月，月最低消费199元。\n风险告知栏：[未采集到提前解约违约金标准说明；外呼录音索引待同步]'
+      },
+
+      debugRuns: [
+        {
+          id: 'run_211018',
+          time: '21:10:18',
+          target: '当前草稿',
+          matched: 15,
+          total: 17,
+          duration: '12.4s',
+          status: 'warn',
+          conclusion: '存在瑕疵需回访',
+          values: {
+            '受理日期': { val: '2026年11月5号', status: 'found', docLine: '第 2 行：受理时间：2026年11月5日 14:35:02', apiSnippet: '<OrderAcceptTime>2026-11-05 14:35:02</OrderAcceptTime>' },
+            '客户号码': { val: '13800138000', status: 'found', docLine: '第 3 行：客户号码：13800138000', apiSnippet: '<SerialNumber>13800138000</SerialNumber>' },
+            '原主资费': { val: '5G智享套餐128元档', status: 'found', docLine: '第 4 行：变更前主套餐：5G智享套餐128元档', apiSnippet: '<OldOfferName>5G智享套餐128元档</OldOfferName>' },
+            '目标套餐': { val: '5G畅享融合套餐199元档', status: 'found', docLine: '第 5 行：变更后主套餐：5G畅享融合套餐199元档', apiSnippet: '<NewOfferName>5G畅享融合套餐199元档</NewOfferName>' },
+            '标准资费': { val: '199元/月', status: 'found', docLine: '第 5 行：标准资费：199元/月', apiSnippet: '<MonthlyFee>199.00</MonthlyFee>' },
+            '合约期': { val: '24个月', status: 'found', docLine: '第 6 行：营销协议约定：合约期24个月', apiSnippet: '<BindMonths>24</BindMonths>' },
+            '低消承诺': { val: '月最低消费199元', status: 'found', docLine: '第 6 行：月最低消费199元', apiSnippet: '<MinConsume>199.00</MinConsume>' },
+            '办理渠道': { val: '10086人工外呼专席', status: 'found', docLine: '第 2 行：受理渠道：10086人工外呼专席', apiSnippet: '<ChannelName>10086人工外呼专席</ChannelName>' },
+            '工号编码': { val: 'JSNJ8842', status: 'found', docLine: '第 2 行：操作工号：JSNJ8842', apiSnippet: '<StaffId>JSNJ8842</StaffId>' },
+            '鉴权方式': { val: '短信随机码', status: 'found', docLine: '第 3 行：鉴权方式：短信随机码校验通过', apiSnippet: '<AuthMode>SMS_RAND_CODE</AuthMode>' },
+            '短信下发时间': { val: '2026-11-05 14:32:18', status: 'found', docLine: '关联短彩信网关下行流水 #SMS90812', apiSnippet: '<querySMSSendInfoRsp>\n  <Mobile>13800138000</Mobile>\n  <SendTime>2026-11-05 14:32:18</SendTime>\n  <ReplyContent>Y（本人确认办理199元融合合约）</ReplyContent>\n</querySMSSendInfoRsp>' },
+            '确认回复内容': { val: 'Y（本人确认办理199元融合合约）', status: 'found', docLine: '关联短彩信网关上行回执 #SMS90812-R', apiSnippet: '<querySMSSendInfoRsp>\n  <ReplyTime>2026-11-05 14:33:04</ReplyTime>\n  <ReplyContent>Y（本人确认办理199元融合合约）</ReplyContent>\n</querySMSSendInfoRsp>' },
+            '二次确认合规': { val: '合规', status: 'found', docLine: '推导依据：下发时间 14:32:18 早于受理时间 14:35:02，且回复 Y', apiSnippet: '逻辑推导通过：AuthMode=SMS_RAND_CODE && ReplyContent startsWith "Y"' },
+            '违约金告知': { val: '{{违约金告知·未采集}}', status: 'missing', docLine: '第 7 行：风险告知栏未采集到提前解约违约金标准说明', apiSnippet: '<PenaltyClause nil="true" />' },
+            '录音流水号': { val: '[待补调外呼录音索引]', status: 'missing', docLine: '第 7 行：外呼录音索引待同步（已启用默认值兜底）', apiSnippet: '<CallRecordId nil="true" />' },
+            '资费差额说明': { val: '月租由128元升至199元（+71元/月），新增千兆宽带与30GB流量', status: 'found', docLine: '推导依据：对比第 4 行与第 5 行资费档位', apiSnippet: 'Delta=+71.00 CNY/mo (199 - 128)' },
+            '稽核结论': { val: '存在瑕疵需回访', status: 'found', docLine: '综合 17 项核查字段：因缺违约金告知与录音索引判定需专席回访', apiSnippet: 'RuleEngine => PARTIAL_DEFECT_CALLBACK' }
+          },
+          traces: [
+            { round: 1, status: 'ok', title: '装载取证规程 Skill (2 项) 与契约校验', cost: '0.4s', detail: '已装载 skill_sms_verify (v3)、skill_order_sheet_audit (v5)；解析入参 mobile=13800138000, orderId=202611051430098812。' },
+            { round: 2, status: 'ok', title: '调用 CRM 接口 queryCRMOrderDetail', cost: '3.1s', detail: 'POST /crm/v1/queryCRMOrderDetail -> HTTP 200 (186ms)\n成功提取：原主资费=5G智享套餐128元档, 目标套餐=5G畅享融合套餐199元档, 标准资费=199元/月, 合约期=24个月。' },
+            { round: 3, status: 'ok', title: '调用短彩信网关 querySMSSendInfo', cost: '4.6s', detail: 'POST /sms/v1/querySMSSendInfo -> HTTP 200 (214ms)\n命中二次确认下行 <SendTime>2026-11-05 14:32:18</SendTime> 及整条回复 <ReplyContent>Y（本人确认办理199元融合合约）</ReplyContent>。' },
+            { round: 4, status: 'warn', title: '字段级交叉溯源核验与公文成稿', cost: '4.3s', detail: '核验完成：15/17 命中；「违约金告知」「录音流水号」在单据原文中缺失，已按字段兜底策略处理并产出综合结论【存在瑕疵需回访】。' }
+          ]
+        },
+        {
+          id: 'run_205642',
+          time: '20:56:42',
+          target: '当前草稿',
+          matched: 17,
+          total: 17,
+          duration: '10.8s',
+          status: 'ok',
+          conclusion: '核查无异常',
+          values: {
+            '受理日期': { val: '2026年11月9号', status: 'found', docLine: '第 2 行：受理时间：2026年11月9日 10:15:22', apiSnippet: '<OrderAcceptTime>2026-11-09 10:15:22</OrderAcceptTime>' },
+            '客户号码': { val: '13951006688', status: 'found', docLine: '第 3 行：客户号码：13951006688', apiSnippet: '<SerialNumber>13951006688</SerialNumber>' },
+            '原主资费': { val: '4G飞享套餐88元档', status: 'found', docLine: '第 4 行：变更前主套餐：4G飞享套餐88元档', apiSnippet: '<OldOfferName>4G飞享套餐88元档</OldOfferName>' },
+            '目标套餐': { val: '5G智享套餐128元档', status: 'found', docLine: '第 4 行：变更后主套餐：5G智享套餐128元档', apiSnippet: '<NewOfferName>5G智享套餐128元档</NewOfferName>' },
+            '标准资费': { val: '128元/月', status: 'found', docLine: '第 4 行：标准资费：128元/月', apiSnippet: '<MonthlyFee>128.00</MonthlyFee>' },
+            '合约期': { val: '12个月', status: 'found', docLine: '第 5 行：合约期：12个月', apiSnippet: '<BindMonths>12</BindMonths>' },
+            '低消承诺': { val: '月最低消费128元', status: 'found', docLine: '第 5 行：月最低消费128元', apiSnippet: '<MinConsume>128.00</MinConsume>' },
+            '办理渠道': { val: '中国移动江苏掌厅App', status: 'found', docLine: '第 2 行：受理渠道：中国移动江苏掌厅App', apiSnippet: '<ChannelName>中国移动江苏掌厅App</ChannelName>' },
+            '工号编码': { val: 'APP_SELF_01', status: 'found', docLine: '第 2 行：操作工号：APP_SELF_01', apiSnippet: '<StaffId>APP_SELF_01</StaffId>' },
+            '鉴权方式': { val: '实名人脸', status: 'found', docLine: '第 3 行：鉴权方式：实名人脸+短信随机码', apiSnippet: '<AuthMode>FACE_PLUS_SMS</AuthMode>' },
+            '短信下发时间': { val: '2026-11-09 10:14:05', status: 'found', docLine: '短彩信下行流水 #SMS99201', apiSnippet: '<SendTime>2026-11-09 10:14:05</SendTime>' },
+            '确认回复内容': { val: '确认办理5G智享128元套餐合约', status: 'found', docLine: '掌厅电子签章回执原文', apiSnippet: '<ReplyContent>确认办理5G智享128元套餐合约</ReplyContent>' },
+            '二次确认合规': { val: '合规', status: 'found', docLine: '人脸活体通过 + 短信确认早于竣工时间', apiSnippet: 'AuthVerify=PASS' },
+            '违约金告知': { val: '已明确告知', status: 'found', docLine: '第 5 行：电子签章确认违约金按未履约月数10%计收', apiSnippet: '<PenaltyClause>10%_REMAINING_MONTHS</PenaltyClause>' },
+            '录音流水号': { val: 'APP-SIGN-99201', status: 'found', docLine: '第 5 行：流水索引：APP-SIGN-99201', apiSnippet: '<TraceIndex>APP-SIGN-99201</TraceIndex>' },
+            '资费差额说明': { val: '月租由88元升至128元（+40元/月），含5G优享速率与30GB流量', status: 'found', docLine: '资费对比自动推导', apiSnippet: 'Delta=+40.00 CNY/mo' },
+            '稽核结论': { val: '核查无异常', status: 'found', docLine: '17/17 要素齐备，电子签章与短信回执闭环', apiSnippet: 'RuleEngine => PASS_NORMAL' }
+          },
+          traces: [
+            { round: 1, status: 'ok', title: '装载取证规程 Skill 与掌厅工单入参', cost: '0.3s', detail: 'mobile=13951006688, orderId=202611091015220391，匹配掌厅自主办理核查链路。' },
+            { round: 2, status: 'ok', title: '调用 queryCRMOrderDetail & querySMSSendInfo', cost: '6.4s', detail: '并行完成订单资费与短信回执取证，全部核心节点 100% 命中。' },
+            { round: 3, status: 'ok', title: '全要素溯源核验通过 (17/17)', cost: '4.1s', detail: '违约金电子签章条款与二次确认回执均完整合规，输出结论【核查无异常】。' }
+          ]
+        },
+        {
+          id: 'run_204109',
+          time: '20:41:09',
+          target: '线上 r2',
+          matched: 14,
+          total: 17,
+          duration: '14.1s',
+          status: 'warn',
+          conclusion: '存在瑕疵需回访',
+          values: {
+            '受理日期': { val: '2026年11月3号', status: 'found', docLine: '第 2 行：受理时间：2026年11月3日 16:08:11', apiSnippet: '<OrderAcceptTime>2026-11-03 16:08:11</OrderAcceptTime>' },
+            '客户号码': { val: '13770991122', status: 'found', docLine: '第 3 行：客户号码：13770991122', apiSnippet: '<SerialNumber>13770991122</SerialNumber>' },
+            '原主资费': { val: '5G智享套餐128元档', status: 'found', docLine: '第 4 行：原套餐128元档', apiSnippet: '<OldOfferName>5G智享套餐128元档</OldOfferName>' },
+            '目标套餐': { val: '5G畅享融合套餐239元档', status: 'found', docLine: '第 5 行：新套餐239元档', apiSnippet: '<NewOfferName>5G畅享融合套餐239元档</NewOfferName>' },
+            '标准资费': { val: '239元/月', status: 'found', docLine: '第 5 行：标准资费239元/月', apiSnippet: '<MonthlyFee>239.00</MonthlyFee>' },
+            '合约期': { val: '24个月', status: 'found', docLine: '第 6 行：合约期24个月', apiSnippet: '<BindMonths>24</BindMonths>' },
+            '低消承诺': { val: '月最低消费239元', status: 'found', docLine: '第 6 行：月最低消费239元', apiSnippet: '<MinConsume>239.00</MinConsume>' },
+            '办理渠道': { val: '社会合作厅专席', status: 'found', docLine: '第 2 行：社会合作厅专席', apiSnippet: '<ChannelName>社会合作厅专席</ChannelName>' },
+            '工号编码': { val: 'JSSZ3091', status: 'found', docLine: '第 2 行：工号 JSSZ3091', apiSnippet: '<StaffId>JSSZ3091</StaffId>' },
+            '鉴权方式': { val: '服务密码', status: 'found', docLine: '第 3 行：服务密码校验', apiSnippet: '<AuthMode>SRV_PASSWD</AuthMode>' },
+            '短信下发时间': { val: '2026-11-03 16:07:00', status: 'found', docLine: '短信网关下行记录', apiSnippet: '<SendTime>2026-11-03 16:07:00</SendTime>' },
+            '确认回复内容': { val: '{{确认回复内容·超时未回}}', status: 'missing', docLine: '时间窗内未检索到客户上行确认回复', apiSnippet: '<ReplyContent nil="true" />' },
+            '二次确认合规': { val: '存疑', status: 'found', docLine: '下发短信无客户上行回复，触发存疑判定', apiSnippet: 'ReplyMissing => DOUBTFUL' },
+            '违约金告知': { val: '{{违约金告知·未采集}}', status: 'missing', docLine: '纸质免填单扫描件未识别违约金勾选', apiSnippet: '<PenaltyClause nil="true" />' },
+            '录音流水号': { val: '[待补调外呼录音索引]', status: 'missing', docLine: '合作厅柜面无录音流水', apiSnippet: '<CallRecordId nil="true" />' },
+            '资费差额说明': { val: '月租由128元升至239元（+111元/月）', status: 'found', docLine: '资费对比推导', apiSnippet: 'Delta=+111.00 CNY/mo' },
+            '稽核结论': { val: '存在瑕疵需回访', status: 'found', docLine: '缺上行确认回执与违约金签字，建议重点回访', apiSnippet: 'RuleEngine => PARTIAL_DEFECT_CALLBACK' }
+          },
+          traces: [
+            { round: 1, status: 'ok', title: '装载线上 r2 版本规程与入参', cost: '0.4s', detail: '目标基线：r2；mobile=13770991122。' },
+            { round: 2, status: 'warn', title: '调用 querySMSSendInfo 发现上行确认缺失', cost: '8.2s', detail: '检索前后 30 分钟窗口仅见下行通知，ReplyContent 为空。' },
+            { round: 3, status: 'warn', title: '完成核验 (14/17 命中)', cost: '5.5s', detail: '3 项证据缺失，综合结论判定为【存在瑕疵需回访】。' }
+          ]
+        }
+      ]
+    };
+
+    // =========================================================================
+    // 2. 工具函数与通知系统
+    // =========================================================================
+    function escapeHtml(str) {
+      return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    let toastTimer = null;
+    function showToast(msg) {
+      const stack = document.getElementById('toast-stack');
+      stack.innerHTML = '';
+      const item = document.createElement('div');
+      item.className = 'toast-msg';
+      item.textContent = msg;
+      stack.appendChild(item);
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => {
+        if (item.parentNode) item.parentNode.removeChild(item);
+      }, 1800);
+    }
+
+    function countFieldRefsInBody(fieldName) {
+      const token = '{{' + fieldName + '}}';
+      let count = 0;
+      let idx = 0;
+      while ((idx = state.bodyText.indexOf(token, idx)) !== -1) {
+        count++;
+        idx += token.length;
+      }
+      return count;
+    }
+
+    function getCurrentRun() {
+      return state.debugRuns.find(r => r.id === state.activeDebugRunId) || state.debugRuns[0];
+    }
+
+    function getEvidenceBadgeInfo(evType) {
+      if (evType === 'input') return { short: '入', label: '调用入参', cls: 'ev-input' };
+      if (evType === 'derive') return { short: '推', label: '逻辑推导', cls: 'ev-derive' };
+      return { short: '引', label: '原文引用', cls: 'ev-quote' };
+    }
+
+    function markDraftDirty(reason) {
+      state.draftSaved = false;
+      updateStatusBar(reason);
+    }
+
+    // =========================================================================
+    // 3. 主题切换与视口模式（带平台菜单栏 vs 全屏专注 IDE）
+    // =========================================================================
+    function setTheme(theme) {
+      state.theme = theme;
+      document.documentElement.setAttribute('data-theme', theme);
+      document.getElementById('theme-btn-light').classList.toggle('active', theme === 'light');
+      document.getElementById('theme-btn-dark').classList.toggle('active', theme === 'dark');
+      document.getElementById('sb-theme-toggle').textContent =
+        theme === 'light' ? '切换暗色大屏' : '切换亮色云原生';
+    }
+
+    function toggleThemeQuick() {
+      setTheme(state.theme === 'light' ? 'dark' : 'light');
+      showToast(state.theme === 'dark' ? '已切换至暗色「省网指挥大屏」主题' : '已切换至亮色「极昼云原生」主题');
+    }
+
+    function setFocusFullscreen(flag) {
+      state.isFocusFullscreen = Boolean(flag);
+      document.getElementById('app-shell').classList.toggle('is-focus-fullscreen', state.isFocusFullscreen);
+      document.getElementById('vp-btn-shell').classList.toggle('active', !state.isFocusFullscreen);
+      document.getElementById('vp-btn-ide').classList.toggle('active', state.isFocusFullscreen);
+
+      const fsBtn = document.getElementById('btn-focus-fs');
+      const fsLbl = document.getElementById('btn-focus-fs-label');
+      fsBtn.classList.toggle('is-active', state.isFocusFullscreen);
+      fsLbl.textContent = state.isFocusFullscreen ? '退出全屏' : '专注全屏';
+
+      document.getElementById('sb-shell-toggle').style.display = state.isFocusFullscreen ? 'inline-block' : 'none';
+    }
+
+    function toggleFocusFullscreen() {
+      setFocusFullscreen(!state.isFocusFullscreen);
+      showToast(state.isFocusFullscreen ? '已进入全屏专注 IDE 模式（按 Esc 可还原）' : '已恢复外层平台主菜单与顶栏');
+    }
+
+    function togglePlatformRail() {
+      state.isPlatformRailCollapsed = !state.isPlatformRailCollapsed;
+      document.getElementById('platform-rail').classList.toggle('is-collapsed', state.isPlatformRailCollapsed);
+      document.getElementById('rail-collapse-icon').textContent = state.isPlatformRailCollapsed ? '⇥' : '⇤';
+    }
+
+    function handleBackList() {
+      if (state.isFocusFullscreen) setFocusFullscreen(false);
+      showToast('已重置全屏态并模拟返回「核查模板列表」');
+    }
+
+    // =========================================================================
+    // 4. 左侧区域渲染（50px 切换条 + 214px 资源列表 + 拖拽排序 + 搜索）
+    // =========================================================================
+    function onActivityTabClick(sec) {
+      if (state.leftSection === sec) {
+        state.isExplorerCollapsed = !state.isExplorerCollapsed;
+      } else {
+        state.leftSection = sec;
+        state.isExplorerCollapsed = false;
+        state.searchQuery = '';
+        document.getElementById('explorer-search').value = '';
+        document.getElementById('search-clear-btn').classList.remove('visible');
+        if (sec === 'history') {
+          setTemplateMode('diff');
+        }
+        state.inspectorTab = 'props';
+      }
+      renderLeftZone();
+      renderInspector();
+    }
+
+    function switchLeftSection(sec) {
+      state.leftSection = sec;
+      state.isExplorerCollapsed = false;
+      state.inspectorTab = 'props';
+      if (sec === 'history') setTemplateMode('diff');
+      renderLeftZone();
+      renderInspector();
+    }
+
+    function onExplorerSearch(val) {
+      state.searchQuery = val.trim();
+      document.getElementById('search-clear-btn').classList.toggle('visible', state.searchQuery.length > 0);
+      renderExplorerList();
+    }
+
+    function clearExplorerSearch() {
+      state.searchQuery = '';
+      document.getElementById('explorer-search').value = '';
+      document.getElementById('search-clear-btn').classList.remove('visible');
+      renderExplorerList();
+    }
+
+    function renderLeftZone() {
+      document.querySelectorAll('.act-tab-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.sec === state.leftSection && !state.isExplorerCollapsed);
+      });
+      document.getElementById('ide-explorer').classList.toggle('is-collapsed', state.isExplorerCollapsed);
+      document.getElementById('split-left').style.display = state.isExplorerCollapsed ? 'none' : 'block';
+
+      document.getElementById('cnt-fields').textContent = String(state.fields.length);
+      document.getElementById('cnt-inputs').textContent = String(state.inputs.length);
+      document.getElementById('cnt-skills').textContent = String(state.skills.length);
+      document.getElementById('cnt-cases').textContent = String(state.cases.length);
+      document.getElementById('cnt-history').textContent = String(state.history.length);
+
+      const titleMap = {
+        fields: `核查字段清单 (${state.fields.length})`,
+        inputs: `调用入参契约 (${state.inputs.length})`,
+        skills: `已绑定规程 (${state.skills.length})`,
+        cases: `基准回归用例 (${state.cases.length})`,
+        history: `版本修订历史 (${state.history.length})`
+      };
+      const btnMap = {
+        fields: '+ 新建',
+        inputs: '+ 新建',
+        skills: '+ 绑定',
+        cases: '+ 新建',
+        history: '对比基线'
+      };
+      const phMap = {
+        fields: '过滤字段名 / 说明...',
+        inputs: '过滤入参 Key / 名称...',
+        skills: '过滤规程名 / 接口...',
+        cases: '过滤用例编号 / 名称...',
+        history: '过滤版本号 / 提交人...'
+      };
+
+      document.getElementById('explorer-title').textContent = titleMap[state.leftSection];
+      document.getElementById('explorer-add-btn').textContent = btnMap[state.leftSection];
+      document.getElementById('explorer-search').placeholder = phMap[state.leftSection];
+
+      renderExplorerList();
+      updateStatusBar();
+    }
+
+    function renderExplorerList() {
+      const box = document.getElementById('explorer-list');
+      const q = state.searchQuery.toLowerCase();
+      const run = getCurrentRun();
+
+      if (state.leftSection === 'fields') {
+        const html = state.fields
+          .map((f, idx) => ({ f, idx }))
+          .filter(({ f }) => !q || f.name.toLowerCase().includes(q) || f.description.toLowerCase().includes(q))
+          .map(({ f, idx }) => {
+            const ev = getEvidenceBadgeInfo(f.evidenceType);
+            const refs = countFieldRefsInBody(f.name);
+            const runInfo = run.values[f.name];
+            const dotCls = !runInfo ? 'muted' : runInfo.status === 'found' ? 'ok' : 'warn';
+            const hiddenBadge = !f.visible ? '<span class="ev-micro-tag" style="background:var(--recessed-bg);color:var(--text-3);border:1px solid var(--border-mid)">隐</span>' : '';
+            return `
+              <div class="res-item ${idx === state.selectedFieldIndex ? 'active' : ''}"
+                   draggable="true"
+                   ondragstart="onFieldDragStart(event, ${idx})"
+                   ondragover="onFieldDragOver(event)"
+                   ondragleave="onFieldDragLeave(event)"
+                   ondrop="onFieldDrop(event, ${idx})"
+                   onclick="selectField(${idx})">
+                <span class="drag-grip" title="拖拽调整字段顺序">⋮⋮</span>
+                <span class="status-dot ${dotCls}" title="${runInfo && runInfo.status === 'found' ? '最新调试已命中' : '最新调试缺失/待核'}"></span>
+                <div class="res-main">
+                  <div class="res-name-row">
+                    <span class="res-name">${escapeHtml(f.name)}</span>
+                    ${hiddenBadge}
+                  </div>
+                  <div class="res-sub">${escapeHtml(f.type)} · 引用 ${refs} 次</div>
+                </div>
+                <span class="ev-micro-tag ${ev.cls}" title="${ev.label}">${ev.short}</span>
+                <button class="quick-insert-btn" type="button" onclick="event.stopPropagation(); insertFieldToken('${escapeHtml(f.name)}')" title="插入 {{${escapeHtml(f.name)}}} 至模板">插入{{}}</button>
+              </div>
+            `;
+          })
+          .join('');
+        box.innerHTML = html || '<div style="padding:14px;color:var(--text-3);font-size:12px;text-align:center">无匹配的核查字段</div>';
+        return;
+      }
+
+      if (state.leftSection === 'inputs') {
+        box.innerHTML = state.inputs
+          .map((inp, idx) => ({ inp, idx }))
+          .filter(({ inp }) => !q || inp.key.toLowerCase().includes(q) || inp.label.toLowerCase().includes(q))
+          .map(({ inp, idx }) => `
+            <div class="res-item ${idx === state.selectedInputIndex ? 'active' : ''}" onclick="selectInput(${idx})">
+              <span class="status-dot ${inp.required ? 'ok' : 'muted'}"></span>
+              <div class="res-main">
+                <div class="res-name-row">
+                  <span class="res-name mono">${escapeHtml(inp.key)}</span>
+                  ${inp.required ? '<span class="ev-micro-tag ev-quote">必填</span>' : '<span class="ev-micro-tag" style="background:var(--recessed-bg);color:var(--text-3)">选填</span>'}
+                </div>
+                <div class="res-sub">${escapeHtml(inp.label)} · ${escapeHtml(inp.format)}</div>
+              </div>
+            </div>
+          `)
+          .join('');
+        return;
+      }
+
+      if (state.leftSection === 'skills') {
+        box.innerHTML = state.skills
+          .map((sk, idx) => ({ sk, idx }))
+          .filter(({ sk }) => !q || sk.name.toLowerCase().includes(q) || sk.apis.join(',').toLowerCase().includes(q))
+          .map(({ sk, idx }) => `
+            <div class="res-item ${idx === state.selectedSkillIndex ? 'active' : ''}" onclick="selectSkill(${idx})">
+              <span class="status-dot ok"></span>
+              <div class="res-main">
+                <div class="res-name-row">
+                  <span class="res-name">${escapeHtml(sk.name)}</span>
+                  <span class="ref-count-tag">${escapeHtml(sk.version)}</span>
+                </div>
+                <div class="res-sub mono">${escapeHtml(sk.apis.join(', '))}</div>
+              </div>
+            </div>
+          `)
+          .join('');
+        return;
+      }
+
+      if (state.leftSection === 'cases') {
+        box.innerHTML = state.cases
+          .map((c, idx) => ({ c, idx }))
+          .filter(({ c }) => !q || c.id.toLowerCase().includes(q) || c.name.toLowerCase().includes(q))
+          .map(({ c, idx }) => `
+            <div class="res-item ${idx === state.selectedCaseIndex ? 'active' : ''}" onclick="selectCase(${idx})">
+              <span class="status-dot ok"></span>
+              <div class="res-main">
+                <div class="res-name-row">
+                  <span class="res-name mono">${escapeHtml(c.id)}</span>
+                  <span class="ev-micro-tag ev-input">${escapeHtml(c.lastStatus)}</span>
+                </div>
+                <div class="res-sub">${escapeHtml(c.name)}</div>
+              </div>
+            </div>
+          `)
+          .join('');
+        return;
+      }
+
+      if (state.leftSection === 'history') {
+        box.innerHTML = state.history
+          .map((h, idx) => ({ h, idx }))
+          .filter(({ h }) => !q || h.rev.toLowerCase().includes(q) || h.tag.toLowerCase().includes(q) || h.summary.toLowerCase().includes(q))
+          .map(({ h, idx }) => `
+            <div class="res-item ${idx === state.selectedHistoryIndex ? 'active' : ''}" onclick="selectHistory(${idx})">
+              <span class="status-dot ${h.rev === 'r2' ? 'ok' : h.rev === 'draft' ? 'warn' : 'muted'}"></span>
+              <div class="res-main">
+                <div class="res-name-row">
+                  <span class="res-name mono">${escapeHtml(h.rev)}</span>
+                  <span class="ev-micro-tag ${h.rev === 'r2' ? 'ev-input' : 'ev-quote'}">${escapeHtml(h.tag)}</span>
+                </div>
+                <div class="res-sub">${escapeHtml(h.time)} · ${escapeHtml(h.author)}</div>
+              </div>
+            </div>
+          `)
+          .join('');
+      }
+    }
+
+    // 字段拖拽重排
+    function onFieldDragStart(e, idx) {
+      state.dragFieldIdx = idx;
+      e.dataTransfer.effectAllowed = 'move';
+    }
+    function onFieldDragOver(e) {
+      e.preventDefault();
+      e.currentTarget.classList.add('drag-over');
+    }
+    function onFieldDragLeave(e) {
+      e.currentTarget.classList.remove('drag-over');
+    }
+    function onFieldDrop(e, targetIdx) {
+      e.preventDefault();
+      e.currentTarget.classList.remove('drag-over');
+      const from = state.dragFieldIdx;
+      state.dragFieldIdx = null;
+      if (from === null || from === targetIdx) return;
+      const [moved] = state.fields.splice(from, 1);
+      state.fields.splice(targetIdx, 0, moved);
+      state.selectedFieldIndex = targetIdx;
+      markDraftDirty();
+      renderExplorerList();
+      renderInspector();
+      showToast(`已调整字段「${moved.name}」排序`);
+    }
+
+    function selectField(idx) {
+      state.leftSection = 'fields';
+      state.selectedFieldIndex = idx;
+      state.inspectorTab = 'props';
+      renderLeftZone();
+      renderTemplateArea();
+      renderInspector();
+    }
+
+    function selectInput(idx) {
+      state.selectedInputIndex = idx;
+      state.inspectorTab = 'props';
+      renderExplorerList();
+      renderInspector();
+    }
+
+    function selectSkill(idx) {
+      state.selectedSkillIndex = idx;
+      state.inspectorTab = 'props';
+      renderExplorerList();
+      renderInspector();
+    }
+
+    function selectCase(idx) {
+      state.selectedCaseIndex = idx;
+      state.inspectorTab = 'props';
+      renderExplorerList();
+      renderInspector();
+    }
+
+    function selectHistory(idx) {
+      state.selectedHistoryIndex = idx;
+      state.inspectorTab = 'props';
+      setTemplateMode('diff');
+      renderExplorerList();
+      renderInspector();
+    }
+
+    function handleExplorerCreate() {
+      if (state.leftSection === 'fields') {
+        const newName = '自定义核查项' + (state.fields.length + 1);
+        state.fields.push({
+          name: newName,
+          visible: true,
+          type: '文本',
+          format: '',
+          enumValues: [],
+          evidenceType: 'quote',
+          quoteWhole: false,
+          whenMissing: '保留占位',
+          defaultValue: '',
+          description: '请补充该字段的自然语言取证说明与核验口径。',
+          refBy: []
+        });
+        state.selectedFieldIndex = state.fields.length - 1;
+        state.inspectorTab = 'props';
+        markDraftDirty();
+        renderLeftZone();
+        renderInspector();
+        showToast(`已新建字段「${newName}」，可在右侧直接配置规则`);
+      } else if (state.leftSection === 'inputs') {
+        const key = 'extParam' + (state.inputs.length + 1);
+        state.inputs.push({ key, label: '扩展业务参数', required: false, format: '字符串', sample: 'EXT_01', desc: '新增扩展调测入参契约。' });
+        state.selectedInputIndex = state.inputs.length - 1;
+        markDraftDirty();
+        renderLeftZone();
+        renderInspector();
+        showToast(`已新增入参「${key}」`);
+      } else if (state.leftSection === 'skills') {
+        if (state.skills.some(s => s.id === 'skill_voice_qc')) {
+          showToast('规程「外呼录音质检」已在绑定列表中');
+          return;
+        }
+        state.skills.push({
+          id: 'skill_voice_qc',
+          name: '外呼录音质检',
+          version: 'v2',
+          apis: ['queryCallRecordMeta', 'queryAsrTranscript'],
+          summary: '拉取10086外呼专席录音ASR转写文本，核验资费升档与违约金标准口播命中率。',
+          markdown: '### 规程步骤\n1. 根据 `orderId` 检索外呼录音流水 `CallRecordId`；\n2. 扫描 ASR 文本中的违约金与低消口播关键词。'
+        });
+        state.selectedSkillIndex = state.skills.length - 1;
+        markDraftDirty();
+        renderLeftZone();
+        renderInspector();
+        showToast('已绑定规程 Skill「外呼录音质检 (v2)」');
+      } else if (state.leftSection === 'cases') {
+        saveCurrentDebugAsCase();
+      } else if (state.leftSection === 'history') {
+        setTemplateMode('diff');
+        showToast('已打开工作草稿与线上基线 r2 行级差异对比');
+      }
+    }
+
+    // =========================================================================
+    // 5. 中间上方：模板区域（原文 / 预览 / 双栏 / Diff + {{ 自动补全 + 悬浮气泡）
+    // =========================================================================
+    function setTemplateMode(mode) {
+      state.tplMode = mode;
+      document.getElementById('mode-btn-code').classList.toggle('active', mode === 'code');
+      document.getElementById('mode-btn-preview').classList.toggle('active', mode === 'preview');
+      document.getElementById('mode-btn-split').classList.toggle('active', mode === 'split');
+      renderTemplateArea();
+    }
+
+    function exitDebugSnapshot() {
+      state.isPreviewSnapshot = false;
+      renderTemplateArea();
+      showToast('已切回模板静态实时渲染预览');
+    }
+
+    function toggleRawEditMode() {
+      state.rawEditMode = !state.rawEditMode;
+      const rawWrap = document.getElementById('raw-textarea-wrap');
+      const linesView = document.getElementById('editor-lines-view');
+      const btn = document.getElementById('btn-toggle-raw');
+      rawWrap.classList.toggle('visible', state.rawEditMode);
+      linesView.style.display = state.rawEditMode ? 'none' : 'block';
+      btn.classList.toggle('is-active', state.rawEditMode);
+      btn.textContent = state.rawEditMode ? '完成源码编辑' : '编辑源码';
+      if (state.rawEditMode) {
+        const ta = document.getElementById('raw-code-textarea');
+        ta.value = state.bodyText;
+        ta.focus();
+      } else {
+        closeAutocomplete();
+        renderTemplateArea();
+      }
+    }
+
+    function renderTemplateArea() {
+      const editorSurface = document.getElementById('editor-surface');
+      const previewStage = document.getElementById('preview-stage');
+      const diffSurface = document.getElementById('diff-surface');
+      const banner = document.getElementById('snapshot-banner');
+      const run = getCurrentRun();
+
+      if (state.isPreviewSnapshot && state.tplMode !== 'code' && state.tplMode !== 'diff') {
+        banner.classList.add('visible');
+        document.getElementById('snapshot-banner-text').textContent =
+          `调试快照 · ${run.time} (${run.matched}/${run.total} 命中)`;
+      } else {
+        banner.classList.remove('visible');
+      }
+
+      if (state.tplMode === 'diff') {
+        editorSurface.style.display = 'none';
+        previewStage.style.display = 'none';
+        diffSurface.style.display = 'flex';
+        renderDiffView();
+        return;
+      }
+
+      diffSurface.style.display = 'none';
+      editorSurface.style.display = state.tplMode === 'preview' ? 'none' : 'flex';
+      previewStage.style.display = state.tplMode === 'code' ? 'none' : 'flex';
+      previewStage.classList.toggle('split-left-border', state.tplMode === 'split');
+
+      renderEditorLines();
+      renderReportPreview();
+      updateSyntaxHealth();
+    }
+
+    function renderEditorLines() {
+      const container = document.getElementById('editor-lines-view');
+      const definedNames = new Set(state.fields.map(f => f.name));
+      const selectedField = state.fields[state.selectedFieldIndex]?.name || '';
+      const lines = state.bodyText.split('\n');
+
+      container.innerHTML = lines
+        .map((line, i) => {
+          const ln = i + 1;
+          let formatted = escapeHtml(line);
+          if (line.startsWith('#')) {
+            formatted = `<span class="cm-heading">${formatted}</span>`;
+          } else {
+            formatted = formatted.replace(/\{\%[\s\S]*?\%\}/g, m => `<span class="cm-jinja-ctrl">${m}</span>`);
+            formatted = formatted.replace(/\{\{([^}]+)\}\}/g, (full, rawName) => {
+              const fname = rawName.trim();
+              const isDef = definedNames.has(fname);
+              const isSel = state.leftSection === 'fields' && fname === selectedField;
+              const cls = ['cm-field-chip', isSel ? 'is-selected' : '', !isDef ? 'is-undefined' : ''].filter(Boolean).join(' ');
+              return `<span class="${cls}" onclick="event.stopPropagation(); onEditorFieldChipClick('${fname}', ${ln})" title="${isDef ? '点击在右侧编辑「' + fname + '」规则' : '未定义字段：点击快速创建'}">{{${fname}}}</span>`;
+            });
+          }
+          return `
+            <div class="code-line ${ln === state.activeLine ? 'is-active' : ''}" onclick="setActiveLine(${ln})">
+              <span class="code-gutter">${ln}</span>
+              <span class="code-content">${formatted || '&nbsp;'}</span>
+            </div>
+          `;
+        })
+        .join('');
+
+      if (state.rawEditMode) {
+        const ta = document.getElementById('raw-code-textarea');
+        if (ta.value !== state.bodyText) ta.value = state.bodyText;
+      }
+    }
+
+    function setActiveLine(ln) {
+      state.activeLine = ln;
+      document.getElementById('sb-cursor').textContent = `Ln ${ln}, Col 1 · UTF-8`;
+      renderEditorLines();
+    }
+
+    function onEditorFieldChipClick(fieldName, ln) {
+      state.activeLine = ln;
+      document.getElementById('sb-cursor').textContent = `Ln ${ln}, Col 6 · UTF-8`;
+      const idx = state.fields.findIndex(f => f.name === fieldName);
+      if (idx >= 0) {
+        state.leftSection = 'fields';
+        state.isExplorerCollapsed = false;
+        state.selectedFieldIndex = idx;
+        state.inspectorTab = 'props';
+        renderLeftZone();
+        renderEditorLines();
+        renderInspector();
+      } else {
+        state.fields.push({
+          name: fieldName,
+          visible: true,
+          type: '文本',
+          format: '',
+          enumValues: [],
+          evidenceType: 'quote',
+          quoteWhole: false,
+          whenMissing: '保留占位',
+          defaultValue: '',
+          description: '从正文中点击自动补建的核查字段。',
+          refBy: []
+        });
+        state.leftSection = 'fields';
+        state.selectedFieldIndex = state.fields.length - 1;
+        state.inspectorTab = 'props';
+        renderLeftZone();
+        renderTemplateArea();
+        renderInspector();
+        showToast(`已补建未定义字段「${fieldName}」`);
+      }
+    }
+
+    function renderReportPreview() {
+      const box = document.getElementById('preview-scroll');
+      const run = getCurrentRun();
+      const conclusion = run.conclusion || '存在瑕疵需回访';
+      const isPass = conclusion === '核查无异常';
+
+      // 解析 Jinja2 {% if 稽核结论 == "核查无异常" %} 分支
+      let rendered = state.bodyText.replace(
+        /\{\%\s*if\s+稽核结论\s*==\s*"核查无异常"\s*\%\}([\s\S]*?)\{\%\s*else\s*\%\}([\s\S]*?)\{\%\s*endif\s*\%\}/g,
+        (_, passBranch, elseBranch) => (isPass ? passBranch.trim() : elseBranch.trim())
+      );
+
+      const lines = rendered.split('\n');
+      let titleText = '中国移动套餐变更业务营销规范核查报告';
+      const bodyParagraphs = [];
+
+      lines.forEach(raw => {
+        const trimmed = raw.trim();
+        if (!trimmed) return;
+        if (trimmed.startsWith('# ')) {
+          titleText = trimmed.slice(2).trim();
+          return;
+        }
+        const htmlLine = escapeHtml(trimmed).replace(/\{\{([^}]+)\}\}/g, (_, rawKey) => {
+          const key = rawKey.trim();
+          const fDef = state.fields.find(item => item.name === key);
+          const rVal = run.values[key];
+          let displayVal = rVal ? rVal.val : (fDef?.defaultValue || `[${key}]`);
+          const isMissing = !rVal || rVal.status !== 'found';
+          const isActive = state.inspectorTab === 'evidence' && state.evidenceFieldName === key;
+          const cls = ['report-field-val', isMissing ? 'is-missing' : '', isActive ? 'is-active' : ''].filter(Boolean).join(' ');
+          return `<span class="${cls}" data-fkey="${escapeHtml(key)}" onmouseenter="showFieldTooltip(event, '${escapeHtml(key)}')" onmousemove="moveFieldTooltip(event)" onmouseleave="hideFieldTooltip()" onclick="onPreviewFieldClick('${escapeHtml(key)}')">${escapeHtml(displayVal)}</span>`;
+        });
+
+        if (/^[一二三四五六七八九十]+、/.test(trimmed)) {
+          bodyParagraphs.push(`<div class="sheet-section"><div class="sheet-sec-head">${htmlLine}</div></div>`);
+        } else {
+          bodyParagraphs.push(`<div class="sheet-section">${htmlLine}</div>`);
+        }
+      });
+
+      const modeTag = state.isPreviewSnapshot
+        ? `调试运行快照 · ${run.time}`
+        : `实时渲染预览 · 绑定最新调测值 (${run.time})`;
+
+      box.innerHTML = `
+        <article class="audit-report-sheet">
+          <div class="sheet-eyebrow">
+            <div class="sheet-meta-group">
+              <span class="mono" style="font-weight:600;color:var(--text-2)">模板：tpl_package_change</span>
+              <span>·</span>
+              <span class="mono">${escapeHtml(modeTag)}</span>
+              <span>·</span>
+              <span class="mono">命中 ${run.matched}/${run.total}</span>
+            </div>
+            <span class="sheet-badge ${isPass ? 'pass' : 'partial'}">${escapeHtml(conclusion)}</span>
+          </div>
+          <div class="sheet-hint-bar">
+            <span>悬浮字段值查看对应 <strong class="mono">{{Key}}</strong> · 点击字段值跳转右侧原始单据与接口证据</span>
+            <button class="ide-btn ide-btn-xs" type="button" onclick="copyRenderedReport()">复制报告正文</button>
+          </div>
+          <h2 class="sheet-title">${escapeHtml(titleText)}</h2>
+          ${bodyParagraphs.join('')}
+        </article>
+      `;
+    }
+
+    function renderDiffView() {
+      const h = state.history[state.selectedHistoryIndex] || state.history[0];
+      document.getElementById('diff-title-label').textContent =
+        `版本行级差异对比：工作草稿 (draft) vs ${h.rev === 'draft' ? 'r2 (线上基线)' : h.rev + ' (' + h.tag + ')'}`;
+
+      const diffRows = [
+        { type: 'ctx', text: ' # 中国移动套餐变更业务营销规范核查报告' },
+        { type: 'ctx', text: ' 二、客户鉴权与二次确认溯源' },
+        { type: 'del', text: '-客户确认回复为：{{确认回复内容}}。' },
+        { type: 'add', text: '+客户上行确认回复原文为：「{{确认回复内容}}」，二次确认合规性判定：{{二次确认合规}}。' },
+        { type: 'ctx', text: ' 三、资费履约告知与录音质检' },
+        { type: 'del', text: '-协议违约金条款核查结果：{{违约金告知}}。' },
+        { type: 'add', text: '+资费变动推导摘要：{{资费差额说明}}。协议违约金条款告知核验：{{违约金告知}}；关联外呼录音流水索引：{{录音流水号}}。' },
+        { type: 'add', text: '+{% if 稽核结论 == "核查无异常" %}' },
+        { type: 'ctx', text: ' 四、综合稽核结论：【{{稽核结论}}】发现部分告知留痕待补齐，建议转派专席回访确认。' }
+      ];
+
+      document.getElementById('diff-scroll').innerHTML = diffRows
+        .map(r => {
+          const sign = r.type === 'add' ? '+' : r.type === 'del' ? '-' : ' ';
+          const body = r.type === 'ctx' ? r.text : r.text.slice(1);
+          return `<div class="diff-row ${r.type === 'ctx' ? '' : r.type}"><span class="diff-sign">${sign}</span><span>${escapeHtml(body)}</span></div>`;
+        })
+        .join('');
+    }
+
+    // 预览报告字段悬浮气泡与点击跳转证据溯源
+    function showFieldTooltip(e, key) {
+      const tip = document.getElementById('report-field-tooltip');
+      const f = state.fields.find(item => item.name === key);
+      const ev = getEvidenceBadgeInfo(f ? f.evidenceType : 'quote');
+      const runInfo = getCurrentRun().values[key];
+      const stText = runInfo && runInfo.status === 'found' ? '已命中证据' : '缺失·启用兜底';
+
+      tip.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+          <span class="mono" style="font-weight:700;color:var(--brand)">{{${escapeHtml(key)}}}</span>
+          <span class="ev-micro-tag ${ev.cls}">${ev.label}</span>
+        </div>
+        <div style="font-size:11px;color:var(--text-3)">状态：${stText} · 点击定位右侧证据</div>
+      `;
+      tip.classList.add('visible');
+      moveFieldTooltip(e);
+    }
+
+    function moveFieldTooltip(e) {
+      const tip = document.getElementById('report-field-tooltip');
+      if (!tip.classList.contains('visible')) return;
+      const x = Math.min(window.innerWidth - 230, e.clientX + 12);
+      const y = Math.max(12, e.clientY - 58);
+      tip.style.left = x + 'px';
+      tip.style.top = y + 'px';
+    }
+
+    function hideFieldTooltip() {
+      document.getElementById('report-field-tooltip').classList.remove('visible');
+    }
+
+    function onPreviewFieldClick(key) {
+      hideFieldTooltip();
+      state.evidenceFieldName = key;
+      state.inspectorTab = 'evidence';
+      const fIdx = state.fields.findIndex(f => f.name === key);
+      if (fIdx >= 0) state.selectedFieldIndex = fIdx;
+      renderLeftZone();
+      renderReportPreview();
+      renderInspector();
+      showToast(`已定位字段「{{${key}}}」原始单据与接口报文证据`);
+    }
+
+    // {{ 自动补全单浮层逻辑
+    function openAutocompleteDemo(e) {
+      if (e) e.stopPropagation();
+      if (state.tplMode === 'preview' || state.tplMode === 'diff') {
+        setTemplateMode('split');
+      }
+      const btn = document.getElementById('btn-trigger-ac');
+      const rect = btn.getBoundingClientRect();
+      openAutocompleteAt(Math.max(80, rect.left - 100), rect.bottom + 8, '');
+    }
+
+    function openAutocompleteAt(x, y, filterText) {
+      state.acVisible = true;
+      state.acFilter = filterText || '';
+      state.acActiveIdx = 0;
+      const popup = document.getElementById('cm-ac-popup');
+      popup.style.left = Math.min(window.innerWidth - 280, x) + 'px';
+      popup.style.top = Math.min(window.innerHeight - 250, y) + 'px';
+      popup.classList.add('visible');
+      renderAutocompleteList();
+    }
+
+    function closeAutocomplete() {
+      state.acVisible = false;
+      document.getElementById('cm-ac-popup').classList.remove('visible');
+    }
+
+    function getFilteredAcFields() {
+      const q = state.acFilter.toLowerCase();
+      return state.fields.filter(f => !q || f.name.toLowerCase().includes(q));
+    }
+
+    function renderAutocompleteList() {
+      const list = getFilteredAcFields();
+      const box = document.getElementById('cm-ac-list');
+      if (!list.length) {
+        box.innerHTML = '<div style="padding:8px;font-size:11.5px;color:var(--text-3)">无匹配字段，按 Esc 关闭</div>';
+        return;
+      }
+      if (state.acActiveIdx >= list.length) state.acActiveIdx = 0;
+      box.innerHTML = list
+        .map((f, idx) => {
+          const ev = getEvidenceBadgeInfo(f.evidenceType);
+          return `
+            <div class="cm-ac-item ${idx === state.acActiveIdx ? 'is-active' : ''}"
+                 onmousedown="event.preventDefault(); applyAutocompleteField('${escapeHtml(f.name)}')">
+              <span class="mono" style="font-weight:600">{{${escapeHtml(f.name)}}}</span>
+              <span class="ev-micro-tag ${ev.cls}">${ev.short} · ${escapeHtml(f.type)}</span>
+            </div>
+          `;
+        })
+        .join('');
+    }
+
+    function onRawTextareaInput(e) {
+      const ta = e.target;
+      state.bodyText = ta.value;
+      markDraftDirty();
+      renderReportPreview();
+      renderExplorerList();
+      updateSyntaxHealth();
+
+      const pos = ta.selectionStart || 0;
+      const before = ta.value.slice(Math.max(0, pos - 18), pos);
+      const match = before.match(/\{\{([^\s{}]*)$/);
+      if (match) {
+        const rect = ta.getBoundingClientRect();
+        openAutocompleteAt(rect.left + 80, rect.top + 64, match[1]);
+      } else {
+        closeAutocomplete();
+      }
+    }
+
+    function onRawTextareaKeydown(e) {
+      if (!state.acVisible) return;
+      const list = getFilteredAcFields();
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        state.acActiveIdx = (state.acActiveIdx + 1) % Math.max(1, list.length);
+        renderAutocompleteList();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        state.acActiveIdx = (state.acActiveIdx - 1 + Math.max(1, list.length)) % Math.max(1, list.length);
+        renderAutocompleteList();
+      } else if (e.key === 'Enter' && list[state.acActiveIdx]) {
+        e.preventDefault();
+        applyAutocompleteField(list[state.acActiveIdx].name);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        closeAutocomplete();
+      }
+    }
+
+    function applyAutocompleteField(fieldName) {
+      if (state.rawEditMode) {
+        const ta = document.getElementById('raw-code-textarea');
+        const pos = ta.selectionStart || ta.value.length;
+        const left = ta.value.slice(0, pos).replace(/\{\{[^\s{}]*$/, '{{' + fieldName + '}}');
+        const right = ta.value.slice(pos).replace(/^\}\}/, '');
+        state.bodyText = left + right;
+        ta.value = state.bodyText;
+        ta.focus();
+      } else {
+        insertFieldToken(fieldName);
+      }
+      closeAutocomplete();
+      markDraftDirty();
+      renderTemplateArea();
+      renderExplorerList();
+      showToast(`已补全插入字段 {{${fieldName}}}`);
+    }
+
+    function insertFieldToken(fieldName) {
+      const lines = state.bodyText.split('\n');
+      const targetIdx = Math.min(Math.max(0, state.activeLine - 1), lines.length - 1);
+      lines[targetIdx] = lines[targetIdx] + ` {{${fieldName}}}`;
+      state.bodyText = lines.join('\n');
+      if (state.tplMode === 'preview' || state.tplMode === 'diff') {
+        setTemplateMode('split');
+      }
+      markDraftDirty();
+      renderTemplateArea();
+      renderExplorerList();
+      showToast(`已在第 ${targetIdx + 1} 行插入 {{${fieldName}}}`);
+    }
+
+    // 顶部模板操作按钮：+ 插入字段、语法校验、保存草稿、发布上线、更多
+    function openInsertFieldMenu(e) {
+      e.stopPropagation();
+      const rect = e.currentTarget.getBoundingClientRect();
+      const items = state.fields.slice(0, 10).map(f => ({
+        label: `插入 {{${f.name}}}`,
+        sub: f.type,
+        action: () => insertFieldToken(f.name)
+      }));
+      showDropdownMenu(rect.left, rect.bottom + 4, items);
+    }
+
+    function openMoreMenu(e) {
+      e.stopPropagation();
+      const rect = e.currentTarget.getBoundingClientRect();
+      showDropdownMenu(rect.right - 178, rect.bottom + 4, [
+        { label: state.theme === 'light' ? '切换至暗色省网大屏' : '切换至亮色极昼云原生', sub: 'Theme', action: () => toggleThemeQuick() },
+        { label: state.isFocusFullscreen ? '显示左侧平台主菜单' : '收起平台菜单专注 IDE', sub: 'Esc', action: () => toggleFocusFullscreen() },
+        { label: '查看草稿与线上 r2 差异', sub: 'Diff', action: () => setTemplateMode('diff') },
+        { label: '复制渲染后核查报告文本', sub: 'Copy', action: () => copyRenderedReport() }
+      ]);
+    }
+
+    function showDropdownMenu(x, y, items) {
+      const menu = document.getElementById('dropdown-menu');
+      menu.style.left = Math.max(8, Math.min(window.innerWidth - 190, x)) + 'px';
+      menu.style.top = Math.min(window.innerHeight - 240, y) + 'px';
+      menu.innerHTML = items
+        .map((it, idx) => `<button class="dropdown-item" type="button" data-ddidx="${idx}"><span>${escapeHtml(it.label)}</span><span class="mono" style="font-size:11px;color:var(--text-3)">${escapeHtml(it.sub || '')}</span></button>`)
+        .join('');
+      menu.querySelectorAll('.dropdown-item').forEach((btn, idx) => {
+        btn.onclick = () => {
+          closeDropdownMenu();
+          items[idx].action();
+        };
+      });
+      menu.classList.add('visible');
+    }
+
+    function closeDropdownMenu() {
+      document.getElementById('dropdown-menu').classList.remove('visible');
+    }
+
+    function updateSyntaxHealth() {
+      const defined = new Set(state.fields.map(f => f.name));
+      const undef = [];
+      state.bodyText.replace(/\{\{([^}]+)\}\}/g, (_, raw) => {
+        const k = raw.trim();
+        if (!defined.has(k) && !undef.includes(k)) undef.push(k);
+      });
+      const el = document.getElementById('sb-syntax-health');
+      if (undef.length === 0) {
+        el.style.color = 'var(--ok)';
+        el.textContent = '✓ Jinja2 语法健康 (0 未定义引用)';
+      } else {
+        el.style.color = 'var(--err)';
+        el.textContent = `⚠ 发现 ${undef.length} 个未定义字段 (${undef.join('、')})`;
+      }
+      return undef;
+    }
+
+    function runSyntaxCheck() {
+      const undef = updateSyntaxHealth();
+      if (undef.length === 0) {
+        showToast(`Jinja2 语法与字段契约校验通过：共 ${state.fields.length} 项字段全部有效`);
+      } else {
+        showToast(`校验告警：存在未定义字段 ${undef.join('、')}`);
+      }
+    }
+
+    function saveDraft() {
+      const now = new Date();
+      const hh = String(now.getHours()).padStart(2, '0');
+      const mm = String(now.getMinutes()).padStart(2, '0');
+      const ss = String(now.getSeconds()).padStart(2, '0');
+      state.draftSaved = true;
+      state.lastSavedAt = `${hh}:${mm}:${ss}`;
+      updateStatusBar();
+      showToast(`草稿已保存 (${state.lastSavedAt})`);
+    }
+
+    function openPublishDialog() {
+      document.getElementById('pub-field-cnt').textContent = String(state.fields.length);
+      document.getElementById('publish-modal').classList.add('visible');
+    }
+
+    function closePublishDialog() {
+      document.getElementById('publish-modal').classList.remove('visible');
+    }
+
+    function confirmPublish() {
+      const note = document.getElementById('publish-note-input').value.trim() || '常规规则优化发布';
+      closePublishDialog();
+      state.draftSaved = true;
+      state.history.unshift({
+        rev: 'r3',
+        tag: '最新线上基线',
+        author: '张佳林',
+        time: '刚刚',
+        base: 'r2',
+        summary: note,
+        diffStats: '当前线上生效版本'
+      });
+      renderLeftZone();
+      showToast('已成功发布上线新版本 r3！');
+    }
+
+    function copyRenderedReport() {
+      showToast('已将当前核查报告全文复制至剪贴板');
+    }
+
+    // =========================================================================
+    // 6. 右侧区域：常驻上下文检查器与内联属性编辑器（告别遮挡抽屉）
+    // =========================================================================
+    function setInspectorTab(tab) {
+      state.inspectorTab = tab;
+      document.getElementById('insp-tab-props').classList.toggle('active', tab === 'props');
+      document.getElementById('insp-tab-evidence').classList.toggle('active', tab === 'evidence');
+      renderReportPreview();
+      renderInspector();
+    }
+
+    function openEvidenceTab(sub) {
+      state.inspectorTab = 'evidence';
+      state.evidenceSubTab = sub || 'doc';
+      document.getElementById('insp-tab-props').classList.remove('active');
+      document.getElementById('insp-tab-evidence').classList.add('active');
+      renderInspector();
+    }
+
+    function renderInspector() {
+      document.getElementById('insp-tab-props').classList.toggle('active', state.inspectorTab === 'props');
+      document.getElementById('insp-tab-evidence').classList.toggle('active', state.inspectorTab === 'evidence');
+
+      const box = document.getElementById('inspector-scroll');
+      const ctxTag = document.getElementById('inspector-ctx-tag');
+
+      if (state.inspectorTab === 'evidence') {
+        ctxTag.textContent = '溯源定位';
+        const fname = state.evidenceFieldName || state.fields[state.selectedFieldIndex]?.name || '受理日期';
+        const fObj = state.fields.find(f => f.name === fname) || state.fields[0];
+        const run = getCurrentRun();
+        const evData = run.values[fname] || { val: '未命中', status: 'missing', docLine: '未匹配到单据行', apiSnippet: '<Empty/>' };
+        const evMeta = getEvidenceBadgeInfo(fObj.evidenceType);
+
+        const fieldOptions = state.fields
+          .map(f => `<option value="${escapeHtml(f.name)}" ${f.name === fname ? 'selected' : ''}>{{${escapeHtml(f.name)}}}</option>`)
+          .join('');
+
+        box.innerHTML = `
+          <div class="insp-card">
+            <div class="insp-title-row">
+              <span class="insp-title">字段证据溯源核查</span>
+              <button class="ide-btn ide-btn-xs" type="button" onclick="jumpToEditField('${escapeHtml(fname)}')">编辑该字段属性</button>
+            </div>
+            <div>
+              <label class="field-lbl">当前溯源字段</label>
+              <select class="ide-select mono" onchange="onPreviewFieldClick(this.value)">${fieldOptions}</select>
+            </div>
+            <div style="display:flex;align-items:center;justify-content:space-between;background:var(--subtle-bg);padding:6px 8px;border-radius:4px;border:1px solid var(--border-light)">
+              <span class="ev-micro-tag ${evMeta.cls}">${evMeta.label}</span>
+              <span class="mono" style="font-weight:700;color:${evData.status === 'found' ? 'var(--ok)' : 'var(--warn)'}">${escapeHtml(evData.val)}</span>
+            </div>
+          </div>
+
+          <div class="insp-card">
+            <div class="insp-title-row">
+              <span class="insp-title">① 原始业务受理单据高亮</span>
+              <span class="mono" style="font-size:11px;color:var(--brand)">单据原文定位</span>
+            </div>
+            <div class="ev-code-box">【江苏移动业务受理单】流水号：202611051430098812
+<mark class="ev-hl">${escapeHtml(evData.docLine)}</mark>
+客户号码：13800138000 · 渠道：10086人工外呼专席</div>
+          </div>
+
+          <div class="insp-card">
+            <div class="insp-title-row">
+              <span class="insp-title">② CRM / 短彩信网关报文载荷</span>
+              <span class="mono" style="font-size:11px;color:var(--ok)">HTTP 200</span>
+            </div>
+            <div class="ev-code-box">&lt;SoapEnvelope service="querySMSSendInfo"&gt;
+  <mark class="ev-hl">${escapeHtml(evData.apiSnippet)}</mark>
+&lt;/SoapEnvelope&gt;</div>
+          </div>
+        `;
+        return;
+      }
+
+      // 属性配置页签：随左侧当前激活分类自适应内联表单
+      if (state.leftSection === 'fields') {
+        ctxTag.textContent = '字段规则';
+        const f = state.fields[state.selectedFieldIndex] || state.fields[0];
+        if (!f) return;
+        const refs = countFieldRefsInBody(f.name);
+
+        box.innerHTML = `
+          <div class="insp-card">
+            <div class="insp-title-row">
+              <span class="insp-title">字段属性 · <span class="mono" style="color:var(--brand)">{{${escapeHtml(f.name)}}}</span></span>
+              <div style="display:flex;gap:4px">
+                <button class="ide-btn ide-btn-xs" type="button" onclick="locateFieldInEditor('${escapeHtml(f.name)}')">定位正文</button>
+                <button class="ide-btn ide-btn-xs ide-btn-danger" type="button" onclick="deleteCurrentField()">删除</button>
+              </div>
+            </div>
+
+            <div>
+              <label class="field-lbl">字段名称（修改后实时同步列表与正文 {{}}）<span class="req-star">*</span></label>
+              <input id="insp-f-name" class="ide-input mono" type="text" value="${escapeHtml(f.name)}" onchange="renameSelectedField(this.value)" />
+            </div>
+
+            <div class="form-row-2">
+              <div>
+                <label class="field-lbl">报告可见性</label>
+                <select class="ide-select" onchange="updateFieldProp('visible', this.value === 'true')">
+                  <option value="true" ${f.visible ? 'selected' : ''}>显示在报告中</option>
+                  <option value="false" ${!f.visible ? 'selected' : ''}>隐藏(中间字段)</option>
+                </select>
+              </div>
+              <div>
+                <label class="field-lbl">数据类型</label>
+                <select class="ide-select" onchange="updateFieldProp('type', this.value)">
+                  <option value="文本" ${f.type === '文本' ? 'selected' : ''}>文本</option>
+                  <option value="数值" ${f.type === '数值' ? 'selected' : ''}>数值</option>
+                  <option value="日期" ${f.type === '日期' ? 'selected' : ''}>日期</option>
+                  <option value="枚举" ${f.type === '枚举' ? 'selected' : ''}>枚举</option>
+                </select>
+              </div>
+            </div>
+
+            ${f.type === '枚举' ? `
+              <div>
+                <label class="field-lbl">枚举可选值（逗号分隔）<span class="req-star">*</span></label>
+                <input class="ide-input mono" type="text" value="${escapeHtml((f.enumValues || []).join('，'))}" onchange="updateFieldEnums(this.value)" />
+              </div>
+            ` : ''}
+
+            ${f.type === '日期' ? `
+              <div>
+                <label class="field-lbl">日期输出格式</label>
+                <input class="ide-input mono" type="text" value="${escapeHtml(f.format || 'yyyy年M月d号')}" onchange="updateFieldProp('format', this.value)" />
+              </div>
+            ` : ''}
+
+            <div class="form-row-2">
+              <div>
+                <label class="field-lbl">取证来源类型</label>
+                <select class="ide-select" onchange="updateFieldProp('evidenceType', this.value)">
+                  <option value="quote" ${f.evidenceType === 'quote' ? 'selected' : ''}>原文引用</option>
+                  <option value="input" ${f.evidenceType === 'input' ? 'selected' : ''}>调用入参</option>
+                  <option value="derive" ${f.evidenceType === 'derive' ? 'selected' : ''}>逻辑推导</option>
+                </select>
+              </div>
+              <div>
+                <label class="field-lbl">缺失兜底策略</label>
+                <select class="ide-select" onchange="updateFieldProp('whenMissing', this.value)">
+                  <option value="保留占位" ${f.whenMissing === '保留占位' ? 'selected' : ''}>保留占位</option>
+                  <option value="置空" ${f.whenMissing === '置空' ? 'selected' : ''}>置空</option>
+                  <option value="默认值" ${f.whenMissing === '默认值' ? 'selected' : ''}>默认值</option>
+                </select>
+              </div>
+            </div>
+
+            ${f.evidenceType === 'quote' ? `
+              <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
+                <input type="checkbox" ${f.quoteWhole ? 'checked' : ''} onchange="updateFieldProp('quoteWhole', this.checked)" />
+                <span>强制整条原样引用（适用于确认短信回执等）</span>
+              </label>
+            ` : ''}
+
+            ${f.whenMissing === '默认值' ? `
+              <div>
+                <label class="field-lbl">缺失时填入默认值<span class="req-star">*</span></label>
+                <input class="ide-input mono" type="text" value="${escapeHtml(f.defaultValue || '')}" onchange="updateFieldProp('defaultValue', this.value)" />
+              </div>
+            ` : ''}
+
+            <div>
+              <label class="field-lbl">取证规则说明 Prompt（指导智能体取证口径）</label>
+              <textarea class="ide-textarea" rows="4" onchange="updateFieldProp('description', this.value)">${escapeHtml(f.description)}</textarea>
+            </div>
+
+            <div style="font-size:11.5px;color:var(--text-3);background:var(--subtle-bg);padding:6px 8px;border-radius:4px;border:1px solid var(--border-light)">
+              正文引用次数：<strong class="mono" style="color:var(--text-1)">${refs} 次</strong> · 被推导依赖：${f.refBy && f.refBy.length ? escapeHtml(f.refBy.join('、')) : '无'}
+            </div>
+
+            <button class="ide-btn ide-btn-brand" type="button" style="width:100%" onclick="showToast('已应用字段「' + '${escapeHtml(f.name)}' + '」规则配置')">应用字段修改</button>
+          </div>
+        `;
+        return;
+      }
+
+      if (state.leftSection === 'inputs') {
+        ctxTag.textContent = '入参契约';
+        const inp = state.inputs[state.selectedInputIndex] || state.inputs[0];
+        box.innerHTML = `
+          <div class="insp-card">
+            <div class="insp-title-row">
+              <span class="insp-title">入参契约编辑 · <span class="mono" style="color:var(--brand)">${escapeHtml(inp.key)}</span></span>
+              <button class="ide-btn ide-btn-xs ide-btn-danger" type="button" onclick="deleteCurrentInput()">删除</button>
+            </div>
+            <div>
+              <label class="field-lbl">参数键名 Key<span class="req-star">*</span></label>
+              <input class="ide-input mono" type="text" value="${escapeHtml(inp.key)}" onchange="inpUpdate('key', this.value)" />
+            </div>
+            <div>
+              <label class="field-lbl">中文显示名称<span class="req-star">*</span></label>
+              <input class="ide-input" type="text" value="${escapeHtml(inp.label)}" onchange="inpUpdate('label', this.value)" />
+            </div>
+            <div class="form-row-2">
+              <div>
+                <label class="field-lbl">是否必填</label>
+                <select class="ide-select" onchange="inpUpdate('required', this.value === 'true')">
+                  <option value="true" ${inp.required ? 'selected' : ''}>必填参数</option>
+                  <option value="false" ${!inp.required ? 'selected' : ''}>选填参数</option>
+                </select>
+              </div>
+              <div>
+                <label class="field-lbl">格式约束</label>
+                <input class="ide-input" type="text" value="${escapeHtml(inp.format)}" onchange="inpUpdate('format', this.value)" />
+              </div>
+            </div>
+            <div>
+              <label class="field-lbl">调测示例值</label>
+              <input class="ide-input mono" type="text" value="${escapeHtml(inp.sample)}" onchange="inpUpdate('sample', this.value)" />
+            </div>
+            <div>
+              <label class="field-lbl">契约业务说明</label>
+              <textarea class="ide-textarea" rows="3" onchange="inpUpdate('desc', this.value)">${escapeHtml(inp.desc)}</textarea>
+            </div>
+          </div>
+        `;
+        return;
+      }
+
+      if (state.leftSection === 'skills') {
+        ctxTag.textContent = '规程详情';
+        const sk = state.skills[state.selectedSkillIndex] || state.skills[0];
+        box.innerHTML = `
+          <div class="insp-card">
+            <div class="insp-title-row">
+              <span class="insp-title">${escapeHtml(sk.name)} <span class="mono" style="color:var(--brand)">(${escapeHtml(sk.version)})</span></span>
+              <button class="ide-btn ide-btn-xs ide-btn-danger" type="button" onclick="unbindCurrentSkill()">解绑</button>
+            </div>
+            <div style="font-size:11.5px;color:var(--text-2);line-height:1.55">${escapeHtml(sk.summary)}</div>
+            <div>
+              <label class="field-lbl">关联调度的 CRM 接口契约</label>
+              <div style="display:flex;flex-wrap:wrap;gap:5px">
+                ${sk.apis.map(a => `<span class="ev-micro-tag ev-quote mono" style="padding:2px 6px">${escapeHtml(a)}</span>`).join('')}
+              </div>
+            </div>
+            <div>
+              <label class="field-lbl">Skill 规程执行脚本摘要 (Markdown)</label>
+              <div class="ev-code-box">${escapeHtml(sk.markdown)}</div>
+            </div>
+          </div>
+        `;
+        return;
+      }
+
+      if (state.leftSection === 'cases') {
+        ctxTag.textContent = '回归用例';
+        const c = state.cases[state.selectedCaseIndex] || state.cases[0];
+        box.innerHTML = `
+          <div class="insp-card">
+            <div class="insp-title-row">
+              <span class="insp-title">基准用例 · <span class="mono" style="color:var(--brand)">${escapeHtml(c.id)}</span></span>
+              <span class="ev-micro-tag ev-input">${escapeHtml(c.lastStatus)}</span>
+            </div>
+            <button class="ide-btn ide-btn-brand" type="button" style="width:100%" onclick="fillDebugFromCase(${state.selectedCaseIndex})">⬇ 一键填入下方调试区</button>
+            <div>
+              <label class="field-lbl">用例名称</label>
+              <input class="ide-input" type="text" value="${escapeHtml(c.name)}" onchange="caseUpdate('name', this.value)" />
+            </div>
+            <div>
+              <label class="field-lbl">入参快照</label>
+              <div class="ev-code-box">${escapeHtml(JSON.stringify(c.inputs, null, 2))}</div>
+            </div>
+            <div>
+              <label class="field-lbl">业务受理单据原文节选</label>
+              <textarea class="ide-textarea mono" rows="4" onchange="caseUpdate('documentText', this.value)">${escapeHtml(c.documentText)}</textarea>
+            </div>
+            <div style="font-size:11.5px;color:var(--text-2);background:var(--subtle-bg);padding:6px 8px;border-radius:4px;border:1px solid var(--border-light)">
+              期望核验基线：${escapeHtml(c.expectedSummary)}
+            </div>
+          </div>
+        `;
+        return;
+      }
+
+      if (state.leftSection === 'history') {
+        ctxTag.textContent = '版本基线';
+        const h = state.history[state.selectedHistoryIndex] || state.history[0];
+        box.innerHTML = `
+          <div class="insp-card">
+            <div class="insp-title-row">
+              <span class="insp-title">修订版本 · <span class="mono" style="color:var(--brand)">${escapeHtml(h.rev)}</span></span>
+              <span class="ev-micro-tag ev-quote">${escapeHtml(h.tag)}</span>
+            </div>
+            <div style="font-size:12px;color:var(--text-2);display:flex;flex-direction:column;gap:4px">
+              <div>发布作者：<strong>${escapeHtml(h.author)}</strong></div>
+              <div>修订时间：<span class="mono">${escapeHtml(h.time)}</span></div>
+              <div>变更统计：<span class="mono" style="color:var(--brand)">${escapeHtml(h.diffStats)}</span></div>
+            </div>
+            <div>
+              <label class="field-lbl">变更摘要说明</label>
+              <div class="ev-code-box" style="font-family:var(--font-sans)">${escapeHtml(h.summary)}</div>
+            </div>
+            <div style="display:flex;gap:6px">
+              <button class="ide-btn" type="button" style="flex:1" onclick="setTemplateMode('diff')">查看行级 Diff</button>
+              ${h.rev !== 'draft' ? `<button class="ide-btn ide-btn-primary" type="button" style="flex:1" onclick="rollbackToRev('${escapeHtml(h.rev)}')">回滚草稿至此版</button>` : ''}
+            </div>
+          </div>
+        `;
+      }
+    }
+
+    function renameSelectedField(newRaw) {
+      const nextName = newRaw.trim();
+      const f = state.fields[state.selectedFieldIndex];
+      if (!f || !nextName || nextName === f.name) return;
+      const oldName = f.name;
+      f.name = nextName;
+      state.bodyText = state.bodyText.split(`{{${oldName}}}`).join(`{{${nextName}}}`);
+      state.debugRuns.forEach(r => {
+        if (r.values[oldName]) {
+          r.values[nextName] = r.values[oldName];
+        }
+      });
+      markDraftDirty();
+      renderLeftZone();
+      renderTemplateArea();
+      renderInspector();
+      renderDebugPane();
+      showToast(`字段已重命名为「${nextName}」，并同步更新模板正文与预览`);
+    }
+
+    function updateFieldProp(prop, val) {
+      const f = state.fields[state.selectedFieldIndex];
+      if (!f) return;
+      f[prop] = val;
+      if (prop === 'type' && val === '枚举' && (!f.enumValues || !f.enumValues.length)) {
+        f.enumValues = ['合规', '存疑', '异常'];
+      }
+      markDraftDirty();
+      renderExplorerList();
+      renderTemplateArea();
+      renderInspector();
+    }
+
+    function updateFieldEnums(str) {
+      const f = state.fields[state.selectedFieldIndex];
+      if (!f) return;
+      f.enumValues = str.split(/[,，\n]/).map(s => s.trim()).filter(Boolean);
+      markDraftDirty();
+      showToast(`已更新枚举可选值（共 ${f.enumValues.length} 项）`);
+    }
+
+    function locateFieldInEditor(fname) {
+      const lines = state.bodyText.split('\n');
+      const idx = lines.findIndex(l => l.includes(`{{${fname}}}`));
+      if (state.tplMode === 'preview' || state.tplMode === 'diff') setTemplateMode('split');
+      if (idx >= 0) {
+        setActiveLine(idx + 1);
+        showToast(`已定位至正文第 ${idx + 1} 行 {{${fname}}}`);
+      } else {
+        showToast(`当前正文中尚未引用 {{${fname}}}，可点击「插入{{}}」添加`);
+      }
+    }
+
+    function jumpToEditField(fname) {
+      const idx = state.fields.findIndex(f => f.name === fname);
+      if (idx >= 0) {
+        state.leftSection = 'fields';
+        state.selectedFieldIndex = idx;
+      }
+      setInspectorTab('props');
+      renderLeftZone();
+    }
+
+    function deleteCurrentField() {
+      if (state.fields.length <= 1) return;
+      const removed = state.fields.splice(state.selectedFieldIndex, 1)[0];
+      state.selectedFieldIndex = Math.max(0, state.selectedFieldIndex - 1);
+      markDraftDirty();
+      renderLeftZone();
+      renderTemplateArea();
+      renderInspector();
+      renderDebugPane();
+      showToast(`已删除核查字段「${removed.name}」`);
+    }
+
+    function inpUpdate(prop, val) {
+      const inp = state.inputs[state.selectedInputIndex];
+      if (!inp) return;
+      inp[prop] = val;
+      markDraftDirty();
+      renderExplorerList();
+      renderInspector();
+    }
+
+    function deleteCurrentInput() {
+      if (state.inputs.length <= 1) return;
+      const removed = state.inputs.splice(state.selectedInputIndex, 1)[0];
+      state.selectedInputIndex = Math.max(0, state.selectedInputIndex - 1);
+      markDraftDirty();
+      renderLeftZone();
+      renderInspector();
+      showToast(`已移除入参「${removed.key}」`);
+    }
+
+    function unbindCurrentSkill() {
+      if (state.skills.length <= 1) {
+        showToast('模板至少保留 1 项取证规程 Skill');
+        return;
+      }
+      const removed = state.skills.splice(state.selectedSkillIndex, 1)[0];
+      state.selectedSkillIndex = Math.max(0, state.selectedSkillIndex - 1);
+      markDraftDirty();
+      renderLeftZone();
+      renderInspector();
+      showToast(`已解绑规程「${removed.name}」`);
+    }
+
+    function caseUpdate(prop, val) {
+      const c = state.cases[state.selectedCaseIndex];
+      if (!c) return;
+      c[prop] = val;
+      renderExplorerList();
+    }
+
+    function fillDebugFromCase(idx) {
+      const c = state.cases[idx];
+      if (!c) return;
+      state.debugInputs = { ...c.inputs, documentText: c.documentText };
+      state.isDebugCollapsed = false;
+      state.debugTab = 'inputs';
+      renderDebugPane();
+      showToast(`已将用例「${c.id}」的入参和单据填入下方调试区`);
+    }
+
+    function rollbackToRev(rev) {
+      markDraftDirty();
+      setTemplateMode('split');
+      showToast(`已将工作草稿回滚为版本 ${rev} 基线内容`);
+    }
+
+    // =========================================================================
+    // 7. 中间下方：调试区域（左运行记录窄栏 + 右入参/轨迹/明细 + 页内全屏）
+    // =========================================================================
+    function setDebugTab(tab) {
+      state.debugTab = tab;
+      if (state.isDebugCollapsed) state.isDebugCollapsed = false;
+      renderDebugPane();
+    }
+
+    function focusDebugPane(tab) {
+      state.isDebugCollapsed = false;
+      state.debugTab = tab || 'timeline';
+      renderDebugPane();
+    }
+
+    function toggleDebugCollapse() {
+      if (state.isDebugMaximized) state.isDebugMaximized = false;
+      state.isDebugCollapsed = !state.isDebugCollapsed;
+      renderDebugPane();
+    }
+
+    function toggleDebugMaximize() {
+      if (state.isDebugCollapsed) state.isDebugCollapsed = false;
+      state.isDebugMaximized = !state.isDebugMaximized;
+      renderDebugPane();
+      showToast(state.isDebugMaximized ? '调试区域已页内全屏展开（按 Esc 或再次点击可还原分屏）' : '已还原模板与调试上下分屏布局');
+    }
+
+    function selectDebugRun(runId) {
+      state.activeDebugRunId = runId;
+      state.isPreviewSnapshot = true;
+      // 点击任意调试记录：上方模板区域立即自动切换到「预览」模式渲染该次调试报告！
+      state.tplMode = 'preview';
+      document.getElementById('mode-btn-code').classList.remove('active');
+      document.getElementById('mode-btn-preview').classList.add('active');
+      document.getElementById('mode-btn-split').classList.remove('active');
+
+      renderTemplateArea();
+      renderExplorerList();
+      renderDebugPane();
+      if (state.inspectorTab === 'evidence') renderInspector();
+
+      const run = getCurrentRun();
+      showToast(`已切换至 ${run.time} 调试快照，上方模板区已联动展示核查报告`);
+    }
+
+    function renderDebugPane() {
+      const center = document.getElementById('ide-center');
+      const pane = document.getElementById('ide-debug-pane');
+      center.classList.toggle('is-debug-maximized', state.isDebugMaximized);
+      pane.classList.toggle('is-collapsed', state.isDebugCollapsed);
+
+      const maxBtn = document.getElementById('btn-debug-max');
+      maxBtn.classList.toggle('is-active', state.isDebugMaximized);
+      maxBtn.textContent = state.isDebugMaximized ? '还原分屏' : '页内全屏';
+
+      document.getElementById('btn-debug-collapse').textContent = state.isDebugCollapsed ? '展开' : '折叠';
+
+      const run = getCurrentRun();
+      document.getElementById('dbg-round-pill').textContent = `${run.traces.length} 轮`;
+      document.getElementById('dbg-fields-tab-label').textContent = `字段核验明细 (${run.matched}/${run.total})`;
+      document.getElementById('dbg-runs-count').textContent = String(state.debugRuns.length);
+
+      document.querySelectorAll('.dbg-tab-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.dbgtab === state.debugTab);
+      });
+
+      // 渲染左侧「调试运行记录」窄栏
+      document.getElementById('debug-runs-list').innerHTML = state.debugRuns
+        .map(r => `
+          <div class="dbg-run-item ${r.id === state.activeDebugRunId ? 'active' : ''}" onclick="selectDebugRun('${r.id}')">
+            <div class="dbg-run-top">
+              <span class="dbg-run-time">
+                <span class="status-dot ${r.status === 'ok' ? 'ok' : 'warn'}"></span>
+                <span>${escapeHtml(r.time)}</span>
+              </span>
+              <span class="dbg-run-target">${escapeHtml(r.target)}</span>
+            </div>
+            <div class="dbg-run-metrics">${r.matched}/${r.total} · ${escapeHtml(r.duration)}</div>
+          </div>
+        `)
+        .join('');
+
+      // 渲染右侧主内容区
+      const mainBox = document.getElementById('debug-main-col');
+      if (state.debugTab === 'inputs') {
+        mainBox.innerHTML = `
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+            <span style="font-size:12px;font-weight:600;color:var(--text-2)">调试调用入参与业务受理单据原文</span>
+            <div style="display:flex;gap:6px">
+              <button class="ide-btn ide-btn-xs" type="button" onclick="fillDebugFromCase(0)">载入外呼升档样例</button>
+              <button class="ide-btn ide-btn-xs" type="button" onclick="fillDebugFromCase(1)">载入掌厅合规样例</button>
+            </div>
+          </div>
+          <div class="dbg-inputs-grid">
+            <div>
+              <label class="field-lbl">mobile 客户号码<span class="req-star">*</span></label>
+              <input class="ide-input mono" type="text" value="${escapeHtml(state.debugInputs.mobile)}" oninput="state.debugInputs.mobile = this.value" />
+            </div>
+            <div>
+              <label class="field-lbl">acceptDate 受理日期<span class="req-star">*</span></label>
+              <input class="ide-input mono" type="text" value="${escapeHtml(state.debugInputs.acceptDate)}" oninput="state.debugInputs.acceptDate = this.value" />
+            </div>
+            <div>
+              <label class="field-lbl">orderId 受理流水号<span class="req-star">*</span></label>
+              <input class="ide-input mono" type="text" value="${escapeHtml(state.debugInputs.orderId)}" oninput="state.debugInputs.orderId = this.value" />
+            </div>
+            <div>
+              <label class="field-lbl">channelCode 触点渠道</label>
+              <input class="ide-input" type="text" value="${escapeHtml(state.debugInputs.channelCode)}" oninput="state.debugInputs.channelCode = this.value" />
+            </div>
+          </div>
+          <div>
+            <label class="field-lbl">业务受理单据 / 电子免填单原文</label>
+            <textarea class="ide-textarea mono" rows="4" oninput="state.debugInputs.documentText = this.value">${escapeHtml(state.debugInputs.documentText)}</textarea>
+          </div>
+        `;
+        return;
+      }
+
+      if (state.debugTab === 'timeline') {
+        mainBox.innerHTML = `
+          <div class="trace-list">
+            ${run.traces
+              .map(
+                t => `
+              <div class="trace-step ${t.status}">
+                <div class="trace-head">
+                  <span class="trace-title">
+                    <span class="ev-micro-tag ${t.status === 'ok' ? 'ev-input' : 'ev-quote'}">Step ${t.round}</span>
+                    <span>${escapeHtml(t.title)}</span>
+                  </span>
+                  <span class="mono" style="font-size:11px;color:var(--text-3)">${escapeHtml(t.cost)}</span>
+                </div>
+                <div class="trace-detail">${escapeHtml(t.detail)}</div>
+              </div>
+            `
+              )
+              .join('')}
+          </div>
+        `;
+        return;
+      }
+
+      if (state.debugTab === 'fields') {
+        mainBox.innerHTML = `
+          <table class="dbg-table">
+            <thead>
+              <tr>
+                <th>字段名称</th>
+                <th>来源类型</th>
+                <th>核验取值结果</th>
+                <th>状态</th>
+                <th style="text-align:right">证据操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${state.fields
+                .map(f => {
+                  const ev = getEvidenceBadgeInfo(f.evidenceType);
+                  const rv = run.values[f.name];
+                  const isOk = rv && rv.status === 'found';
+                  return `
+                    <tr>
+                      <td class="mono" style="font-weight:600">{{${escapeHtml(f.name)}}}</td>
+                      <td><span class="ev-micro-tag ${ev.cls}">${ev.label}</span></td>
+                      <td class="mono" style="color:${isOk ? 'var(--text-1)' : 'var(--warn)'}">${escapeHtml(rv ? rv.val : f.defaultValue || '—')}</td>
+                      <td>
+                        <span class="ev-micro-tag ${isOk ? 'ev-input' : ''}" style="${!isOk ? 'background:var(--warn-soft);color:var(--warn);border:1px solid var(--warn-border)' : ''}">
+                          ${isOk ? '已命中' : '缺失兜底'}
+                        </span>
+                      </td>
+                      <td style="text-align:right;white-space:nowrap">
+                        <button class="ide-btn ide-btn-xs" type="button" onclick="onPreviewFieldClick('${escapeHtml(f.name)}')">定位证据</button>
+                      </td>
+                    </tr>
+                  `;
+                })
+                .join('')}
+            </tbody>
+          </table>
+        `;
+      }
+    }
+
+    // 模拟 3 步流式执行调试并追加一条最新时间戳记录
+    function runSimulatedDebug() {
+      if (state.isRunningDebug) return;
+      state.isRunningDebug = true;
+      state.isDebugCollapsed = false;
+      state.debugTab = 'timeline';
+
+      const runBtn = document.getElementById('btn-run-debug');
+      runBtn.textContent = '执行中...';
+      runBtn.disabled = true;
+
+      const now = new Date();
+      const ts = [now.getHours(), now.getMinutes(), now.getSeconds()].map(n => String(n).padStart(2, '0')).join(':');
+      const targetVer = document.getElementById('dbg-target-ver').value;
+      const isCompliantSample = state.debugInputs.documentText.includes('已明确告知');
+      const baseTemplateRun = isCompliantSample ? state.debugRuns[1] : state.debugRuns[0];
+
+      const newId = 'run_' + Date.now();
+      const newRun = {
+        id: newId,
+        time: ts,
+        target: targetVer,
+        matched: isCompliantSample ? state.fields.length : Math.max(1, state.fields.length - 2),
+        total: state.fields.length,
+        duration: '运行中...',
+        status: isCompliantSample ? 'ok' : 'warn',
+        conclusion: isCompliantSample ? '核查无异常' : '存在瑕疵需回访',
+        values: JSON.parse(JSON.stringify(baseTemplateRun.values)),
+        traces: [
+          { round: 1, status: 'ok', title: 'Step 1/3 · 装载已绑定规程 Skill 与入参契约校验', cost: '0.3s', detail: `入参 mobile=${state.debugInputs.mobile}, orderId=${state.debugInputs.orderId} 校验通过。` }
+        ]
+      };
+
+      state.debugRuns.unshift(newRun);
+      state.activeDebugRunId = newId;
+      renderDebugPane();
+
+      setTimeout(() => {
+        newRun.traces.push({
+          round: 2,
+          status: 'ok',
+          title: 'Step 2/3 · 调度 queryCRMOrderDetail 与 querySMSSendInfo 接口取证',
+          cost: '4.2s',
+          detail: `成功拉取订单产商品变更报文与短彩信网关二次确认回执（HTTP 200）。`
+        });
+        renderDebugPane();
+      }, 380);
+
+      setTimeout(() => {
+        newRun.duration = isCompliantSample ? '9.6s' : '11.2s';
+        newRun.traces.push({
+          round: 3,
+          status: isCompliantSample ? 'ok' : 'warn',
+          title: `Step 3/3 · 完成 ${newRun.matched}/${newRun.total} 项字段溯源核验并生成公文报告`,
+          cost: '5.1s',
+          detail: `核查结论：【${newRun.conclusion}】，已同步刷新上方报告预览快照。`
+        });
+        state.isRunningDebug = false;
+        runBtn.textContent = '▶ 运行调试';
+        runBtn.disabled = false;
+        selectDebugRun(newId);
+      }, 820);
+    }
+
+    function saveCurrentDebugAsCase() {
+      const nextNo = 'CASE-0' + (state.cases.length + 1);
+      const run = getCurrentRun();
+      state.cases.push({
+        id: nextNo,
+        name: `调试沉淀_${state.debugInputs.mobile}_${run.time.replace(/:/g, '')}`,
+        lastStatus: '通过',
+        inputs: {
+          mobile: state.debugInputs.mobile,
+          acceptDate: state.debugInputs.acceptDate,
+          orderId: state.debugInputs.orderId,
+          channelCode: state.debugInputs.channelCode
+        },
+        documentText: state.debugInputs.documentText,
+        expectedSummary: `${run.matched}/${run.total} 命中 · 结论为「${run.conclusion}」`
+      });
+      renderLeftZone();
+      showToast(`已将当前调试快照存为基准回归用例「${nextNo}」`);
+    }
+
+    // =========================================================================
+    // 8. 底部状态栏、可拖拽分隔条（Resizable Splitters）与全局快捷键
+    // =========================================================================
+    function updateStatusBar() {
+      const dot = document.getElementById('sb-draft-dot');
+      const txt = document.getElementById('sb-draft-text');
+      if (state.draftSaved) {
+        dot.className = 'status-dot ok';
+        txt.textContent = `草稿已保存 (${state.lastSavedAt}) · 基于 r2`;
+      } else {
+        dot.className = 'status-dot warn';
+        txt.textContent = '草稿已修改待保存 · 基于线上 r2';
+      }
+      document.getElementById('sb-counts').textContent =
+        `字段 ${state.fields.length} · 入参 ${state.inputs.length} · 规程 ${state.skills.length} · 用例 ${state.cases.length}`;
+    }
+
+    function initSplitters() {
+      const splitLeft = document.getElementById('split-left');
+      const splitRight = document.getElementById('split-right');
+      const splitDebug = document.getElementById('split-debug');
+
+      splitLeft.addEventListener('mousedown', e => {
+        e.preventDefault();
+        splitLeft.classList.add('is-dragging');
+        document.body.classList.add('is-resizing-col');
+        const startX = e.clientX;
+        const startW = document.getElementById('ide-explorer').getBoundingClientRect().width;
+        const onMove = ev => {
+          const nextW = Math.min(340, Math.max(172, startW + (ev.clientX - startX)));
+          document.documentElement.style.setProperty('--left-panel-w', nextW + 'px');
+        };
+        const onUp = () => {
+          splitLeft.classList.remove('is-dragging');
+          document.body.classList.remove('is-resizing-col');
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mouseup', onUp);
+        };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+      });
+
+      splitRight.addEventListener('mousedown', e => {
+        e.preventDefault();
+        splitRight.classList.add('is-dragging');
+        document.body.classList.add('is-resizing-col');
+        const startX = e.clientX;
+        const startW = document.getElementById('ide-inspector').getBoundingClientRect().width;
+        const onMove = ev => {
+          const nextW = Math.min(440, Math.max(268, startW - (ev.clientX - startX)));
+          document.documentElement.style.setProperty('--right-panel-w', nextW + 'px');
+        };
+        const onUp = () => {
+          splitRight.classList.remove('is-dragging');
+          document.body.classList.remove('is-resizing-col');
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mouseup', onUp);
+        };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+      });
+
+      splitDebug.addEventListener('mousedown', e => {
+        e.preventDefault();
+        if (state.isDebugCollapsed) {
+          state.isDebugCollapsed = false;
+          renderDebugPane();
+        }
+        splitDebug.classList.add('is-dragging');
+        document.body.classList.add('is-resizing-row');
+        const startY = e.clientY;
+        const startH = document.getElementById('ide-debug-pane').getBoundingClientRect().height;
+        const onMove = ev => {
+          const centerH = document.getElementById('ide-center').getBoundingClientRect().height;
+          const nextH = Math.min(centerH - 180, Math.max(135, startH - (ev.clientY - startY)));
+          document.documentElement.style.setProperty('--debug-pane-h', nextH + 'px');
+        };
+        const onUp = () => {
+          splitDebug.classList.remove('is-dragging');
+          document.body.classList.remove('is-resizing-row');
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mouseup', onUp);
+        };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+      });
+    }
+
+    // 全局点击与快捷键（⌘S 保存；Esc 按优先级：关闭弹窗/下拉/补全 -> 退出调试区页内全屏 -> 退出专注全屏）
+    window.addEventListener('click', e => {
+      if (!e.target.closest('#dropdown-menu') && !e.target.closest('#btn-insert-field')) {
+        closeDropdownMenu();
+      }
+      if (!e.target.closest('#cm-ac-popup') && !e.target.closest('#btn-trigger-ac') && !e.target.closest('#raw-code-textarea')) {
+        closeAutocomplete();
+      }
+    });
+
+    window.addEventListener('keydown', e => {
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        saveDraft();
+        return;
+      }
+      if (e.key === 'Escape') {
+        const pubModal = document.getElementById('publish-modal');
+        const ddMenu = document.getElementById('dropdown-menu');
+        if (pubModal.classList.contains('visible')) {
+          e.preventDefault();
+          closePublishDialog();
+          return;
+        }
+        if (ddMenu.classList.contains('visible')) {
+          e.preventDefault();
+          closeDropdownMenu();
+          return;
+        }
+        if (state.acVisible) {
+          e.preventDefault();
+          closeAutocomplete();
+          return;
+        }
+        if (state.isDebugMaximized) {
+          e.preventDefault();
+          toggleDebugMaximize();
+          return;
+        }
+        if (state.isFocusFullscreen) {
+          e.preventDefault();
+          setFocusFullscreen(false);
+          showToast('已按 Esc 退出专注全屏，恢复外层平台导航');
+        }
+      }
+    });
+
+    // =========================================================================
+    // 9. 初始化挂载
+    // =========================================================================
+    (function bootstrap() {
+      initSplitters();
+      renderLeftZone();
+      renderTemplateArea();
+      renderDebugPane();
+      renderInspector();
+    })();
+  </script>
+</body>
+</html>

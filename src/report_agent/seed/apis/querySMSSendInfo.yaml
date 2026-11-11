@@ -1,0 +1,55 @@
+# #Created By AiCoding(codex) 短信发送记录查询（统一网关 XML）
+name: querySMSSendInfo
+title: 短信发送记录查询
+description: 按手机号和时间范围，查询系统下发给客户的短信记录（含发送时间、正文）。
+connector: unified-gateway-xml
+processCode: querySMSSendInfo
+timeoutMs: 10000
+retry:
+  maxAttempts: 2
+idempotent: true
+input:
+  type: object
+  required: [手机号码, 开始时间, 结束时间]
+  additionalProperties: false
+  properties:
+    手机号码:
+      type: string
+      pattern: '^1\d{10}$'
+      description: 11 位手机号
+    开始时间:
+      type: string
+      pattern: '^\d{14}$'
+      description: yyyyMMddHHmmss
+    结束时间:
+      type: string
+      pattern: '^\d{14}$'
+      description: yyyyMMddHHmmss，不早于开始时间，跨度不超过 31 天
+request:
+  route_type: '2'
+  route_value: ${手机号码}
+  content:
+    userMobile: ${手机号码}
+    startDate: ${开始时间}
+    endDate: ${结束时间}
+    sendType: '0'
+    sendPort: ''
+    busiType: '0'
+response:
+  success:
+    path: operation_out.response.resp_code
+    equals: '0000'
+    missingAs: success
+  noData:
+    - path: operation_out.response.resp_desc
+      contains: 无短信记录
+  records:
+    path: operation_out.content.smsList
+    columns:
+      smsSendTime: 发送时间 yyyyMMddHHmmss
+      smsContent: 短信正文
+      sendPort: 发送端口，如 10086
+      sendType: 上行/下行
+      busiType: 短信业务类型
+  summary:
+    maxPreviewChars: 60
