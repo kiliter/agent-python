@@ -634,7 +634,20 @@ def save_field(request: Request, tid: int, name: str, body: dict[str, Any]) -> d
 
 
 class DeleteFieldBody(BaseModel):
-    revision: int | None = None
+    revision: Any = None
+
+
+def _resolve_delete_field_revision(revision_query: str | None, body: DeleteFieldBody | None) -> int | None:
+    """统一校验字段删除接口来自 JSON 请求体或 URL 查询串的乐观锁版本号。"""
+    if body is not None and body.revision is not None:
+        return parse_expected_revision(body.revision)
+    if revision_query is None:
+        return None
+    rev_str = revision_query.strip()
+    if not rev_str:
+        return None
+    raw_rev: Any = int(rev_str) if (rev_str.isascii() and rev_str.isdigit()) else rev_str
+    return parse_expected_revision(raw_rev)
 
 
 @router.delete("/templates/{tid}/fields/{name}")
@@ -643,33 +656,35 @@ def delete_field(
     tid: int,
     name: str,
     force: bool = False,
-    revision: int | None = None,
+    revision: str | None = None,
     body: DeleteFieldBody | None = Body(default=None),
 ) -> dict[str, Any]:
+    _check_tid(tid)
+    expected_rev = _resolve_delete_field_revision(revision, body)
     tpl = _working(request, tid)
     if tpl.definition.field(name) is None:
         raise not_found(f"字段「{name}」不存在")
     usage = body_usage(tpl.body).get(name, 0)
     if usage and not force:
         raise bad_request(f"字段「{name}」在正文中被引用 {usage} 次，请先移除引用", "FIELD_IN_USE", usage=usage)
-    eff_rev = body.revision if (body is not None and body.revision is not None) else revision
 
     def fn(data: dict[str, Any], text: str) -> str:
         data["fields"] = [f for f in data["fields"] if f["name"] != name]
         return text
 
-    meta = _mutate(request, tid, fn, parse_expected_revision(eff_rev))
+    meta = _mutate(request, tid, fn, expected_rev)
     return {"deletedName": name, "revision": meta["revision"], "draft": meta}
 
 
 class BatchEvidenceBody(BaseModel):
     fieldNames: list[str]
     evidenceType: Literal["quote", "input", "derive"]
-    revision: int | None = None
+    revision: Any = None
 
 
 @router.post("/templates/{tid}/fields/batch-evidence")
 def batch_evidence(request: Request, tid: int, body: BatchEvidenceBody) -> dict[str, Any]:
+    expected_rev = parse_expected_revision(body.revision)
     names = set(body.fieldNames)
     count = 0
 
@@ -688,18 +703,19 @@ def batch_evidence(request: Request, tid: int, body: BatchEvidenceBody) -> dict[
                 count += 1
         return text
 
-    meta = _mutate(request, tid, fn, parse_expected_revision(body.revision))
+    meta = _mutate(request, tid, fn, expected_rev)
     return {"updatedCount": count, "revision": meta["revision"], "draft": meta}
 
 
 class OrderBody(BaseModel):
     names: list[str]
-    revision: int | None = None
+    revision: Any = None
 
 
 @router.put("/templates/{tid}/fields-order")
 def reorder_fields(request: Request, tid: int, body: OrderBody) -> dict[str, Any]:
     """字段排序（拖拽后提交完整的字段名顺序）。"""
+    expected_rev = parse_expected_revision(body.revision)
 
     def fn(data: dict[str, Any], text: str) -> str:
         by_name = {f["name"]: f for f in data["fields"]}
@@ -708,25 +724,26 @@ def reorder_fields(request: Request, tid: int, body: OrderBody) -> dict[str, Any
         data["fields"] = [by_name[n] for n in body.names]
         return text
 
-    meta = _mutate(request, tid, fn, parse_expected_revision(body.revision))
+    meta = _mutate(request, tid, fn, expected_rev)
     return {"names": body.names, "revision": meta["revision"], "draft": meta}
 
 
 class SkillsBody(BaseModel):
     skills: list[str]
-    revision: int | None = None
+    revision: Any = None
 
 
 @router.put("/templates/{tid}/skills")
 def update_skills(request: Request, tid: int, body: SkillsBody) -> dict[str, Any]:
     """设置模板允许加载的 Skill（标识或中文名称都可以）。"""
+    expected_rev = parse_expected_revision(body.revision)
     skills = _resolve_skills(request, body.skills)
 
     def fn(data: dict[str, Any], text: str) -> str:
         data["skills"] = skills
         return text
 
-    meta = _mutate(request, tid, fn, parse_expected_revision(body.revision))
+    meta = _mutate(request, tid, fn, expected_rev)
     return {"skills": skills, "revision": meta["revision"], "draft": meta}
 
 

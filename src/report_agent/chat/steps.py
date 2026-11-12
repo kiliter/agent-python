@@ -27,7 +27,18 @@ _TOOL_LABELS: dict[str, str] = {
     "regex_extract": "正则提取内容",
 }
 
-_SENSITIVE_DIGITS_RE = re.compile(r"\d{8,}")
+_BEARER_TOKEN_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._\-+/=]{6,}")
+_API_KEY_PREFIX_RE = re.compile(r"\b(?:sk|rk|ak|pk)-[A-Za-z0-9_\-]{8,}\b", re.IGNORECASE)
+_CREDENTIAL_KV_RE = re.compile(
+    r"(?i)\b(api[_-]?key|access[_-]?token|secret|password|authorization)\s*([:=])\s*[^\s,;'\"]+"
+)
+_POSIX_PATH_RE = re.compile(
+    r"(?:(?<=^)|(?<=[\s:=(,'\"\uff1a]))"
+    r"(?:/(?:Users|home|var|etc|tmp|private|opt|app|root|srv|mnt|Volumes)(?:/[^\s:'\",;()\[\]{}]*)?"
+    r"|/(?:[A-Za-z0-9._\-]+/)+[A-Za-z0-9._\-]+)"
+)
+_WIN_PATH_RE = re.compile(r"\b[A-Za-z]:\\[^\s:'\",;()\[\]{}]+")
+_SENSITIVE_DIGITS_RE = re.compile(r"\d{17}[0-9Xx]|\d{8,}")
 _SINGLE_QUOTED_LITERAL_RE = re.compile(r"'[^']{4,}'")
 _DOUBLE_QUOTED_LITERAL_RE = re.compile(r'"[^"]{4,}"')
 _MAX_ERR_CHARS = 120
@@ -42,17 +53,25 @@ def _safe_nonneg_int(val: Any, default: int = 0) -> int:
         return default
 
 
-def _sanitize_error(raw: Any, fallback: str = "未知错误") -> str:
-    """清洗错误提示：折叠换行、掩码可能携带的单双引号入参字面量与长数字串，防止泄露客户隐私或原始报文。"""
+def sanitize_error_text(raw: Any, fallback: str = "未知错误") -> str:
+    """清洗错误提示：折叠换行，掩码本地路径、密钥凭证、单双引号入参字面量与长数字/证件号，防止泄露内部路径或客户隐私。"""
     text = " ".join(str(raw or "").split()).strip()
     if not text:
         return fallback
+    text = _BEARER_TOKEN_RE.sub("Bearer ***", text)
+    text = _API_KEY_PREFIX_RE.sub("***", text)
+    text = _CREDENTIAL_KV_RE.sub(r"\1\2***", text)
     text = _SINGLE_QUOTED_LITERAL_RE.sub("'***'", text)
     text = _DOUBLE_QUOTED_LITERAL_RE.sub('"***"', text)
+    text = _POSIX_PATH_RE.sub("***", text)
+    text = _WIN_PATH_RE.sub("***", text)
     text = _SENSITIVE_DIGITS_RE.sub("***", text)
     if len(text) > _MAX_ERR_CHARS:
         text = text[:_MAX_ERR_CHARS].rstrip() + "…"
     return text
+
+
+_sanitize_error = sanitize_error_text
 
 
 def _unpack_event(ev: ProcessEvent | dict[str, Any]) -> tuple[str, int, dict[str, Any]]:

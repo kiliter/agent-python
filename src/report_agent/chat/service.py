@@ -29,6 +29,7 @@ from ..store.runs import RunStore, new_run_id
 from ..store.service import ResourceService
 from .agent import ChatAgent, ChatDeps, strip_java_rule_note
 from .manager import ChatRunManager, RunCompletion
+from .steps import sanitize_error_text
 from .store import SESSION_ID_RE, ChatStore, inputs_fingerprint, session_id_for
 
 log = logging.getLogger(__name__)
@@ -832,7 +833,11 @@ class ChatService:
                     "templateOffline": False,
                     "steps": list(comp.steps or []),
                     "durationMs": int(comp.duration_ms or 0),
-                    "error": "运行已手动停止" if comp.cancelled else (comp.error or "会话不存在"),
+                    "error": (
+                        "运行已手动停止"
+                        if comp.cancelled
+                        else (sanitize_error_text(comp.error, fallback="会话不存在") if comp.error else "会话不存在")
+                    ),
                     "missingShown": [],
                     "foundCount": 0,
                     "totalCount": 0,
@@ -881,7 +886,8 @@ class ChatService:
                 st = str(outcome.get("status") or "FAILED")
                 card["status"] = st
                 card["rev"] = str(outcome.get("rev") or card.get("rev") or "-")
-                card["error"] = outcome.get("error")
+                raw_err = outcome.get("error")
+                card["error"] = sanitize_error_text(raw_err, fallback="运行失败") if raw_err else None
                 card["missingShown"] = list(outcome.get("missingShown") or [])
                 card["foundCount"] = int(outcome.get("foundCount") or 0)
                 card["totalCount"] = int(outcome.get("totalCount") or 0)
@@ -895,7 +901,7 @@ class ChatService:
                     }]
             else:
                 card["status"] = "FAILED"
-                card["error"] = comp.error or "运行失败"
+                card["error"] = sanitize_error_text(comp.error, fallback="运行失败") if comp.error else "运行失败"
 
             card["steps"] = list(comp.steps or [])
             card["durationMs"] = int(comp.duration_ms or 0)
@@ -977,9 +983,16 @@ class ChatService:
             action = await self.chat_agent.run(deps, history_before, clean_text, auto=auto)
         except asyncio.CancelledError:
             raise
+        except TimeoutError:
+            log.warning("聊天路由智能体调用超时 sid=%s", sid)
+            yield ("error", {"code": "CHAT_AGENT_ERROR", "message": "聊天助手响应超时，请稍后重试"})
+            view = await self.get_session_view(sid, caller=caller)
+            yield ("done", {"session": view})
+            return
         except Exception as exc:  # noqa: BLE001
-            log.warning("聊天路由智能体调用失败 sid=%s：%s", sid, exc)
-            yield ("error", {"code": "CHAT_AGENT_ERROR", "message": f"聊天助手响应失败：{exc}"})
+            safe_reason = sanitize_error_text(exc, fallback=type(exc).__name__)
+            log.warning("聊天路由智能体调用失败 sid=%s：%s", sid, safe_reason)
+            yield ("error", {"code": "CHAT_AGENT_ERROR", "message": f"聊天助手响应失败：{safe_reason}"})
             view = await self.get_session_view(sid, caller=caller)
             yield ("done", {"session": view})
             return

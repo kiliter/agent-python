@@ -87,9 +87,9 @@ def _sse_chat_stream(
             raise
         except ChatError as exc:
             await queue.put(("error", {"code": exc.code, "message": exc.message, **exc.details}))
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             log.exception("聊天 SSE 流异常 %s", log_label)
-            await queue.put(("error", {"code": "INTERNAL_ERROR", "message": f"{type(exc).__name__}: {exc}"}))
+            await queue.put(("error", {"code": "INTERNAL_ERROR", "message": "服务内部错误，请稍后重试"}))
         finally:
             await queue.put(_EOF)
 

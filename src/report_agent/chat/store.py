@@ -58,6 +58,13 @@ def inputs_fingerprint(inputs: dict[str, str], document: str) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _messages_have_run_id(messages: Any, run_id: str) -> bool:
+    return any(
+        isinstance(m, dict) and m.get("kind") == "run" and m.get("runId") == run_id
+        for m in (messages or [])
+    )
+
+
 class ChatStore:
     """聊天会话的文件化持久化存储与内存 LRU 缓存。
 
@@ -70,7 +77,6 @@ class ChatStore:
         self._max_recent_locks = max(256, self.max_cache * 2)
         self._stripe_locks = tuple(threading.Lock() for _ in range(_STRIPE_COUNT))
         self._cache_guard = threading.RLock()
-        self._op_seq = 0
         self._cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._locks_weak: weakref.WeakValueDictionary[str, _SessionLock] = weakref.WeakValueDictionary()
         self._locks_recent: OrderedDict[str, _SessionLock] = OrderedDict()
@@ -113,56 +119,55 @@ class ChatStore:
         while len(self._cache) > self.max_cache:
             self._cache.popitem(last=False)
 
-    def _try_get_cached(self, session_id: str) -> tuple[dict[str, Any] | None, int]:
+    def _try_get_cached(self, session_id: str) -> dict[str, Any] | None:
         with self._cache_guard:
             cached = self._cache.get(session_id)
             if cached is not None:
                 self._cache.move_to_end(session_id)
-                return copy.deepcopy(cached), self._op_seq
-            return None, self._op_seq
-
-    def _finish_disk_load(self, session_id: str, raw: Any, seq_before: int) -> dict[str, Any] | None:
-        if not isinstance(raw, dict):
+                return copy.deepcopy(cached)
             return None
-        with self._cache_guard:
-            # 读盘期间若并发 save 已写入更新快照，直接以最新缓存为准
-            newer = self._cache.get(session_id)
-            if newer is not None:
-                self._cache.move_to_end(session_id)
-                return copy.deepcopy(newer)
-            # 仅在读盘期间未发生并发写/清理操作时回填缓存，杜绝过期脏数据复活
-            if self._op_seq == seq_before:
+
+    def _load_from_disk_sync(self, session_id: str, path: Path) -> dict[str, Any] | None:
+        """在分片文件锁内冷加载磁盘会话，与 save/asave/cleanup 严格串行，杜绝已清理会话复活。"""
+        with self._stripe_lock(session_id):
+            with self._cache_guard:
+                cached = self._cache.get(session_id)
+                if cached is not None:
+                    self._cache.move_to_end(session_id)
+                    return copy.deepcopy(cached)
+            raw = read_json(path)
+            if not isinstance(raw, dict):
+                return None
+            with self._cache_guard:
                 self._put_cache_locked(session_id, raw)
-        return copy.deepcopy(raw)
+            return copy.deepcopy(raw)
 
     def get(self, session_id: str) -> dict[str, Any] | None:
         """按 sessionId 读取会话，返回深拷贝副本防止调用方原地污染缓存。"""
         path = self._resolve_path(session_id)
         if path is None:
             return None
-        hit, seq_before = self._try_get_cached(session_id)
+        hit = self._try_get_cached(session_id)
         if hit is not None:
             return hit
-        raw = read_json(path)
-        return self._finish_disk_load(session_id, raw, seq_before)
+        return self._load_from_disk_sync(session_id, path)
 
     async def aget(self, session_id: str) -> dict[str, Any] | None:
-        """异步按 sessionId 读取会话：命中内存缓存时零线程切换直接返回，未命中时卸载磁盘 I/O 到工作线程。"""
+        """异步按 sessionId 读取会话：命中内存缓存时零线程切换直接返回，未命中时将锁与磁盘 I/O 卸载到工作线程。"""
         path = self._resolve_path(session_id)
         if path is None:
             return None
-        hit, seq_before = self._try_get_cached(session_id)
+        hit = self._try_get_cached(session_id)
         if hit is not None:
             return hit
-        raw = await asyncio.to_thread(read_json, path)
-        return self._finish_disk_load(session_id, raw, seq_before)
+        return await asyncio.to_thread(self._load_from_disk_sync, session_id, path)
 
     def get_by_pair(self, user_id: str, order_id: str) -> dict[str, Any] | None:
         """按 (userId, orderId) 读取会话。"""
         return self.get(session_id_for(user_id, order_id))
 
     def has_run_id(self, session_id: str, run_id: str) -> bool:
-        """只读探测会话是否包含指定 runId（冷文件扫描时先做原文子串快速过滤，不污染 LRU 缓存且免 deepcopy）。"""
+        """只读探测会话是否包含指定 runId（冷文件扫描在分片锁内执行，先做原文子串过滤且不污染 LRU 缓存）。"""
         if not run_id:
             return False
         path = self._resolve_path(session_id)
@@ -171,14 +176,16 @@ class ChatStore:
         with self._cache_guard:
             cached = self._cache.get(session_id)
             if cached is not None:
-                return any(
-                    isinstance(m, dict) and m.get("kind") == "run" and m.get("runId") == run_id
-                    for m in (cached.get("messages") or [])
-                )
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            return False
+                return _messages_have_run_id(cached.get("messages"), run_id)
+        with self._stripe_lock(session_id):
+            with self._cache_guard:
+                cached = self._cache.get(session_id)
+                if cached is not None:
+                    return _messages_have_run_id(cached.get("messages"), run_id)
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                return False
         if run_id not in text and json.dumps(run_id) not in text:
             return False
         try:
@@ -187,10 +194,7 @@ class ChatStore:
             return False
         if not isinstance(raw, dict):
             return False
-        return any(
-            isinstance(m, dict) and m.get("kind") == "run" and m.get("runId") == run_id
-            for m in (raw.get("messages") or [])
-        )
+        return _messages_have_run_id(raw.get("messages"), run_id)
 
     def _prepare_save(self, session: dict[str, Any]) -> tuple[str, Path, dict[str, Any]]:
         if not isinstance(session, dict):
@@ -206,7 +210,6 @@ class ChatStore:
         with self._stripe_lock(sid):
             write_json(path, snapshot)
             with self._cache_guard:
-                self._op_seq += 1
                 self._put_cache_locked(sid, snapshot)
 
     def save(self, session: dict[str, Any]) -> dict[str, Any]:
@@ -263,7 +266,6 @@ class ChatStore:
                     except OSError:
                         continue
                     with self._cache_guard:
-                        self._op_seq += 1
                         self._cache.pop(sid, None)
                         lock = self._locks_weak.get(sid)
                         if lock is None or not lock.locked():

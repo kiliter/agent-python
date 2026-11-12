@@ -35,7 +35,7 @@ from report_agent.api.auth import (
 )
 from report_agent.api.run_views import detail_view, report_view
 from report_agent.chat.service import ChatError
-from report_agent.chat.steps import StepMapper
+from report_agent.chat.steps import StepMapper, sanitize_error_text
 from report_agent.chat.store import ChatStore, inputs_fingerprint, session_id_for
 from report_agent.main import create_app
 from report_agent.runtime.workspace import ProcessEvent
@@ -607,3 +607,239 @@ async def test_chat_events_sse_error_frame_and_double_quote_masking(
     assert [f["event"] for f in frames] == ["step", "error"]
     assert frames[0]["id"] == "1"
     assert frames[1]["data"]["code"] == "STREAM_BROKEN"
+
+
+async def test_template_subresource_revision_strict_validation(async_client: httpx.AsyncClient):
+    """验证字段删除（Body 与 Query）、批量改证据类型、字段排序、Skill 绑定均严格拦截布尔/非法 revision。"""
+    headers = await _admin_headers(async_client)
+
+    for method, url, payload in [
+        ("DELETE", "/api/v1/templates/1001/fields/手机号码", {"revision": True}),
+        ("DELETE", "/api/v1/templates/1001/fields/手机号码", {"revision": False}),
+        ("DELETE", "/api/v1/templates/1001/fields/手机号码", {"revision": -1}),
+        ("DELETE", "/api/v1/templates/1001/fields/手机号码", {"revision": "abc"}),
+        ("POST", "/api/v1/templates/1001/fields/batch-evidence", {"fieldNames": [], "evidenceType": "quote", "revision": True}),
+        ("POST", "/api/v1/templates/1001/fields/batch-evidence", {"fieldNames": [], "evidenceType": "quote", "revision": False}),
+        ("POST", "/api/v1/templates/1001/fields/batch-evidence", {"fieldNames": [], "evidenceType": "quote", "revision": -1}),
+        ("PUT", "/api/v1/templates/1001/fields-order", {"names": [], "revision": True}),
+        ("PUT", "/api/v1/templates/1001/fields-order", {"names": [], "revision": False}),
+        ("PUT", "/api/v1/templates/1001/fields-order", {"names": [], "revision": -1}),
+        ("PUT", "/api/v1/templates/1001/skills", {"skills": ["order-sms-verify"], "revision": True}),
+        ("PUT", "/api/v1/templates/1001/skills", {"skills": ["order-sms-verify"], "revision": False}),
+        ("PUT", "/api/v1/templates/1001/skills", {"skills": ["order-sms-verify"], "revision": -1}),
+    ]:
+        resp = await async_client.request(method, url, json=payload, headers=headers)
+        assert resp.status_code == 400, f"{method} {url} {payload} -> {resp.status_code}: {resp.text}"
+        assert resp.json()["code"] == "INVALID_REVISION"
+
+    # delete_field 的查询参数 revision 对布尔串、非数字串、负数统一返回 400 INVALID_REVISION
+    for bad_q in ("true", "false", "abc", "-1", "1.5"):
+        resp = await async_client.delete(
+            f"/api/v1/templates/1001/fields/手机号码?revision={bad_q}",
+            headers=headers,
+        )
+        assert resp.status_code == 400, f"query revision={bad_q} -> {resp.status_code}: {resp.text}"
+        assert resp.json()["code"] == "INVALID_REVISION"
+
+    # 新增一个未被引用的临时字段，验证合法数字查询串走乐观锁比对（错号 409、对号 200）
+    r_add = await async_client.put(
+        "/api/v1/templates/1001/fields/临时待删字段",
+        json={"name": "临时待删字段", "type": "string", "evidence": "quote"},
+        headers=headers,
+    )
+    assert r_add.status_code == 200
+    cur_rev = r_add.json()["revision"]
+
+    r_conflict = await async_client.delete(
+        f"/api/v1/templates/1001/fields/临时待删字段?revision={cur_rev + 10}",
+        headers=headers,
+    )
+    assert r_conflict.status_code == 409 and r_conflict.json()["code"] == "DRAFT_CONFLICT"
+
+    r_del_ok = await async_client.delete(
+        f"/api/v1/templates/1001/fields/临时待删字段?revision={cur_rev}",
+        headers=headers,
+    )
+    assert r_del_ok.status_code == 200 and r_del_ok.json()["deletedName"] == "临时待删字段"
+
+
+async def test_chat_timeout_and_internal_error_sanitization(
+    async_client: httpx.AsyncClient,
+    container,
+    case_c01: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """验证 TimeoutError 友好超时提示、SDK/内部异常敏感路径与密钥脱敏，以及 SSE INTERNAL_ERROR 不泄露内部异常文本。"""
+    cleaned = sanitize_error_text(
+        "读取失败：/Users/admin/.secret/key.pem C:\\Users\\admin\\cfg.yaml "
+        "Authorization: Bearer tok_secret987654 api_key=my_raw_secret sk-proj1234567890 "
+        "号码 13900009999 证件 32010219900101123X HTTP/1.1 502"
+    )
+    for leaked in (
+        "/Users/admin",
+        "key.pem",
+        "C:\\Users",
+        "tok_secret987654",
+        "my_raw_secret",
+        "sk-proj1234567890",
+        "13900009999",
+        "32010219900101123X",
+    ):
+        assert leaked not in cleaned
+    assert "HTTP/1.1 502" in cleaned
+    assert sanitize_error_text("", fallback="ValueError") == "ValueError"
+
+    assert container.chat is not None
+    key_headers = {"X-API-Key": "upstream-key"}
+    sess = (await async_client.post(
+        "/api/v1/chat/sessions",
+        json={
+            "userId": "u_err_san",
+            "orderId": "ORD_ERR_SAN",
+            "inputs": case_c01["inputs"],
+            "document": case_c01["documentText"],
+        },
+        headers=key_headers,
+    )).json()
+    sid = sess["sessionId"]
+
+    # 1) ChatAgent 超时抛出空消息 TimeoutError()：返回明确超时提示而非尾随空冒号
+    async def _raise_timeout(*args: Any, **kwargs: Any):
+        raise TimeoutError()
+
+    monkeypatch.setattr(container.chat.chat_agent, "run", _raise_timeout)
+    r_timeout = await async_client.post(
+        f"/api/v1/chat/sessions/{sid}/messages",
+        json={"text": "帮我推荐模板"},
+        headers=key_headers,
+    )
+    assert r_timeout.status_code == 200
+    timeout_frames = _parse_sse(r_timeout.text)
+    err_frame = next(f["data"] for f in timeout_frames if f["event"] == "error")
+    assert err_frame["code"] == "CHAT_AGENT_ERROR"
+    assert err_frame["message"] == "聊天助手响应超时，请稍后重试"
+    assert any(f["event"] == "done" for f in timeout_frames)
+
+    # 2) ChatAgent 抛出携带本地路径、密钥、号码的异常：经脱敏后返回，且空异常回退类名
+    async def _raise_sensitive(*args: Any, **kwargs: Any):
+        raise RuntimeError(
+            "加载 /Users/secret/data/current.json 失败 Bearer secret_jwt_token_123 号码 13900008888 'raw_body'"
+        )
+
+    monkeypatch.setattr(container.chat.chat_agent, "run", _raise_sensitive)
+    r_sens = await async_client.post(
+        f"/api/v1/chat/sessions/{sid}/messages",
+        json={"text": "再试一次"},
+        headers=key_headers,
+    )
+    sens_frames = _parse_sse(r_sens.text)
+    sens_err = next(f["data"] for f in sens_frames if f["event"] == "error")
+    assert sens_err["code"] == "CHAT_AGENT_ERROR"
+    assert sens_err["message"].startswith("聊天助手响应失败：")
+    for secret_piece in ("/Users/secret", "current.json", "secret_jwt_token_123", "13900008888", "raw_body"):
+        assert secret_piece not in sens_err["message"]
+
+    async def _raise_empty_exc(*args: Any, **kwargs: Any):
+        raise ValueError("")
+
+    monkeypatch.setattr(container.chat.chat_agent, "run", _raise_empty_exc)
+    r_empty_exc = await async_client.post(
+        f"/api/v1/chat/sessions/{sid}/messages",
+        json={"text": "空异常测试"},
+        headers=key_headers,
+    )
+    empty_err = next(f["data"] for f in _parse_sse(r_empty_exc.text) if f["event"] == "error")
+    assert empty_err["message"] == "聊天助手响应失败：ValueError"
+
+    # 3) SSE 流内部未知异常（非 ChatError）：返回统一友好文案，不向外部透传原始异常栈/路径
+    async def _unexpected_crash(*args: Any, **kwargs: Any):
+        if False:
+            yield ("status", {})
+        raise RuntimeError("数据库文件损坏 /var/data/chats/secret.json api_key=leak123456")
+
+    monkeypatch.setattr(container.chat, "send_message", _unexpected_crash)
+    r_internal = await async_client.post(
+        f"/api/v1/chat/sessions/{sid}/messages",
+        json={"text": "触发未知异常"},
+        headers=key_headers,
+    )
+    internal_frames = _parse_sse(r_internal.text)
+    internal_err = next(f["data"] for f in internal_frames if f["event"] == "error")
+    assert internal_err == {"code": "INTERNAL_ERROR", "message": "服务内部错误，请稍后重试"}
+
+
+async def test_chat_store_cold_read_serialized_with_cleanup_and_save(tmp_path: Path):
+    """验证 ChatStore 冷读盘（get/aget/has_run_id）持有分片文件锁，与 cleanup/asave 并发时绝不复活已删会话。"""
+    import threading
+
+    store = ChatStore(tmp_path / "chats", max_cache=8)
+    sid = session_id_for("u_race", "ord_race")
+    await store.asave({
+        "sessionId": sid,
+        "userId": "u_race",
+        "orderId": "ord_race",
+        "messages": [{"kind": "run", "runId": "run-race-001"}],
+    })
+    session_file = tmp_path / "chats" / sid[:2] / f"{sid}.json"
+    old_ts = time.time() - 10 * 86400
+    os.utime(session_file, (old_ts, old_ts))
+    store._cache.clear()
+
+    # 场景 1：模拟线程已持有分片锁（等同 cleanup 正在删除该分片文件），并发发起冷 aget 与 has_run_id：
+    # 它们在未命中 _cache 后必须在 _stripe_lock 外等待；待文件删除并释放分片锁后，必须返回 None / False 且不回填缓存
+    stripe_lock = store._stripe_lock(sid)
+    entered_lock = threading.Event()
+    release_lock = threading.Event()
+
+    def _simulate_cleanup_under_stripe_lock() -> None:
+        with stripe_lock:
+            entered_lock.set()
+            release_lock.wait(timeout=5.0)
+            session_file.unlink(missing_ok=True)
+            with store._cache_guard:
+                store._cache.pop(sid, None)
+
+    bg_cleanup = asyncio.create_task(asyncio.to_thread(_simulate_cleanup_under_stripe_lock))
+    await asyncio.to_thread(entered_lock.wait, 5.0)
+
+    aget_task = asyncio.create_task(store.aget(sid))
+    has_run_task = asyncio.create_task(asyncio.to_thread(store.has_run_id, sid, "run-race-001"))
+    # 给冷读任务一点时间走到 _stripe_lock 等待处
+    await asyncio.sleep(0.03)
+    assert not aget_task.done()
+    assert not has_run_task.done()
+
+    release_lock.set()
+    await bg_cleanup
+    assert await aget_task is None
+    assert await has_run_task is False
+    assert sid not in store._cache
+    assert store.get(sid) is None
+
+    # 场景 2：冷读在等待分片锁期间若并发 save 写入了新快照，锁内二次检查缓存直接返回最新快照
+    sid2 = session_id_for("u_race2", "ord_race2")
+    await store.asave({"sessionId": sid2, "userId": "u_race2", "orderId": "ord_race2", "v": 1, "messages": []})
+    store._cache.clear()
+
+    stripe_lock2 = store._stripe_lock(sid2)
+    entered2 = threading.Event()
+    release2 = threading.Event()
+
+    def _concurrent_writer() -> None:
+        with stripe_lock2:
+            entered2.set()
+            release2.wait(timeout=5.0)
+            with store._cache_guard:
+                store._put_cache_locked(
+                    sid2,
+                    {"sessionId": sid2, "userId": "u_race2", "orderId": "ord_race2", "v": 2, "messages": []},
+                )
+
+    bg_writer = asyncio.create_task(asyncio.to_thread(_concurrent_writer))
+    await asyncio.to_thread(entered2.wait, 5.0)
+    cold_get_task = asyncio.create_task(store.aget(sid2))
+    await asyncio.sleep(0.03)
+    release2.set()
+    await bg_writer
+    loaded2 = await cold_get_task
+    assert loaded2 is not None and loaded2["v"] == 2
