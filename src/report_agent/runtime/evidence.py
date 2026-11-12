@@ -261,15 +261,18 @@ def _find_reachable_cycle(
         done.add(node)
         return None
 
+    has_self_loop = False
     for first in graph.get(start, ()):
         if first == start:
+            has_self_loop = True
             continue
         if first in done:
             continue
         hit = _dfs(first, [start, first], {start, first})
         if hit is not None:
             return hit
-    done.add(start)
+    if not has_self_loop:
+        done.add(start)
     return None
 
 
@@ -391,6 +394,10 @@ class EvidenceChecker:
                 if not isinstance(raw_ev, list):
                     continue
                 ev_dicts = [e for e in raw_ev if isinstance(e, dict)]
+                if any(e.get("type") == "field" and str(e.get("name") or "") == fname for e in ev_dicts):
+                    supported.discard(fname)
+                    changed = True
+                    continue
                 field_refs = [
                     ref_name
                     for e in ev_dicts

@@ -18,7 +18,7 @@ import logging
 import time
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai import ModelRetry, RunContext, Tool, ToolDefinition
 
 from ..gateway.base import ApiCallResult
@@ -314,6 +314,8 @@ async def _prepare_call_api(ctx: RunContext[RunDeps], tool_def: ToolDefinition) 
 class Condition(BaseModel):
     """筛选条件。#Created By AiCoding(codex)"""
 
+    model_config = ConfigDict(extra="forbid")
+
     column: str = Field(description="列名")
     op: Literal[
         "equals",
@@ -336,6 +338,8 @@ class Condition(BaseModel):
 
 
 class OrderBy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     column: str
     desc: bool = True
 

@@ -199,12 +199,16 @@ def _cascade_degraded_fields(
             raw_ev = ans.get("evidence")
             if not isinstance(raw_ev, list):
                 continue
+            has_self_ref = False
             bad_failed_refs: list[str] = []
             not_found_refs: list[str] = []
             for e in raw_ev:
                 if isinstance(e, dict) and e.get("type") == "field":
                     ref_name = str(e.get("name") or "")
-                    if not ref_name or ref_name == fname:
+                    if not ref_name:
+                        continue
+                    if ref_name == fname:
+                        has_self_ref = True
                         continue
                     if ref_name in failed:
                         if ref_name not in bad_failed_refs:
@@ -212,7 +216,10 @@ def _cascade_degraded_fields(
                     elif ref_name not in valid_found:
                         if ref_name not in not_found_refs:
                             not_found_refs.append(ref_name)
-            if bad_failed_refs:
+            if has_self_ref:
+                msg = f"字段「{fname}」不能引用自身作为证据，衍生结论同步降级"
+                newly_failed.append((fname, msg))
+            elif bad_failed_refs:
                 msg = f"引用的前置字段（{'、'.join(bad_failed_refs)}）校验未通过已降级，衍生结论同步降级"
                 newly_failed.append((fname, msg))
             elif not_found_refs:

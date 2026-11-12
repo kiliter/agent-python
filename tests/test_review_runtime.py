@@ -17,6 +17,7 @@ from pathlib import Path
 import threading
 from typing import Any
 
+from pydantic import ValidationError
 import pytest
 from pydantic_ai import ModelRetry, RunContext
 from pydantic_ai.messages import ModelResponse, ToolCallPart
@@ -410,13 +411,16 @@ def test_safe_regex_deep_parentheses_and_date_extraction() -> None:
 
 
 def test_self_reference_cannot_mask_not_found_dependency_and_cascades() -> None:
-    """自引用字段 F -> F 不能充当真实有效证据来掩盖对 not_found 前置字段的悬空依赖，同时检测可达环。"""
+    """自引用字段不能污染 safe_nodes 或保留在 supported/valid_found 中掩盖下游对 not_found 的悬空依赖。"""
     tpl = Template(
         definition=TemplateDef(
             id=3001,
             name="自引用与级联测试",
             fields=[
                 FieldDef(name="前置字段", evidence="quote"),
+                FieldDef(name="纯自引甲", evidence="derive"),
+                FieldDef(name="指向自引乙", evidence="derive"),
+                FieldDef(name="下游悬空丙", evidence="derive"),
                 FieldDef(name="自引用衍生", evidence="derive"),
                 FieldDef(name="环节点甲", evidence="derive"),
                 FieldDef(name="环节点乙", evidence="derive"),
@@ -427,6 +431,27 @@ def test_self_reference_cannot_mask_not_found_dependency_and_cascades() -> None:
     )
     report = {
         "前置字段": {"status": "not_found", "value": None, "evidence": [], "reasoning": "未查到"},
+        "纯自引甲": {
+            "status": "found",
+            "value": "伪支撑",
+            "evidence": [{"type": "field", "name": "纯自引甲"}],
+            "reasoning": "纯自引",
+        },
+        "指向自引乙": {
+            "status": "found",
+            "value": "指向自环",
+            "evidence": [{"type": "field", "name": "纯自引甲"}],
+            "reasoning": "顺序在纯自引甲之后",
+        },
+        "下游悬空丙": {
+            "status": "found",
+            "value": "试图借纯自引甲掩盖not_found",
+            "evidence": [
+                {"type": "field", "name": "纯自引甲"},
+                {"type": "field", "name": "前置字段"},
+            ],
+            "reasoning": "依赖纯自引甲与not_found字段",
+        },
         "自引用衍生": {
             "status": "found",
             "value": "结论",
@@ -468,14 +493,22 @@ def test_self_reference_cannot_mask_not_found_dependency_and_cascades() -> None:
     self_msgs = [i.message for i in issues if i.field == "自引用衍生"]
     assert any("不能引用自身" in m for m in self_msgs)
     assert any("not_found" in m for m in self_msgs)
+    # 顺序 [纯自引甲, 指向自引乙] 下，纯自引甲不得污染 safe_nodes，必须检出 指向自引乙 -> 纯自引甲 -> 纯自引甲
+    assert any(
+        i.field == "指向自引乙" and "指向自引乙 -> 纯自引甲 -> 纯自引甲" in i.message
+        for i in issues
+    )
+    # 纯自引甲已从 supported 移出，下游悬空丙引用 前置字段(not_found) 必须报错
+    assert any(i.field == "下游悬空丙" and "前置字段" in i.message and "not_found" in i.message for i in issues)
     assert any(i.field == "环外下游" and "循环依赖" in i.message for i in issues)
 
-    # 级联降级同样应排除 self_field，把悬空依赖 not_found 的自引用字段降级
+    # 级联降级独立调用时：纯自引甲、指向自引乙、下游悬空丙、自引用衍生均应级联降级为 not_found
     failed: set[str] = set()
     cascade_issues: list[FieldIssue] = []
     _cascade_degraded_fields(report, failed, cascade_issues)
-    assert "自引用衍生" in failed
-    assert report["自引用衍生"]["status"] == "not_found"
+    for degraded_name in ("纯自引甲", "指向自引乙", "下游悬空丙", "自引用衍生"):
+        assert degraded_name in failed
+        assert report[degraded_name]["status"] == "not_found"
 
 
 def test_scalar_field_rejects_list_or_dict_in_evidence_and_salvage() -> None:
@@ -760,11 +793,17 @@ async def test_query_result_unified_single_and_multi_filtering() -> None:
     assert single["total"] == 1
     assert single["rows"] == [{"row": 0, "smsContent": "尊敬的客户：５Ｇ智享套餐已生效！"}]
 
+    # Condition 与 OrderBy 严禁静默吞掉未知参数（extra="forbid"）
+    with pytest.raises(ValidationError):
+        OrderBy.model_validate({"column": "sendTime", "direction": "asc"})
+    with pytest.raises(ValidationError):
+        Condition.model_validate({"column": "smsContent", "op": "contains", "value": "5G", "unknownKey": 1})
+
     merged = await query_result(
         _ctx(deps),
         resultIds=["r1", "r2"],
         where=[Condition(column="smsContent", op="normalizedContains", value="5G智享套餐")],
-        orderBy=OrderBy(column="sendTime", direction="desc"),
+        orderBy=OrderBy(column="sendTime", desc=True),
         columns=["sendTime"],
     )
     assert merged["resultIds"] == ["r1", "r2"]
@@ -772,6 +811,18 @@ async def test_query_result_unified_single_and_multi_filtering() -> None:
     assert [(r["resultId"], r["sendTime"]) for r in merged["rows"]] == [
         ("r2", "20261105100000"),
         ("r1", "20261105090000"),
+    ]
+
+    merged_asc = await query_result(
+        _ctx(deps),
+        resultIds=["r1", "r2"],
+        where=[Condition(column="smsContent", op="normalizedContains", value="5G智享套餐")],
+        orderBy=OrderBy(column="sendTime", desc=False),
+        columns=["sendTime"],
+    )
+    assert [(r["resultId"], r["sendTime"]) for r in merged_asc["rows"]] == [
+        ("r1", "20261105090000"),
+        ("r2", "20261105100000"),
     ]
 
 
