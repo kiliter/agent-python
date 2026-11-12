@@ -6,6 +6,7 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessageBox } from 'element-plus'
+import { analyzeJinjaBody } from '@/utils/jinjaBody'
 import { buildFullDiffRows } from '@/utils/textDiff'
 import { Annotation, Compartment, EditorState, type Range } from '@codemirror/state'
 import {
@@ -285,84 +286,80 @@ function buildJinjaDecorations(v: EditorView): DecorationSet {
   const undefinedNames = new Set(store.undefinedBodyFields)
   const selectedName = activeInspectorFieldName.value
 
+  const fullText = doc.toString()
+  const { tags } = analyzeJinjaBody(fullText)
   const scanRanges = v.visibleRanges.length > 0 ? v.visibleRanges : [{ from: 0, to: doc.length }]
-  let lastLineNo = 0
-  for (const { from, to } of scanRanges) {
-    const startLine = doc.lineAt(from).number
-    const endLine = doc.lineAt(to).number
-    for (let i = Math.max(startLine, lastLineNo + 1); i <= endLine; i++) {
-      lastLineNo = i
-      const line = doc.line(i)
-      const text = line.text
-      let lineHasUndefined = false
+  const overlapsVisible = (from: number, to: number) =>
+    scanRanges.some(r => to >= r.from && from <= r.to)
 
-      const combinedRe = /(\{%[^\n]*?%\})|(\{\{([^{}\n]+)\}\})/g
-      let m: RegExpExecArray | null
-      while ((m = combinedRe.exec(text)) !== null) {
-        if (m[1]) {
-          const blockStart = line.from + m.index
-          const blockText = m[1]
-          const blockEnd = blockStart + blockText.length
-          ranges.push(Decoration.mark({ class: 'jinja-tag' }).range(blockStart, blockStart + 2))
+  const errorLineNos = new Set<number>()
+  const pushFieldMark = (fname: string, from: number, to: number) => {
+    if (to <= from) return
+    const exists = definedNames.has(fname)
+    const isSel = Boolean(selectedName && fname === selectedName)
+    if (!exists && undefinedNames.has(fname)) {
+      errorLineNos.add(doc.lineAt(from).number)
+    }
+    const cls = ['jinja-var', !exists ? 'undefined' : '', isSel ? 'is-ide-selected' : '']
+      .filter(Boolean)
+      .join(' ')
+    ranges.push(
+      Decoration.mark({
+        class: cls,
+        attributes: {
+          'data-field': fname,
+          title: exists ? `点击在右侧编辑字段规则：${fname}` : `未定义变量：${fname}（点击在右侧补建）`,
+        },
+      }).range(from, to),
+    )
+  }
 
-          const innerStart = blockStart + 2
-          const innerText = blockText.slice(2, -2)
-          const tokenRe = /\b(if|elif|else|endif|and|or|not|in)\b|("[^"]*")|([\u4e00-\u9fa5A-Za-z0-9_]+)/g
-          let tm: RegExpExecArray | null
-          while ((tm = tokenRe.exec(innerText)) !== null) {
-            const start = innerStart + tm.index
-            const end = start + tm[0].length
-            if (tm[1]) {
-              ranges.push(Decoration.mark({ class: 'jinja-kw' }).range(start, end))
-            } else if (tm[2]) {
-              ranges.push(Decoration.mark({ class: 'jinja-str' }).range(start, end))
-            } else if (tm[3]) {
-              const fname = tm[3]
-              const exists = definedNames.has(fname)
-              const isSel = Boolean(selectedName && fname === selectedName)
-              const cls = ['jinja-var', !exists ? 'undefined' : '', isSel ? 'is-ide-selected' : '']
-                .filter(Boolean)
-                .join(' ')
-              ranges.push(
-                Decoration.mark({
-                  class: cls,
-                  attributes: {
-                    'data-field': fname,
-                    title: exists ? `点击在右侧编辑字段规则：${fname}` : `未定义变量：${fname}（点击在右侧补建）`,
-                  },
-                }).range(start, end),
-              )
-            }
-          }
-
-          ranges.push(Decoration.mark({ class: 'jinja-tag' }).range(blockEnd - 2, blockEnd))
-        } else if (m[2] && m[3] !== undefined) {
-          const start = line.from + m.index
-          const end = start + m[2].length
-          const fname = m[3].split('|')[0].trim()
-          if (!fname) continue
-          const exists = definedNames.has(fname)
-          const isSel = Boolean(selectedName && fname === selectedName)
-          if (undefinedNames.has(fname)) lineHasUndefined = true
-          const cls = ['jinja-var', !exists ? 'undefined' : '', isSel ? 'is-ide-selected' : '']
-            .filter(Boolean)
-            .join(' ')
-          ranges.push(
-            Decoration.mark({
-              class: cls,
-              attributes: {
-                'data-field': fname,
-                title: exists ? `点击在右侧编辑字段规则：${fname}` : `未定义变量：${fname}（点击在右侧补建）`,
-              },
-            }).range(start, end),
-          )
-        }
+  for (const tag of tags) {
+    if (!overlapsVisible(tag.from, tag.to)) continue
+    if (tag.kind === 'comment') {
+      if (tag.to > tag.from) {
+        ranges.push(
+          Decoration.mark({
+            attributes: { style: 'color: var(--text-secondary); font-style: italic;' },
+          }).range(tag.from, tag.to),
+        )
       }
+      continue
+    }
 
-      if (lineHasUndefined) {
-        ranges.push(Decoration.line({ class: 'line-error' }).range(line.from))
+    // 单一顶层字段输出块（如 {{受理日期}} / {{- 受理日期 -}}）保持整体胶囊高亮
+    const isSimpleFieldOutput =
+      tag.kind === 'output' &&
+      tag.tokens.length === 1 &&
+      tag.tokens[0]?.kind === 'field' &&
+      Boolean(tag.tokens[0]?.name) &&
+      !fullText.slice(tag.from, tag.to).includes('\n')
+
+    if (isSimpleFieldOutput) {
+      pushFieldMark(tag.tokens[0]!.name!, tag.from, tag.to)
+      continue
+    }
+
+    if (tag.openEnd > tag.from) {
+      ranges.push(Decoration.mark({ class: 'jinja-tag' }).range(tag.from, tag.openEnd))
+    }
+    for (const tok of tag.tokens) {
+      if (tok.to <= tok.from) continue
+      if (tok.kind === 'kw' || tok.kind === 'loopVar' || tok.kind === 'filter') {
+        ranges.push(Decoration.mark({ class: 'jinja-kw' }).range(tok.from, tok.to))
+      } else if (tok.kind === 'string') {
+        ranges.push(Decoration.mark({ class: 'jinja-str' }).range(tok.from, tok.to))
+      } else if (tok.kind === 'field' && tok.name) {
+        pushFieldMark(tok.name, tok.from, tok.to)
       }
     }
+    if (tag.to > tag.innerEnd) {
+      ranges.push(Decoration.mark({ class: 'jinja-tag' }).range(tag.innerEnd, tag.to))
+    }
+  }
+
+  for (const lineNo of errorLineNos) {
+    ranges.push(Decoration.line({ class: 'line-error' }).range(doc.line(lineNo).from))
   }
 
   return Decoration.set(ranges, true)
@@ -680,26 +677,11 @@ function locateFieldInEditor(fieldName: string) {
     if (!view) return
     view.requestMeasure()
     const docStr = view.state.doc.toString()
-    const esc = fname.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const varMatch = new RegExp(`\\{\\{\\s*${esc}\\s*(?:\\|[^{}\\n]*)?\\}\\}`).exec(docStr)
-    let from = -1
-    let to = -1
-    if (varMatch && varMatch.index !== undefined) {
-      from = varMatch.index
-      to = from + varMatch[0].length
-    } else {
-      const ctrlRe = /\{%[^\n]*?%\}/g
-      let cm: RegExpExecArray | null
-      const wordRe = new RegExp(`(?<![\\u4e00-\\u9fa5A-Za-z0-9_])${esc}(?![\\u4e00-\\u9fa5A-Za-z0-9_])`)
-      while ((cm = ctrlRe.exec(docStr)) !== null) {
-        const innerMatch = wordRe.exec(cm[0])
-        if (innerMatch && innerMatch.index !== undefined) {
-          from = cm.index + innerMatch.index
-          to = from + fname.length
-          break
-        }
-      }
-    }
+    const { fieldOccurrences } = analyzeJinjaBody(docStr)
+    const matches = fieldOccurrences.filter(occ => occ.name === fname)
+    const hit = matches.find(occ => occ.isPureOutputVar) || matches[0]
+    const from = hit ? (hit.isPureOutputVar ? hit.tagFrom : hit.from) : -1
+    const to = hit ? (hit.isPureOutputVar ? hit.tagTo : hit.to) : -1
     if (from >= 0 && to >= from) {
       acVisible.value = false
       view.dispatch({

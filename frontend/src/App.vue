@@ -803,7 +803,7 @@ function handleUserMenuCommand(cmd: string) {
     </div>
 
     <!-- 全局滑出抽屉与模态框 -->
-    <GlobalDrawers />
+    <GlobalDrawers v-if="store.activeDrawer" />
     <GlobalModals />
   </div>
 </template>

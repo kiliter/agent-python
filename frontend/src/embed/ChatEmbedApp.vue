@@ -954,7 +954,7 @@ function subscribeRun(runId: string) {
             ctrl.signal,
             { includeRaw: true, rawAfter },
           )
-          if (gotFinal) break
+          if (gotFinal || ctrl.signal.aborted) break
         } catch (err) {
           if (isAbortError(err) || ctrl.signal.aborted) break
           if (err instanceof ChatApiError && err.status >= 400 && err.status < 500) {
@@ -1799,8 +1799,10 @@ onBeforeUnmount(() => {
       <TemplateStructureDialog
         :visible="tplStructureId !== null"
         :session-id="session?.sessionId || ''"
+        :inputs-version="session?.inputsVersion ?? 0"
+        :target="session?.target || 'online'"
         :template-id="tplStructureId"
-        :session-inputs="session?.inputs || {}"
+        :session-inputs="session?.inputs"
         :busy="busy"
         :action-pending="actionPending"
         @close="tplStructureId = null"

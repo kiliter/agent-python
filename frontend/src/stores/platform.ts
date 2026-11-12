@@ -6,6 +6,8 @@ import { defineStore } from 'pinia'
 import { computed, markRaw, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ApiError, errorMessage, platformApi, type DryRunPayload } from '@/api/platformApi'
+import { copyToClipboard } from '@/utils/clipboard'
+import { analyzeJinjaBody, renameJinjaBodyVariable } from '@/utils/jinjaBody'
 import type {
   ApiConnector,
   ApiEditMode,
@@ -47,7 +49,7 @@ export type IdeCenterMode = 'code' | 'preview' | 'split' | 'diff'
 export type IdeRightMode = 'inspector' | 'evidence'
 export type IdeDebugTab = 'inputs' | 'timeline' | 'fields'
 export type SettingsSubView = 'workspace' | 'prompt-rollback' | 'runtime-rollback'
-export type DrawerType = null | 'field-edit' | 'case-edit' | 'reg-diff-detail'
+export type DrawerType = null | 'reg-diff-detail'
 export type ModalType =
   | null
   | 'publish'
@@ -130,12 +132,6 @@ export const usePlatformStore = defineStore('platform', () => {
 
   // ======================================================================== 2. 抽屉与弹窗
   const activeDrawer = ref<DrawerType>(null)
-  /** -1 表示新增字段 */
-  const editingFieldIndex = ref<number>(0)
-  /** 新增字段时预填的名称（点击正文中未定义的 {{字段}} 时使用） */
-  const pendingFieldName = ref<string>('')
-  /** -1 表示新增用例 */
-  const editingCaseIndex = ref<number>(0)
   const editingRegDiffIndex = ref<number>(0)
 
   const activeModal = ref<ModalType>(null)
@@ -403,23 +399,9 @@ export const usePlatformStore = defineStore('platform', () => {
   }
 
   async function copyText(text: string, toastMsg = '已复制到剪贴板') {
-    try {
-      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-        await navigator.clipboard.writeText(text)
-      } else {
-        const ta = document.createElement('textarea')
-        ta.value = text
-        ta.style.position = 'fixed'
-        ta.style.opacity = '0'
-        document.body.appendChild(ta)
-        ta.select()
-        document.execCommand('copy')
-        document.body.removeChild(ta)
-      }
-      showToast(toastMsg, 'success')
-    } catch {
-      showToast('复制失败，请手动选择文本复制', 'warning')
-    }
+    const ok = await copyToClipboard(text)
+    if (ok) showToast(toastMsg, 'success')
+    else showToast('复制失败，请手动选择文本复制', 'warning')
   }
 
   function applyThemeToDOM() {
@@ -1024,10 +1006,14 @@ export const usePlatformStore = defineStore('platform', () => {
     onlineBaselineSeq.value += 1
   }
 
-  async function openTemplateWorkbench(tplId: number, tabKey: WorkbenchTabKey = 'body', skipLeaveGuard = false) {
-    if (!tplId) return
+  async function openTemplateWorkbench(
+    tplId: number,
+    tabKey: WorkbenchTabKey = 'body',
+    skipLeaveGuard = false,
+  ): Promise<boolean> {
+    if (!tplId) return false
     if (!skipLeaveGuard && !(await confirmBeforeLeave({ nav: 'workbench', tplId }))) {
-      return
+      return false
     }
     const switching = tplId !== currentTemplateId.value || !templateDetail.value
     if (switching) {
@@ -1043,6 +1029,7 @@ export const usePlatformStore = defineStore('platform', () => {
       await Promise.all([refreshTemplates(), loadTemplateRevisions()])
       onlineBaselineSeq.value += 1
     }
+    return currentNav.value === 'workbench' && currentTemplateId.value === tplId
   }
 
   function handleBackFromWorkbench() {
@@ -1057,40 +1044,23 @@ export const usePlatformStore = defineStore('platform', () => {
     templateValidation.value = null
   }
 
-  /** 前端实时统计每个字段在正文中出现的次数（{{ }} / {{- -}} 输出和 {% %} / {%- -%} 条件都算，与后端算法一致） */
+  const bodyAnalysis = computed(() => analyzeJinjaBody(bodyText.value || ''))
+
+  /** 前端实时统计每个顶层字段在正文中出现的次数（跳过注释、字符串、过滤器、测试名、for 循环变量及 .attr） */
   function recomputeFieldBodyUsage() {
-    const raw = bodyText.value || ''
-    const counts: Record<string, number> = {}
-    const varRe = /\{\{-?([^{}\n]*?)-?\}\}/g
-    let vm: RegExpExecArray | null
-    while ((vm = varRe.exec(raw)) !== null) {
-      const name = vm[1].split('|')[0].trim()
-      if (name) counts[name] = (counts[name] || 0) + 1
-    }
-    const ctrlRe = /\{%-?([\s\S]*?)-?%\}/g
-    let cm: RegExpExecArray | null
-    while ((cm = ctrlRe.exec(raw)) !== null) {
-      const tokRe = /\b(if|elif|else|endif|and|or|not|in)\b|("[^"]*")|([\u4e00-\u9fa5A-Za-z0-9_]+)/g
-      let tm: RegExpExecArray | null
-      while ((tm = tokRe.exec(cm[1])) !== null) {
-        if (tm[3]) counts[tm[3]] = (counts[tm[3]] || 0) + 1
-      }
-    }
+    const counts = bodyAnalysis.value.usageCounts
     templateFields.value.forEach(f => {
       f.bodyUsageCount = counts[f.name] || 0
     })
   }
 
-  /** 正文中使用了、但字段列表里没有定义的名字（支持 {{- field -}} 空白控制语法） */
+  /** 正文中使用了、但字段列表里没有定义的顶层变量名（含输出块与控制块，跳过 for 局部循环变量与 .attr） */
   const undefinedBodyFields = computed(() => {
     const defined = new Set(templateFields.value.map(f => f.name))
     const names = new Set<string>()
-    const tagRe = /\{\{-?([^{}\n]*?)-?\}\}/g
-    let m: RegExpExecArray | null
-    while ((m = tagRe.exec(bodyText.value || '')) !== null) {
-      const expr = m[1].split('|')[0].trim()
-      if (expr && /^[A-Za-z_\u4e00-\u9fa5][A-Za-z0-9_\u4e00-\u9fa5]*$/.test(expr) && !defined.has(expr)) {
-        names.add(expr)
+    for (const occ of bodyAnalysis.value.fieldOccurrences) {
+      if (!defined.has(occ.name)) {
+        names.add(occ.name)
       }
     }
     return [...names]
@@ -1275,18 +1245,9 @@ export const usePlatformStore = defineStore('platform', () => {
   }
 
   // ---------------- 字段（本地修改，保存草稿时提交）
-  function openFieldDrawer(idx: number) {
-    editingFieldIndex.value = idx
-    pendingFieldName.value = ''
-    activeDrawer.value = 'field-edit'
-  }
-
-  /** 点击正文中的 {{字段名}}：在 IDE 检查器中直接定位编辑或预填新建 */
+  /** 点击正文或校验提示中的字段名：在 IDE 右侧检查器中直接定位编辑或预填新建 */
   function jumpToFieldDrawer(fieldName: string) {
-    const idx = templateFields.value.findIndex(f => f.name === fieldName)
     currentNav.value = 'workbench'
-    editingFieldIndex.value = idx
-    pendingFieldName.value = idx < 0 ? fieldName : ''
     activeDrawer.value = null
     selectIdeFieldByName(fieldName)
   }
@@ -1299,7 +1260,7 @@ export const usePlatformStore = defineStore('platform', () => {
     }
   }
 
-  /** 新增或修改字段；originalName 为改名前的名字，改名时同步替换正文中的 {{ 旧名 }} / {{- 旧名 | filter -}} */
+  /** 新增或修改字段；originalName 为改名前的名字，改名时同步替换输出块与控制块中的顶层字段引用 */
   function upsertTemplateField(field: TemplateField, originalName?: string): boolean {
     const name = field.name.trim()
     if (!name) {
@@ -1326,9 +1287,7 @@ export const usePlatformStore = defineStore('platform', () => {
     }
     ideCreatingFieldDraft.value = ''
     if (originalName && originalName !== name) {
-      const escaped = originalName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      const varPattern = new RegExp(`\\{\\{(-?\\s*)${escaped}((?:\\s*\\|[^{}\\n]*?)?\\s*-?)\\}\\}`, 'g')
-      bodyText.value = bodyText.value.replace(varPattern, (_m, lead: string, tail: string) => `{{${lead}${name}${tail}}}`)
+      bodyText.value = renameJinjaBodyVariable(bodyText.value, originalName, name)
     }
     recomputeFieldBodyUsage()
     markCurrentTemplateDirty()
@@ -1553,11 +1512,6 @@ export const usePlatformStore = defineStore('platform', () => {
     if (cases) templateCases.value = cases
   }
 
-  function openCaseDrawer(idx: number) {
-    editingCaseIndex.value = idx
-    activeDrawer.value = 'case-edit'
-  }
-
   /** 保存用例（新建或修改） */
   async function saveTemplateCase(c: Partial<RegressionCase>, isNew: boolean) {
     const id = currentTemplateId.value
@@ -1625,7 +1579,8 @@ export const usePlatformStore = defineStore('platform', () => {
     if (!detail) return
     const tplId = detail.record.templateId || Number((run.template.match(/^(\d+)/) || [])[1])
     if (!tplId) return
-    await openTemplateWorkbench(tplId, 'dryrun')
+    const opened = await openTemplateWorkbench(tplId, 'dryrun')
+    if (!opened || currentNav.value !== 'workbench' || currentTemplateId.value !== tplId) return
     dryRunPreset.value = { caseId: 'manual', inputs: { ...detail.inputs }, docText: detail.documentText }
     showToast('已将该记录的入参与单据载入试运行')
   }
@@ -2251,7 +2206,7 @@ export const usePlatformStore = defineStore('platform', () => {
     theme, sidebarCollapsed, isFocusFullscreen, currentNav, currentTemplateId, workbenchTab,
     skillsSubView, selectedSkillId, skillDetailTab, apisSubView, selectedApiName, apiDetailTab, apiEditMode,
     runsSubView, selectedRunId, runDetailTab, settingsSubView, settingsTargetPromptRev,
-    activeDrawer, editingFieldIndex, pendingFieldName, editingCaseIndex, editingRegDiffIndex,
+    activeDrawer, editingRegDiffIndex,
     activeModal, targetOfflineTemplateId, copySourceTemplateId, targetEmergencyRev, rollbackTargetRev, targetRollbackInfo, conflictInfo,
     reportViewMode, activeEvidenceKey, inspectorTab, historyDiffTab, historyVerA, historyVerB, expandedTexts,
     // 核查模板专业 IDE 工作台状态
@@ -2290,13 +2245,13 @@ export const usePlatformStore = defineStore('platform', () => {
     loadTemplate, openTemplateWorkbench, handleBackFromWorkbench, markCurrentTemplateDirty, recomputeFieldBodyUsage,
     handleSaveDraft, handleDiscardDraft, validateCurrentTemplate, publishCurrentTemplate,
     openRollbackTemplateModal, rollbackTemplateToRev, openConflictDraftDiff, loadTemplateRevisions, loadTemplateDiff, switchWorkbenchTab,
-    openFieldDrawer, jumpToFieldDrawer, newFieldTemplate, upsertTemplateField, deleteTemplateField, moveTemplateField,
+    jumpToFieldDrawer, newFieldTemplate, upsertTemplateField, deleteTemplateField, moveTemplateField,
     toggleFieldCheck, toggleAllFieldChecks, batchUpdateEvidenceType, insertFieldIntoBody,
     saveTemplateFieldRemote, deleteTemplateFieldRemote, batchUpdateEvidenceRemote, reorderTemplateFieldsRemote, updateTemplateSkillsRemote,
     requestInsertIntoBody, requestLocateFieldInBody, selectIdeFieldByName,
     refreshTemplateDebugRuns, selectTemplateDebugRun, clearSelectedDebugRun,
     addTemplateInput, removeTemplateInput, updateTemplateSkills, removeTemplateSkill,
-    refreshCases, openCaseDrawer, saveTemplateCase, createRegressionCase, createCaseFromRun, deleteTemplateCase,
+    refreshCases, saveTemplateCase, createRegressionCase, createCaseFromRun, deleteTemplateCase,
     loadCaseIntoDryRun, loadRunIntoDryRun, executeDryRun, abortActiveDryRun, selectEvidence, setInspectorTab, setReportViewMode,
     // Skill
     loadSkill, openSkillDetail, openSkillByName, setSkillMarkdown, saveSkillDraft, discardSkillDraft,

@@ -120,7 +120,7 @@ function foldKey(...parts: Array<string | number | undefined>): string {
                   v-for="s in e.skills ?? []"
                   :key="s"
                   class="chip-tag clickable tl-skill-chip"
-                  @click="store.openSkillDetail(s)"
+                  @click="store.openSkillByName(s)"
                 >
                   <BookOpen :size="11" />
                   <span>{{ s }}</span>
@@ -170,7 +170,7 @@ function foldKey(...parts: Array<string | number | undefined>): string {
                       v-for="sk in toolMeta(e).skillNames"
                       :key="sk"
                       class="chip-tag clickable tl-skill-chip"
-                      @click="store.openSkillDetail(sk)"
+                      @click="store.openSkillByName(sk)"
                     >
                       <BookOpen :size="11" />
                       <span>「{{ sk }}」</span>
