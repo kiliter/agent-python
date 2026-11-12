@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
+from collections.abc import AsyncIterator, Callable
 import logging
 from typing import Any
 
@@ -16,27 +16,22 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..chat.service import ChatCaller, ChatError, ChatService
-from .auth import TokenService, require_report_key, token_from_request
-from .common import _sse, container
+from .auth import require_report_key, verify_request_user
+from .common import SSE_HEADERS, container, sse_frame
 
 log = logging.getLogger(__name__)
 
 chat_router = APIRouter(prefix="/api/v1/chat", tags=["聊天窗口"])
 
-_SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 _KEEPALIVE_S = 15.0
 _EOF = object()
 
 
 def _verify_admin_caller(request: Request) -> ChatCaller | None:
-    tokens: TokenService = request.app.state.tokens
-    token = token_from_request(request)
-    verified = tokens.verify(token) if token else None
+    verified = verify_request_user(request)
     if verified is None:
         return None
-    user, payload = verified
-    request.state.user = user
-    request.state.token_payload = payload
+    user, _ = verified
     return ChatCaller(kind="user", name=user.displayName or user.username)
 
 
@@ -64,11 +59,6 @@ def _chat(request: Request) -> ChatService:
     return svc
 
 
-def _sse_with_id(event_id: Any, kind: str, data: Any) -> str:
-    payload = json.dumps(data, ensure_ascii=False, default=str)
-    return f"id: {event_id}\nevent: {kind}\ndata: {payload}\n\n"
-
-
 def _extract_expected_sid(request: Request, session_id_query: str | None = None) -> str | None:
     """从可选请求头 X-Chat-Session-Id 或查询参数 sessionId 提取预期会话 ID，防止跨会话越权。#Created By AiCoding(codex)"""
     hdr_sid = (request.headers.get("x-chat-session-id") or "").strip()
@@ -76,6 +66,62 @@ def _extract_expected_sid(request: Request, session_id_query: str | None = None)
     if hdr_sid and qry_sid and hdr_sid != qry_sid:
         raise ChatError(404, "RUN_NOT_FOUND", "运行记录不存在")
     return hdr_sid or qry_sid or None
+
+
+def _sse_chat_stream(
+    source_factory: Callable[[], AsyncIterator[tuple[str, Any]]],
+    *,
+    task_name: str,
+    log_label: str,
+    terminal_kinds: frozenset[str],
+    with_step_id: bool = False,
+) -> StreamingResponse:
+    """将聊天服务的异步事件迭代器包装为带心跳保活、统一异常帧与断连取消清理的 SSE 响应。"""
+    queue: asyncio.Queue[Any] = asyncio.Queue()
+
+    async def pump() -> None:
+        try:
+            async for kind, data in source_factory():
+                await queue.put((kind, data))
+        except asyncio.CancelledError:
+            raise
+        except ChatError as exc:
+            await queue.put(("error", {"code": exc.code, "message": exc.message, **exc.details}))
+        except Exception:  # noqa: BLE001
+            log.exception("聊天 SSE 流异常 %s", log_label)
+            await queue.put(("error", {"code": "INTERNAL_ERROR", "message": "服务内部错误，请稍后重试"}))
+        finally:
+            await queue.put(_EOF)
+
+    task = asyncio.create_task(pump(), name=task_name)
+
+    async def gen():
+        try:
+            yield ": connected\n\n"
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=_KEEPALIVE_S)
+                except TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
+                if item is _EOF:
+                    break
+                kind, data = item
+                if with_step_id and kind == "step" and isinstance(data, dict):
+                    yield sse_frame("step", data, event_id=data.get("seq", ""))
+                else:
+                    yield sse_frame(kind, data)
+                if kind in terminal_kinds:
+                    break
+        finally:
+            if not task.done():
+                task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers=SSE_HEADERS)
 
 
 # ============================================================================ 请求体模型
@@ -140,49 +186,12 @@ async def send_chat_message(
     """发送用户聊天消息或触发打开时自动推荐（SSE：status / message / error / done）。"""
     svc = _chat(request)
     await svc.precheck_message(sid, body.text, auto=body.auto, caller=caller)
-
-    queue: asyncio.Queue[Any] = asyncio.Queue()
-
-    async def pump() -> None:
-        try:
-            async for kind, data in svc.send_message(sid, body.text, auto=body.auto, caller=caller):
-                await queue.put((kind, data))
-        except asyncio.CancelledError:
-            raise
-        except ChatError as exc:
-            await queue.put(("error", {"code": exc.code, "message": exc.message, **exc.details}))
-        except Exception as exc:  # noqa: BLE001
-            log.exception("聊天消息 SSE 流异常 sid=%s", sid)
-            await queue.put(("error", {"code": "INTERNAL_ERROR", "message": f"{type(exc).__name__}: {exc}"}))
-        finally:
-            await queue.put(_EOF)
-
-    task = asyncio.create_task(pump(), name=f"chat-msg-{sid[:8]}")
-
-    async def gen():
-        try:
-            yield ": connected\n\n"
-            while True:
-                try:
-                    item = await asyncio.wait_for(queue.get(), timeout=_KEEPALIVE_S)
-                except TimeoutError:
-                    yield ": keep-alive\n\n"
-                    continue
-                if item is _EOF:
-                    break
-                kind, data = item
-                yield _sse(kind, data)
-                if kind == "done":
-                    break
-        finally:
-            if not task.done():
-                task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-    return StreamingResponse(gen(), media_type="text/event-stream", headers=_SSE_HEADERS)
+    return _sse_chat_stream(
+        lambda: svc.send_message(sid, body.text, auto=body.auto, caller=caller),
+        task_name=f"chat-msg-{sid[:8]}",
+        log_label=f"sid={sid}",
+        terminal_kinds=frozenset({"done"}),
+    )
 
 
 @chat_router.get("/sessions/{sid}/templates")
@@ -260,58 +269,20 @@ async def stream_chat_run_events(
         except ValueError:
             pass
 
-    queue: asyncio.Queue[Any] = asyncio.Queue()
-
-    async def pump() -> None:
-        try:
-            async for kind, data in svc.stream_events(
-                run_id,
-                after=effective_after,
-                include_raw=includeRaw,
-                raw_after=effective_raw_after,
-                caller=caller,
-                expected_sid=expected_sid,
-            ):
-                await queue.put((kind, data))
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001
-            log.exception("聊天运行事件 SSE 流异常 runId=%s", run_id)
-        finally:
-            await queue.put(_EOF)
-
-    task = asyncio.create_task(pump(), name=f"chat-events-{run_id[:12]}")
-
-    async def gen():
-        try:
-            yield ": connected\n\n"
-            while True:
-                try:
-                    item = await asyncio.wait_for(queue.get(), timeout=_KEEPALIVE_S)
-                except TimeoutError:
-                    yield ": keep-alive\n\n"
-                    continue
-                if item is _EOF:
-                    break
-                kind, data = item
-                if kind == "step":
-                    yield _sse_with_id(data.get("seq", ""), "step", data)
-                elif kind == "raw":
-                    yield _sse("raw", data)
-                elif kind == "final":
-                    yield _sse("final", data)
-                    break
-                else:
-                    yield _sse(kind, data)
-        finally:
-            if not task.done():
-                task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-    return StreamingResponse(gen(), media_type="text/event-stream", headers=_SSE_HEADERS)
+    return _sse_chat_stream(
+        lambda: svc.stream_events(
+            run_id,
+            after=effective_after,
+            include_raw=includeRaw,
+            raw_after=effective_raw_after,
+            caller=caller,
+            expected_sid=expected_sid,
+        ),
+        task_name=f"chat-events-{run_id[:12]}",
+        log_label=f"runId={run_id}",
+        terminal_kinds=frozenset({"final", "error"}),
+        with_step_id=True,
+    )
 
 
 @chat_router.post("/runs/{run_id}/cancel")

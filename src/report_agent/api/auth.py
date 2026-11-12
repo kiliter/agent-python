@@ -12,11 +12,13 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import secrets
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import yaml
 from fastapi import HTTPException, Request
@@ -29,9 +31,17 @@ log = logging.getLogger(__name__)
 
 COOKIE_NAME = "ra_session"
 _ITERATIONS = 600_000
+MAX_USERNAME_LEN = 128
+MAX_PASSWORD_LEN = 1024
+_MAX_TOKEN_LEN = 4096
 
 
 def hash_password(password: str) -> str:
+    """对明文口令执行 PBKDF2-HMAC-SHA256 加盐哈希。"""
+    if not isinstance(password, str) or not password:
+        raise InvalidResource("密码不能为空")
+    if len(password) > MAX_PASSWORD_LEN:
+        raise InvalidResource(f"密码长度不能超过 {MAX_PASSWORD_LEN} 个字符")
     salt = secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _ITERATIONS)
     return f"pbkdf2_sha256${_ITERATIONS}${base64.b64encode(salt).decode()}${base64.b64encode(digest).decode()}"
@@ -41,7 +51,13 @@ DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
 
 
 def verify_password(password: str, encoded: str) -> bool:
-    if not isinstance(password, str) or not isinstance(encoded, str) or not encoded:
+    """常量时间校验口令哈希，拦截超长口令防止 PBKDF2 算力放大攻击。"""
+    if (
+        not isinstance(password, str)
+        or len(password) > MAX_PASSWORD_LEN
+        or not isinstance(encoded, str)
+        or not encoded
+    ):
         return False
     try:
         algo, iters, salt_b64, hash_b64 = encoded.split("$")
@@ -64,44 +80,82 @@ class User:
 
 
 class UserStore:
-    """用户文件读写。"""
+    """用户文件读写（带基于文件 mtime_ns + size 的轻量内存缓存，兼顾外部写盘自动失效）。"""
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self._lock = threading.Lock()
+        self._cache_stat: tuple[int, int] | None = None
+        self._cache_users: list[dict[str, Any]] | None = None
 
-    def _load(self) -> list[dict]:
-        if not self.path.exists():
+    def _load_locked(self) -> list[dict[str, Any]]:
+        try:
+            st = self.path.stat()
+        except OSError:
+            self._cache_stat = None
+            self._cache_users = None
             return []
+        stat_key = (st.st_mtime_ns, st.st_size)
+        if self._cache_stat == stat_key and self._cache_users is not None:
+            return self._cache_users
         try:
             data = yaml.safe_load(self.path.read_text(encoding="utf-8"))
         except (yaml.YAMLError, OSError) as exc:
             log.error("用户配置文件无法读取 %s：%s", self.path, exc)
             return []
         if not isinstance(data, dict):
-            return []
-        raw_users = data.get("users")
-        return [u for u in raw_users if isinstance(u, dict)] if isinstance(raw_users, list) else []
+            users: list[dict[str, Any]] = []
+        else:
+            raw_users = data.get("users")
+            users = [dict(u) for u in raw_users if isinstance(u, dict)] if isinstance(raw_users, list) else []
+        self._cache_stat = stat_key
+        self._cache_users = users
+        return users
 
-    def get(self, username: str) -> dict | None:
-        return next((u for u in self._load() if u.get("username") == username), None)
+    def _load(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(u) for u in self._load_locked()]
+
+    def get(self, username: str) -> dict[str, Any] | None:
+        with self._lock:
+            matched = next((u for u in self._load_locked() if u.get("username") == username), None)
+            return dict(matched) if matched is not None else None
 
     def count(self) -> int:
-        return len(self._load())
+        with self._lock:
+            return len(self._load_locked())
 
     def upsert(self, username: str, password: str, display_name: str, role: str) -> None:
         username = username.strip()
         if not username or not password:
             raise InvalidResource("用户名和密码不能为空")
+        if len(username) > MAX_USERNAME_LEN:
+            raise InvalidResource(f"用户名长度不能超过 {MAX_USERNAME_LEN} 个字符")
+        if len(password) > MAX_PASSWORD_LEN:
+            raise InvalidResource(f"密码长度不能超过 {MAX_PASSWORD_LEN} 个字符")
+        # 在锁外计算高开销 PBKDF2 哈希，避免阻塞并发读请求
+        pw_hash = hash_password(password)
+        record = {
+            "username": username,
+            "displayName": display_name.strip() or username,
+            "role": role,
+            "passwordHash": pw_hash,
+        }
         with self._lock:
-            users = [u for u in self._load() if u.get("username") != username]
-            users.append({"username": username, "displayName": display_name.strip() or username, "role": role,
-                          "passwordHash": hash_password(password)})
+            users = [dict(u) for u in self._load_locked() if u.get("username") != username]
+            users.append(record)
             atomic_write_text(self.path, yaml.safe_dump({"users": users}, allow_unicode=True, sort_keys=False))
             try:
                 self.path.chmod(0o600)
             except OSError:
                 pass
+            try:
+                st = self.path.stat()
+                self._cache_stat = (st.st_mtime_ns, st.st_size)
+                self._cache_users = users
+            except OSError:
+                self._cache_stat = None
+                self._cache_users = None
 
 
 class TokenService:
@@ -134,18 +188,28 @@ class TokenService:
         return base64.urlsafe_b64encode(hmac.new(self.secret, payload, hashlib.sha256).digest()).decode().rstrip("=")
 
     def issue(self, user: User) -> str:
-        body = json.dumps({"u": user.username, "d": user.displayName, "r": user.role,
-                           "exp": int(time.time()) + self.ttl_s, "n": secrets.token_hex(8)},
-                          ensure_ascii=False, separators=(",", ":")).encode()
+        body = json.dumps(
+            {
+                "u": user.username,
+                "d": user.displayName,
+                "r": user.role,
+                "exp": int(time.time()) + self.ttl_s,
+                "n": secrets.token_hex(8),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
         b64 = base64.urlsafe_b64encode(body).decode().rstrip("=")
         return f"{b64}.{self._sign(b64.encode())}"
 
-    def verify(self, token: str) -> tuple[User, dict] | None:
+    def verify(self, token: str) -> tuple[User, dict[str, Any]] | None:
+        if not isinstance(token, str) or not token or len(token) > _MAX_TOKEN_LEN:
+            return None
         try:
             b64, sig = token.split(".", 1)
         except ValueError:
             return None
-        if not hmac.compare_digest(sig, self._sign(b64.encode())):
+        if not b64 or not sig or not hmac.compare_digest(sig, self._sign(b64.encode())):
             return None
         try:
             payload = json.loads(base64.urlsafe_b64decode(b64 + "=" * (-len(b64) % 4)))
@@ -153,16 +217,18 @@ class TokenService:
             return None
         if not isinstance(payload, dict) or not isinstance(payload.get("u"), str) or not payload["u"]:
             return None
+        nonce = payload.get("n")
+        if not isinstance(nonce, str) or not nonce.strip():
+            return None
         try:
             exp = float(payload.get("exp", 0))
         except (TypeError, ValueError):
             return None
         now = time.time()
-        if exp < now:
+        if not math.isfinite(exp) or exp <= now:
             return None
-        nonce = payload.get("n")
         with self._lock:
-            rev_exp = self._revoked.get(nonce) if isinstance(nonce, str) else None
+            rev_exp = self._revoked.get(nonce)
             if rev_exp is not None:
                 if rev_exp <= now:
                     self._revoked.pop(nonce, None)
@@ -170,15 +236,17 @@ class TokenService:
                     return None
         return User(payload["u"], str(payload.get("d") or payload["u"]), str(payload.get("r") or "")), payload
 
-    def revoke(self, payload: dict) -> None:
+    def revoke(self, payload: dict[str, Any]) -> None:
         nonce = str(payload.get("n") or "").strip()
-        if not nonce:
+        if not nonce or len(nonce) > 128:
             return
         with self._lock:
             now = time.time()
             try:
                 exp = float(payload.get("exp", now))
             except (TypeError, ValueError):
+                exp = now
+            if not math.isfinite(exp):
                 exp = now
             self._revoked = {k: v for k, v in self._revoked.items() if v > now}
             if exp <= now:
@@ -190,6 +258,13 @@ class TokenService:
                 earliest_key = min(self._revoked, key=self._revoked.__getitem__)
                 self._revoked.pop(earliest_key, None)
             self._revoked[nonce] = exp
+
+
+def _bound_guard_key(raw: str) -> str:
+    """对超长登录键名/IP 做定长 SHA-256 摘要，防止超大字符串撑大限流字典。"""
+    if len(raw) <= MAX_USERNAME_LEN:
+        return raw
+    return "sha256:" + hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
 
 
 class LoginGuard:
@@ -221,27 +296,29 @@ class LoginGuard:
 
     def check(self, username: str, *, client_ip: str | None = None) -> None:
         now = time.time()
+        ukey = _bound_guard_key(username)
+        ip_key = _bound_guard_key(client_ip) if client_ip else None
         user_locked = False
         ip_locked = False
         with self._lock:
-            count, until = self._fails.get(username, (0, 0.0))
+            count, until = self._fails.get(ukey, (0, 0.0))
             if until and until <= now:
-                self._fails.pop(username, None)
+                self._fails.pop(ukey, None)
             elif count >= self.max_failures and until > now:
                 user_locked = True
 
-            if client_ip:
-                ip_count, ip_until = self._ip_fails.get(client_ip, (0, 0.0))
+            if ip_key:
+                ip_count, ip_until = self._ip_fails.get(ip_key, (0, 0.0))
                 if ip_until and ip_until <= now:
-                    self._ip_fails.pop(client_ip, None)
+                    self._ip_fails.pop(ip_key, None)
                 elif ip_count >= self.ip_max_failures and ip_until > now:
                     ip_locked = True
 
         if user_locked or ip_locked:
             raise HTTPException(429, detail={"code": "LOGIN_LOCKED", "message": "登录失败次数过多，请 5 分钟后再试"})
 
-    def _record_ip_fail_locked(self, client_ip: str, now: float) -> None:
-        ip_count, ip_until = self._ip_fails.pop(client_ip, (0, 0.0))
+    def _record_ip_fail_locked(self, ip_key: str, now: float) -> None:
+        ip_count, ip_until = self._ip_fails.pop(ip_key, (0, 0.0))
         if ip_until <= now:
             ip_count = 0
         if len(self._ip_fails) >= self.max_ip_entries:
@@ -255,20 +332,22 @@ class LoginGuard:
                 return
             while len(self._ip_fails) >= self.max_ip_entries:
                 self._ip_fails.pop(next(iter(self._ip_fails)))
-        self._ip_fails[client_ip] = (ip_count + 1, now + self.lock_s)
+        self._ip_fails[ip_key] = (ip_count + 1, now + self.lock_s)
 
     def fail(self, username: str, *, known_user: bool = False, client_ip: str | None = None) -> None:
         now = time.time()
+        ukey = _bound_guard_key(username)
+        ip_key = _bound_guard_key(client_ip) if client_ip else None
         with self._lock:
-            if client_ip:
-                self._record_ip_fail_locked(client_ip, now)
+            if ip_key:
+                self._record_ip_fail_locked(ip_key, now)
 
-            is_known = known_user or (username in self._known_users)
-            if known_user and username and (username in self._known_users or len(self._known_users) < self.max_entries):
-                self._known_users.add(username)
+            is_known = known_user or (ukey in self._known_users)
+            if known_user and ukey and (ukey in self._known_users or len(self._known_users) < self.max_entries):
+                self._known_users.add(ukey)
                 is_known = True
 
-            count, until = self._fails.pop(username, (0, 0.0))
+            count, until = self._fails.pop(ukey, (0, 0.0))
             if until <= now:
                 count = 0
 
@@ -314,13 +393,15 @@ class LoginGuard:
                 while len(self._fails) >= self.max_entries:
                     self._fails.pop(next(iter(self._fails)))
 
-            self._fails[username] = (count + 1, now + self.lock_s)
+            self._fails[ukey] = (count + 1, now + self.lock_s)
 
     def success(self, username: str, *, client_ip: str | None = None) -> None:
+        ukey = _bound_guard_key(username)
+        ip_key = _bound_guard_key(client_ip) if client_ip else None
         with self._lock:
-            self._fails.pop(username, None)
-            if client_ip:
-                self._ip_fails.pop(client_ip, None)
+            self._fails.pop(ukey, None)
+            if ip_key:
+                self._ip_fails.pop(ip_key, None)
 
 
 def token_from_request(request: Request) -> str | None:
@@ -330,15 +411,25 @@ def token_from_request(request: Request) -> str | None:
     return request.cookies.get(COOKIE_NAME)
 
 
-def require_user(request: Request) -> User:
-    """管理端接口依赖：必须已登录。"""
-    tokens: TokenService = request.app.state.tokens
+def verify_request_user(request: Request) -> tuple[User, dict[str, Any]] | None:
+    """校验请求携带的 Bearer 或 Cookie 管理端会话令牌，通过时挂载到 request.state 并返回。"""
+    tokens: TokenService | None = getattr(request.app.state, "tokens", None)
+    if tokens is None:
+        return None
     token = token_from_request(request)
     verified = tokens.verify(token) if token else None
-    if not verified:
-        raise HTTPException(401, detail={"code": "UNAUTHORIZED", "message": "未登录或登录已过期"})
+    if verified is None:
+        return None
     request.state.user = verified[0]
     request.state.token_payload = verified[1]
+    return verified
+
+
+def require_user(request: Request) -> User:
+    """管理端接口依赖：必须已登录。"""
+    verified = verify_request_user(request)
+    if verified is None:
+        raise HTTPException(401, detail={"code": "UNAUTHORIZED", "message": "未登录或登录已过期"})
     return verified[0]
 
 

@@ -35,6 +35,16 @@ def dash(value: Any) -> str:
     return "—" if value in (None, "") else str(value)
 
 
+def safe_int(value: Any, default: int = 0) -> int:
+    """安全将任意输入转换为整数（兼容历史或脏数据中的非数值字符串与布尔值）。"""
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 _FALLBACK_TOKEN_RE = re.compile(
     r"""('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")"""
     r"""|(\|\s*[A-Za-z_][A-Za-z0-9_]*)"""
@@ -256,15 +266,15 @@ def run_record(item: dict[str, Any]) -> dict[str, Any]:
     """运行摘要 → 前端 RunRecord（同时保留原始字段方便新前端使用）。"""
     tpl_id = item.get("templateId")
     tpl_prefix = "" if tpl_id is None else str(tpl_id)
-    dur_ms = int(item.get("durationMs") or 0)
+    dur_ms = safe_int(item.get("durationMs"), 0)
     return {
         "runId": str(item.get("runId") or ""), "startTime": fmt_time(item.get("startTime")),
         "template": f"{tpl_prefix} {item.get('templateName', '')}".strip(),
         "templateId": tpl_id, "mobile": item.get("mobile", ""), "busiName": item.get("busiName", ""),
         "status": item.get("status") or "FAILED", "foundRatio": f"{item.get('found', 0)} / {item.get('total', 0)}",
         "duration": f"{dur_ms / 1000:.1f} 秒", "durationMs": dur_ms,
-        "rounds": f"{item.get('rounds', 0)} 轮", "rev": item.get("rev") or "—", "entry": item.get("entry") or "上游调用",
-        "error": item.get("error"), "retries": item.get("retries", 0), "batchNo": item.get("batchNo"),
+        "rounds": f"{safe_int(item.get('rounds'), 0)} 轮", "rev": item.get("rev") or "—", "entry": item.get("entry") or "上游调用",
+        "error": item.get("error"), "retries": safe_int(item.get("retries"), 0), "batchNo": item.get("batchNo"),
     }
 
 

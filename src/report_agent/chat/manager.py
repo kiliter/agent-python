@@ -18,7 +18,7 @@ from ..domain.resources import ResourceSet
 from ..runtime.runner import AgentRunner, InputValidationError, RunRequest, TemplateUnavailable
 from ..runtime.workspace import ProcessEvent
 from ..store.runs import new_run_id
-from .steps import StepMapper, _sanitize_error
+from .steps import StepMapper, sanitize_error_text
 
 log = logging.getLogger(__name__)
 
@@ -209,19 +209,21 @@ class ChatRunManager:
                 status = str(outcome.get("status") or "")
                 dur_ms = int(outcome.get("durationMs") or int((time.monotonic() - ch.started_mono) * 1000))
                 if status in ("SUCCESS", "PARTIAL"):
+                    found_cnt = int(outcome.get("foundCount") or 0)
+                    total_cnt = int(outcome.get("totalCount") or 0)
                     ch.mapper.append_custom(
                         "done",
-                        f"报告生成完成（找到 {outcome['foundCount']}/{outcome['totalCount']} 个字段）",
+                        f"报告生成完成（找到 {found_cnt}/{total_cnt} 个字段）",
                         ok=True,
                         at_ms=dur_ms,
                     )
                 else:
-                    error = str(outcome.get("error") or "运行失败")
+                    error = sanitize_error_text(outcome.get("error"), fallback="运行失败")
                     error_code = "RUN_FAILED"
                     if not ch.saw_run_failed:
                         ch.mapper.append_custom(
                             "error",
-                            f"运行失败：{_sanitize_error(error)}",
+                            f"运行失败：{error}",
                             ok=False,
                             at_ms=dur_ms,
                         )
@@ -232,24 +234,24 @@ class ChatRunManager:
                 elapsed = int((time.monotonic() - ch.started_mono) * 1000)
                 ch.mapper.append_custom("warn", "运行已手动停止", ok=False, at_ms=elapsed)
             except InputValidationError as exc:
-                error = str(exc) or "入参校验不通过"
+                error = sanitize_error_text(exc, fallback="入参校验不通过")
                 error_code = "INPUT_INVALID"
                 elapsed = int((time.monotonic() - ch.started_mono) * 1000)
                 if not ch.saw_run_failed:
-                    ch.mapper.append_custom("error", f"运行失败：{_sanitize_error(exc)}", ok=False, at_ms=elapsed)
+                    ch.mapper.append_custom("error", f"运行失败：{error}", ok=False, at_ms=elapsed)
             except TemplateUnavailable as exc:
-                error = str(exc) or "模板不可用"
+                error = sanitize_error_text(exc, fallback="模板不可用")
                 error_code = "TEMPLATE_UNAVAILABLE"
                 elapsed = int((time.monotonic() - ch.started_mono) * 1000)
                 if not ch.saw_run_failed:
-                    ch.mapper.append_custom("error", f"运行失败：{_sanitize_error(exc)}", ok=False, at_ms=elapsed)
+                    ch.mapper.append_custom("error", f"运行失败：{error}", ok=False, at_ms=elapsed)
             except Exception as exc:  # noqa: BLE001 - 兜底捕获保证会话状态回写与订阅流正常闭合
                 log.exception("聊天窗口后台运行未捕获异常 runId=%s", ch.run_id)
-                error = str(exc) or type(exc).__name__
+                error = sanitize_error_text(exc, fallback=type(exc).__name__)
                 error_code = "RUN_ERROR"
                 elapsed = int((time.monotonic() - ch.started_mono) * 1000)
                 if not ch.saw_run_failed:
-                    ch.mapper.append_custom("error", f"运行失败：{_sanitize_error(exc)}", ok=False, at_ms=elapsed)
+                    ch.mapper.append_custom("error", f"运行失败：{error}", ok=False, at_ms=elapsed)
 
             if outcome is not None:
                 duration_ms = int(outcome.get("durationMs") or int((time.monotonic() - ch.started_mono) * 1000))

@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 from datetime import date
 from typing import Any
+import weakref
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
@@ -18,7 +19,17 @@ from ..store.layout import SAFE_ID_RE, ref_from_tree_path
 from ..store.releases import ReleaseNotFound
 from ..store.runs import _percentile
 from ..store.service import SP_REF, api_ref, skill_ref, tpl_ref
-from .auth import COOKIE_NAME, DUMMY_PASSWORD_HASH, User, require_report_key, require_user, verify_password
+from .auth import (
+    COOKIE_NAME,
+    DUMMY_PASSWORD_HASH,
+    MAX_PASSWORD_LEN,
+    MAX_USERNAME_LEN,
+    User,
+    require_report_key,
+    require_user,
+    verify_password,
+    verify_request_user,
+)
 from .common import bad_request, container, not_found, operator, sse_run
 from .dto import release_dto, run_record
 from .run_views import detail_view, report_view
@@ -43,8 +54,18 @@ def api_health(request: Request) -> dict[str, Any]:
 
 
 # ============================================================================ 认证
-# 独立登录并发信号量：限制 PBKDF2（60 万次迭代）并发线程占用，防止恶意高频登录耗尽全局默认线程池
-_LOGIN_SEM = asyncio.Semaphore(4)
+# 按当前事件循环隔离登录并发信号量：限制 PBKDF2（60 万次迭代）并发线程占用，同时避免跨事件循环绑定异常
+_LOGIN_MAX_CONCURRENCY = 4
+_LOGIN_SEMS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = weakref.WeakKeyDictionary()
+
+
+def _login_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    sem = _LOGIN_SEMS.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(_LOGIN_MAX_CONCURRENCY)
+        _LOGIN_SEMS[loop] = sem
+    return sem
 
 
 def _client_ip(request: Request) -> str | None:
@@ -65,8 +86,13 @@ async def login(request: Request, response: Response, body: LoginBody) -> dict[s
     username = body.username.strip()
     if not username or not body.password:
         raise bad_request("用户名和密码不能为空")
+    if len(username) > MAX_USERNAME_LEN:
+        raise bad_request(f"用户名长度不能超过 {MAX_USERNAME_LEN} 个字符", "INVALID_USERNAME")
     client_ip = _client_ip(request)
     guard.check(username, client_ip=client_ip)
+    if len(body.password) > MAX_PASSWORD_LEN:
+        guard.fail(username, known_user=False, client_ip=client_ip)
+        raise HTTPException(401, detail={"code": "INVALID_CREDENTIALS", "message": "用户名或密码错误"})
 
     def _verify_credentials() -> tuple[dict[str, Any] | None, bool, bool]:
         rec_local = users.get(username)
@@ -75,7 +101,7 @@ async def login(request: Request, response: Response, body: LoginBody) -> dict[s
         matched = verify_password(body.password, raw_hash if valid_hash else DUMMY_PASSWORD_HASH)
         return rec_local, valid_hash, matched
 
-    async with _LOGIN_SEM:
+    async with _login_semaphore():
         rec, has_valid_hash, pw_ok = await asyncio.to_thread(_verify_credentials)
 
     if not rec or not has_valid_hash or not pw_ok:
@@ -85,18 +111,23 @@ async def login(request: Request, response: Response, body: LoginBody) -> dict[s
     user = User(username, rec.get("displayName") or username, rec.get("role") or "")
     token = request.app.state.tokens.issue(user)
     settings = container(request).settings
-    response.set_cookie(COOKIE_NAME, token, max_age=settings.admin_token_ttl_s, httponly=True, samesite="strict",
-                        secure=settings.admin_cookie_secure, path="/")
+    response.set_cookie(
+        COOKIE_NAME,
+        token,
+        max_age=settings.admin_token_ttl_s,
+        httponly=True,
+        samesite="strict",
+        secure=settings.admin_cookie_secure,
+        path="/",
+    )
     return {"token": token, "username": user.username, "displayName": user.displayName, "role": user.role}
 
 
 @auth_router.post("/auth/logout", tags=["认证"])
 def logout(request: Request, response: Response) -> dict[str, Any]:
-    try:
-        require_user(request)
-        request.app.state.tokens.revoke(request.state.token_payload)
-    except Exception:  # noqa: BLE001 - 未登录也允许退出
-        pass
+    verified = verify_request_user(request)
+    if verified is not None:
+        request.app.state.tokens.revoke(verified[1])
     response.delete_cookie(COOKIE_NAME, path="/")
     return {"ok": True}
 
@@ -141,8 +172,13 @@ def release_diff(request: Request, a: str, b: str) -> dict[str, Any]:
         prev = changes.get(key)
         if prev and prev["change"] != kind:
             kind = "modified"
-        changes[key] = {"kind": ref.kind, "key": ref.key, "label": ref.label(), "change": kind,
-                        "files": [*(prev["files"] if prev else []), ns.path]}
+        changes[key] = {
+            "kind": ref.kind,
+            "key": ref.key,
+            "label": ref.label(),
+            "change": kind,
+            "files": [*(prev["files"] if prev else []), ns.path],
+        }
     return {"a": a, "b": b, "changes": list(changes.values())}
 
 
@@ -176,9 +212,20 @@ def emergency_switch(request: Request, body: SwitchBody) -> dict[str, Any]:
 
 # ============================================================================ 运行记录
 @admin_router.get("/runs")
-def list_runs(request: Request, dateFrom: date | None = None, dateTo: date | None = None, mobile: str = "",
-              templateId: int | None = None, template: str = "", status: str = "", entry: str = "",
-              batchNo: str = "", q: str = "", limit: int = 200, offset: int = 0) -> list[dict[str, Any]]:
+def list_runs(
+    request: Request,
+    dateFrom: date | None = None,
+    dateTo: date | None = None,
+    mobile: str = "",
+    templateId: int | None = None,
+    template: str = "",
+    status: str = "",
+    entry: str = "",
+    batchNo: str = "",
+    q: str = "",
+    limit: int = 200,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
     """按条件查询运行摘要（默认最近 7 天，最新在前），支持 offset + limit 分页。"""
     if limit < 1:
         raise bad_request("分页大小 limit 必须大于等于 1", "INVALID_LIMIT")
@@ -217,8 +264,7 @@ def list_runs(request: Request, dateFrom: date | None = None, dateTo: date | Non
                 return False
         return True
 
-    return [run_record(i) for i in c.runs.list(
-        dateFrom, dateTo, limit=min(limit, 2000), predicate=pred, offset=offset)]
+    return [run_record(i) for i in c.runs.list(dateFrom, dateTo, limit=min(limit, 2000), predicate=pred, offset=offset)]
 
 
 @admin_router.get("/runs/{run_id}")
@@ -240,6 +286,7 @@ def system_overview(request: Request, days: int = 7) -> dict[str, Any]:
     c = container(request)
     live_rev, live_rs = c.service.live()
     overlay = c.service.overlay()
+    overlay_templates = list(overlay.templates.values())
     entries = c.releases.entries()
     live_entry = next((e for e in reversed(entries) if e["rev"] == live_rev), None) if live_rev else None
     win = c.runs.window_stats(days=days)
@@ -297,7 +344,7 @@ def system_overview(request: Request, days: int = 7) -> dict[str, Any]:
             skill_counts["publishedDraft"] += 1
         else:
             skill_counts["draft"] += 1
-        refs_n = sum(1 for t in overlay.templates.values() if sid in t.definition.skills)
+        refs_n = sum(1 for t in overlay_templates if sid in t.definition.skills)
         skill_stats.append({
             "id": sid,
             "name": sk.title,
@@ -376,10 +423,15 @@ class ReportBody(BaseModel):
 def _report_request(body: ReportBody) -> RunRequest:
     if body.templateId <= 0:
         raise bad_request("模板编号必须为正整数", "INVALID_TEMPLATE_ID")
-    return RunRequest(template_id=body.templateId,
-                      inputs={k: "" if v is None else str(v) for k, v in body.params.items()},
-                      document=body.document, entry="上游调用", target="online", operator="upstream",
-                      extra={"batchNo": body.batchNo} if body.batchNo else {})
+    return RunRequest(
+        template_id=body.templateId,
+        inputs={k: "" if v is None else str(v) for k, v in body.params.items()},
+        document=body.document,
+        entry="上游调用",
+        target="online",
+        operator="upstream",
+        extra={"batchNo": body.batchNo} if body.batchNo else {},
+    )
 
 
 @report_router.post("/reports")

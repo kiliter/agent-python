@@ -8,11 +8,33 @@ from __future__ import annotations
 from typing import Any
 
 from ..domain.template import FieldDef, TemplateDef
-from .dto import document_lines, field_to_dto, run_record, sms_records
+from .dto import document_lines, field_to_dto, run_record, safe_int, sms_records
 
 
 def _source(f: dict[str, Any]) -> str:
     return f.get("evidenceLabel") or ""
+
+
+def _fallback_field_def(fname: str, fo: dict[str, Any]) -> FieldDef:
+    """历史运行记录缺少或损坏 templateDef 时，容错构造兜底 FieldDef。"""
+    visible = bool(fo.get("visible", True))
+    is_list = fo.get("type") == "list" or isinstance(fo.get("columns"), list)
+    if is_list:
+        raw_cols = [c for c in (fo.get("columns") or []) if isinstance(c, dict) and str(c.get("name") or "").strip()]
+        try:
+            return FieldDef(
+                name=fname,
+                visible=visible,
+                type="list",
+                columns=raw_cols,
+                whenMissing="empty",
+            )
+        except Exception:  # noqa: BLE001 - 列定义结构已演进或破损时降级为空列列表或普通文本字段
+            try:
+                return FieldDef(name=fname, visible=visible, type="list", columns=[], whenMissing="empty")
+            except Exception:  # noqa: BLE001
+                pass
+    return FieldDef(name=fname, visible=visible, type="string", whenMissing="placeholder")
 
 
 def detail_view(o: dict[str, Any], with_messages: bool = False) -> dict[str, Any]:
@@ -28,24 +50,14 @@ def detail_view(o: dict[str, Any], with_messages: bool = False) -> dict[str, Any
     fields = []
     for fo in raw_fields:
         fname = str(fo["name"])
-        fd = by_name.get(fname)
-        if fd is None:
-            is_list = fo.get("type") == "list" or isinstance(fo.get("columns"), list)
-            cols = [c for c in (fo.get("columns") or []) if isinstance(c, dict)] if is_list else []
-            fd = FieldDef(
-                name=fname,
-                visible=bool(fo.get("visible", True)),
-                type="list" if is_list else "string",
-                columns=cols,
-                whenMissing="empty" if is_list else "placeholder",
-            )
+        fd = by_name.get(fname) or _fallback_field_def(fname, fo)
         fields.append(field_to_dto(fd, run=fo))
     inputs = o.get("inputs") if isinstance(o.get("inputs"), dict) else {}
-    found_count = int(o.get("foundCount") if o.get("foundCount") is not None
-                      else sum(1 for f in raw_fields if (f.get("status") or f.get("runStatus")) == "found"))
-    total_count = int(o.get("totalCount") if o.get("totalCount") is not None else len(raw_fields))
-    duration_ms = int(o.get("durationMs") or 0)
-    rounds = int(o.get("rounds") or 0)
+    default_found = sum(1 for f in raw_fields if (f.get("status") or f.get("runStatus")) == "found")
+    found_count = safe_int(o.get("foundCount"), default_found) if o.get("foundCount") is not None else default_found
+    total_count = safe_int(o.get("totalCount"), len(raw_fields)) if o.get("totalCount") is not None else len(raw_fields)
+    duration_ms = safe_int(o.get("durationMs"), 0)
+    rounds = safe_int(o.get("rounds"), 0)
     val_rounds = o.get("validationRounds") if isinstance(o.get("validationRounds"), list) else []
     api_results = o.get("apiResults") if isinstance(o.get("apiResults"), list) else []
     doc_text = str(o.get("document") or "")
@@ -65,7 +77,7 @@ def detail_view(o: dict[str, Any], with_messages: bool = False) -> dict[str, Any
         "durationSec": round(duration_ms / 1000, 1), "rounds": rounds,
         "apiCallCount": len(api_results), "foundCount": found_count, "totalCount": total_count,
         "missingShown": o.get("missingShown") or [], "retriedFields": sorted(
-            {f["name"] for f in raw_fields if f.get("retried")}),
+            {str(f["name"]) for f in raw_fields if f.get("retried")}),
         "report": str(o.get("report") or ""), "fields": fields, "inputs": inputs,
         "documentText": doc_text, "documentLines": document_lines(doc_text),
         "apiResults": api_results, "smsRecords": sms_records(api_results),
@@ -85,12 +97,20 @@ def report_view(o: dict[str, Any]) -> dict[str, Any]:
         "runId": str(o.get("runId") or ""), "status": o.get("status") or "FAILED",
         "templateId": o.get("templateId"), "rev": o.get("rev") or "—",
         "report": str(o.get("report") or ""), "error": o.get("error"),
-        "fields": [{"name": f["name"], "visible": bool(f.get("visible", True)), "shown": bool(f.get("shown", False)),
-                    "status": f.get("status") or f.get("runStatus") or "not_found", "value": f.get("value"),
-                    "source": _source(f),
-                    "reason": f.get("reasoning") if (f.get("status") or f.get("runStatus")) != "found" else None,
-                    # #Created By AiCoding(codex) 列表字段附带列定义（value 为行对象数组）
-                    **({"columns": f["columns"]} if isinstance(f.get("columns"), list) else {})}
-                   for f in raw_fields],
-        "missingShown": o.get("missingShown") or [], "durationMs": int(o.get("durationMs") or 0),
+        "fields": [
+            {
+                "name": f["name"],
+                "visible": bool(f.get("visible", True)),
+                "shown": bool(f.get("shown", False)),
+                "status": f.get("status") or f.get("runStatus") or "not_found",
+                "value": f.get("value"),
+                "source": _source(f),
+                "reason": f.get("reasoning") if (f.get("status") or f.get("runStatus")) != "found" else None,
+                # #Created By AiCoding(codex) 列表字段附带列定义（value 为行对象数组）
+                **({"columns": f["columns"]} if isinstance(f.get("columns"), list) else {}),
+            }
+            for f in raw_fields
+        ],
+        "missingShown": o.get("missingShown") or [],
+        "durationMs": safe_int(o.get("durationMs"), 0),
     }

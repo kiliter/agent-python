@@ -30,7 +30,7 @@ ROUTER_SKILL_NAME = "template-router"
 MAX_DOC_CHARS = 12_000
 MAX_HISTORY_MESSAGES = 20
 MAX_MARKDOWN_PREVIEW = 1_500
-_JAVA_RULE_NOTE_RE = re.compile(r"\n+原规则（Java）：")
+_JAVA_RULE_NOTE_RE = re.compile(r"\n*原规则（Java）：")
 
 AUTO_RECOMMEND_PROMPT = (
     "会话刚打开，请根据当前入参和单据推荐最匹配的模板（最多 3 个）；"
@@ -131,12 +131,16 @@ def _session_run_cards(session: dict[str, Any]) -> list[dict[str, Any]]:
     return [m for m in msgs if isinstance(m, dict) and m.get("kind") == "run" and m.get("runId")]
 
 
-def _clean_field_desc(desc: str) -> str:
-    """剥离字段说明中的 Java 历史对照注释并压缩过长文本。"""
+def strip_java_rule_note(desc: str | None, *, max_chars: int | None = None) -> str:
+    """剥离字段说明中的 Java 历史对照注释，按需截断超长说明文本。"""
     cleaned = _JAVA_RULE_NOTE_RE.split(desc or "", maxsplit=1)[0].strip()
-    if len(cleaned) > 240:
-        return cleaned[:240] + "…"
+    if max_chars is not None and len(cleaned) > max_chars:
+        return cleaned[:max_chars] + "…"
     return cleaned
+
+
+def _clean_field_desc(desc: str) -> str:
+    return strip_java_rule_note(desc, max_chars=240)
 
 
 # ============================================================================ 只读工具
@@ -414,15 +418,26 @@ def build_chat_user_prompt(history_messages: list[dict[str, Any]], text: str, *,
 
 
 class ChatAgent:
-    """聊天路由智能体封装，模型与输出配置实时跟随 AgentRunner。"""
+    """聊天路由智能体封装，模型与输出配置实时跟随 AgentRunner 并按配置快照缓存实例。"""
 
     def __init__(self, runner: AgentRunner) -> None:
         self.runner = runner
+        self._cached_agent: tuple[tuple[Any, ...], Any, Any, Agent[ChatDeps, ChatAction], float] | None = None
 
-    def _build_pydantic_agent(self) -> tuple[Agent[ChatDeps, ChatAction], float]:
-        rt_settings = self.runner.settings
-        rt_model = self.runner.model
-        rt_model_settings = self.runner.model_settings
+    def _snapshot_runtime(self) -> tuple[Any, Any, Any, Any]:
+        bundle = getattr(self.runner, "_bundle", None)
+        if bundle is not None:
+            return bundle.seq, bundle.settings, bundle.model, bundle.model_settings
+        return None, self.runner.settings, self.runner.model, self.runner.model_settings
+
+    def _build_pydantic_agent(
+        self,
+        rt_settings: Any | None = None,
+        rt_model: Any | None = None,
+        rt_model_settings: Any | None = None,
+    ) -> tuple[Agent[ChatDeps, ChatAction], float]:
+        if rt_settings is None or rt_model is None:
+            _, rt_settings, rt_model, rt_model_settings = self._snapshot_runtime()
         mode = rt_settings.agent_output_mode
 
         if mode == "native":
@@ -544,6 +559,29 @@ class ChatAgent:
         timeout_s = min(float(rt_settings.agent_run_timeout_s), 120.0)
         return agent, max(1.0, timeout_s)
 
+    def _get_or_build_agent(self) -> tuple[Agent[ChatDeps, ChatAction], float]:
+        """复用与当前运行期模型及配置快照完全一致的 Pydantic AI Agent，避免每轮重复构造 Schema。"""
+        seq, rt_settings, rt_model, rt_model_settings = self._snapshot_runtime()
+        cache_key = (
+            seq,
+            rt_settings.agent_output_mode,
+            rt_settings.agent_native_strict,
+            rt_settings.agent_tool_retries,
+            rt_settings.agent_output_retries,
+            rt_settings.agent_run_timeout_s,
+        )
+        cached = self._cached_agent
+        if (
+            cached is not None
+            and cached[0] == cache_key
+            and cached[1] is rt_model
+            and cached[2] == rt_model_settings
+        ):
+            return cached[3], cached[4]
+        agent, timeout_s = self._build_pydantic_agent(rt_settings, rt_model, rt_model_settings)
+        self._cached_agent = (cache_key, rt_model, rt_model_settings, agent, timeout_s)
+        return agent, timeout_s
+
     async def run(
         self,
         deps: ChatDeps,
@@ -553,7 +591,7 @@ class ChatAgent:
         auto: bool = False,
     ) -> ChatAction:
         """执行单轮聊天路由推理并返回通过校验的 ChatAction。"""
-        agent, timeout_s = self._build_pydantic_agent()
+        agent, timeout_s = self._get_or_build_agent()
         prompt = build_chat_user_prompt(history_messages, text, auto=auto)
         async with asyncio.timeout(timeout_s):
             result = await agent.run(
