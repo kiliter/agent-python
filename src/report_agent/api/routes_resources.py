@@ -5,19 +5,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any, Literal
 
 import yaml
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Body, Depends, Query, Request
 from pydantic import BaseModel, Field, ValidationError
 
 from ..domain.api_contract import parse_api_yaml
-from ..domain.resources import validate_api
+from ..domain.resources import SYSTEM_PROMPT_FILE, validate_api
 from ..domain.skill import build_skill_markdown
 from ..gateway import unified_xml
 from ..store.fsutil import fmt_time
-from ..store.layout import API_NAME_RE, SKILL_ID_RE
+from ..store.layout import API_NAME_RE, REV_RE, SKILL_ID_RE
+from ..store.runtime_config import RuntimeConfigStore, RuntimeConfigValidationError
 from ..store.service import SP_REF, InvalidResource, api_ref, skill_ref
 from .auth import require_user
 from .common import bad_request, container, not_found, operator
@@ -264,7 +266,7 @@ def _new_api_yaml(body: CreateApiBody) -> str:
                   "properties": {"手机号码": {"type": "string", "pattern": r"^1\d{10}$", "description": "11 位手机号"}}},
         "request": {"route_type": "2", "route_value": "${手机号码}", "content": {"userMobile": "${手机号码}"}},
         "response": {"success": {"path": "operation_out.response.resp_code", "equals": "0000"},
-                     "records": {"path": "operation_out.content.list", "columns": {}}},
+                     "records": {"path": "operation_out.content", "columns": {}}},
     }
     return yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=1000)
 
@@ -479,6 +481,8 @@ async def test_call(request: Request, name: str, body: TestCallBody) -> dict[str
             api = parse_api_yaml(body.yamlText)
         except Exception as exc:  # noqa: BLE001
             raise bad_request(f"YAML 无法解析：{exc}") from exc
+        if api.name != name:
+            raise bad_request(f"YAML 中 name={api.name} 必须与接口编码 {name} 一致", "API_NAME_MISMATCH")
         schema_errors = [i.message for i in validate_api(api)]
         if schema_errors:
             raise bad_request("；".join(schema_errors), "INVALID_API_SCHEMA", errors=schema_errors)
@@ -495,8 +499,13 @@ async def test_call(request: Request, name: str, body: TestCallBody) -> dict[str
     res = await c.gateway.invoke(api, body.params)
     is_json = bool(getattr(api, "is_json", api.connector == "unified-gateway-json"))
     fmt = "json" if is_json else "xml"
-    c.publisher.audit("api-test-call", operator(request),
-                      {"api": name, "connector": api.connector, "ok": res.ok, "costMs": res.cost_ms})
+    op = operator(request)
+    await asyncio.to_thread(
+        c.publisher.audit,
+        "api-test-call",
+        op,
+        {"api": name, "connector": api.connector, "ok": res.ok, "costMs": res.cost_ms},
+    )
     return {"ok": res.ok, "error": res.error, "costMs": res.cost_ms, "httpStatus": res.http_status,
             "noData": res.no_data, "format": fmt, "connector": api.connector,
             "rawXml": res.raw, "requestXml": res.request_preview,
@@ -514,8 +523,20 @@ def _sp_state(request: Request) -> dict[str, Any]:
 
 
 @router.get("/settings/system-prompt")
-def get_system_prompt(request: Request) -> dict[str, Any]:
-    return _sp_state(request)
+def get_system_prompt(request: Request, version: str = Query("working")) -> dict[str, Any]:
+    c = container(request)
+    ver = version if version != "" else "working"
+    if ver not in ("working", "online", "draft") and not REV_RE.match(ver):
+        raise bad_request(f"版本号「{version}」格式不合法", "INVALID_VERSION")
+    if ver == "draft" and not c.drafts.exists(SP_REF):
+        raise not_found("系统提示词没有未发布的草稿版本")
+    if REV_RE.match(ver):
+        text = c.releases.read_file_at(ver, SYSTEM_PROMPT_FILE)
+        if text is None:
+            raise not_found(f"系统提示词没有 {ver} 版本")
+    else:
+        text = c.service.system_prompt(ver)
+    return {**_sp_state(request), "version": ver, "versionText": text}
 
 
 class SysPromptBody(BaseModel):
@@ -542,7 +563,12 @@ def publish_system_prompt(request: Request, body: SysPromptBody) -> dict[str, An
     if not c.drafts.exists(SP_REF):
         raise bad_request("没有需要发布的草稿", "NO_DRAFT")
     result = c.service.publish_draft(SP_REF, operator(request), body.note)
-    return {"status": c.service.state(SP_REF).status, "rev": result.entry["rev"]}
+    return {
+        "status": c.service.state(SP_REF).status,
+        "rev": result.entry["rev"],
+        "publishedAt": fmt_time(result.entry["time"]),
+        **_sp_state(request),
+    }
 
 
 @router.post("/settings/system-prompt/discard-draft")
@@ -565,13 +591,159 @@ def system_prompt_revisions(request: Request) -> list[dict[str, Any]]:
     return _revisions(request, SP_REF)
 
 
+# ============================================================================ 运行配置（统一网关 + 大模型热更新）
+def _runtime_store(c) -> RuntimeConfigStore:
+    if c.runtime_config is None:
+        c.runtime_config = RuntimeConfigStore(c.layout, c.lock)
+        c.runtime_config.bootstrap_or_load(c.env_settings or c.settings)
+    return c.runtime_config
+
+
 @router.get("/settings/model")
 def model_info(request: Request) -> dict[str, Any]:
     """当前模型与运行参数（不含密钥）。"""
-    s = container(request).settings
-    return {"model": s.llm_model, "baseUrl": s.llm_base_url, "temperature": s.llm_temperature,
-            "timeoutS": s.llm_timeout_s, "httpRetries": s.llm_http_retries, "outputMode": s.agent_output_mode,
-            "outputRetries": s.agent_output_retries, "toolRetries": s.agent_tool_retries,
-            "requestLimit": s.agent_request_limit, "toolCallsLimit": s.agent_tool_calls_limit,
-            "runTimeoutS": s.agent_run_timeout_s, "maxConcurrentRuns": s.agent_max_concurrent_runs,
-            "gatewayMode": s.gateway_mode, "gatewayXmlStyle": s.gateway_xml_style}
+    c = container(request)
+    s = c.settings
+    active_rev = _runtime_store(c).active_rev()
+    return {
+        "model": s.llm_model,
+        "baseUrl": s.llm_base_url,
+        "temperature": s.llm_temperature,
+        "maxTokens": s.llm_max_tokens,
+        "timeoutS": s.llm_timeout_s,
+        "httpRetries": s.llm_http_retries,
+        "outputMode": s.agent_output_mode,
+        "outputRetries": s.agent_output_retries,
+        "toolRetries": s.agent_tool_retries,
+        "requestLimit": s.agent_request_limit,
+        "toolCallsLimit": s.agent_tool_calls_limit,
+        "runTimeoutS": s.agent_run_timeout_s,
+        "maxConcurrentRuns": s.agent_max_concurrent_runs,
+        "gatewayMode": s.gateway_mode,
+        "gatewayUrl": s.gateway_url,
+        "gatewayXmlStyle": s.gateway_xml_style,
+        "gatewayConnectTimeoutS": s.gateway_connect_timeout_s,
+        "activeRev": active_rev,
+    }
+
+
+@router.get("/settings/runtime")
+def get_runtime_settings(request: Request) -> dict[str, Any]:
+    """读取当前生效的运行配置（密钥已脱敏）与版本元数据。"""
+    return _runtime_store(container(request)).public_state()
+
+
+def _flag_bool(raw: Any, name: str) -> bool:
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    raise bad_request(f"{name} 必须是布尔值", "INVALID_RUNTIME_CONFIG")
+
+
+@router.put("/settings/runtime")
+async def update_runtime_settings(request: Request, body: Any = Body(default=None)) -> dict[str, Any]:
+    """更新并持久化运行配置，成功后立即在进程内热重载网关与模型客户端（免重启）。"""
+    if body is None:
+        body = {}
+    if not isinstance(body, dict):
+        raise bad_request("请求体必须是 JSON 对象", "INVALID_RUNTIME_CONFIG")
+    nested = body.get("config")
+    if nested is not None and not isinstance(nested, dict):
+        raise bad_request("config 字段必须是 JSON 对象", "INVALID_RUNTIME_CONFIG")
+    patch = {**(nested or {}), **body}
+    raw_note = patch.get("note", "")
+    if raw_note is not None and not isinstance(raw_note, str):
+        raise bad_request("note 必须是字符串", "INVALID_RUNTIME_CONFIG")
+    clear_llm = _flag_bool(patch.get("clearLlmApiKey"), "clearLlmApiKey")
+    clear_app_id = _flag_bool(patch.get("clearGatewayAppId"), "clearGatewayAppId")
+    clear_token = _flag_bool(patch.get("clearGatewayAccessToken"), "clearGatewayAccessToken")
+
+    c = container(request)
+    op = operator(request)
+
+    def _do_update() -> tuple[dict[str, Any], bool]:
+        store = _runtime_store(c)
+        _, did_change = store.update(
+            patch,
+            op,
+            clear_llm_api_key=clear_llm,
+            clear_gateway_app_id=clear_app_id,
+            clear_gateway_access_token=clear_token,
+            note=raw_note or "",
+        )
+        if did_change:
+            c.apply_runtime_config()
+        return store.public_state(), did_change
+
+    try:
+        state, changed = await asyncio.to_thread(_do_update)
+    except RuntimeConfigValidationError as exc:
+        raise bad_request(str(exc), "INVALID_RUNTIME_CONFIG", errors=exc.errors) from exc
+
+    if changed and hasattr(c.gateway, "aclose_retired"):
+        await c.gateway.aclose_retired()
+    return state
+
+
+@router.get("/settings/runtime/revisions")
+def list_runtime_revisions(request: Request) -> list[dict[str, Any]]:
+    """按版本号倒序返回运行配置修订历史（含变更字段列表与脱敏快照）。"""
+    return _runtime_store(container(request)).revisions()
+
+
+class RuntimeRollbackBody(BaseModel):
+    targetRev: str = ""
+    reason: str = ""
+
+
+@router.post("/settings/runtime/rollback")
+async def rollback_runtime_settings(request: Request, body: RuntimeRollbackBody) -> dict[str, Any]:
+    """回退运行配置至指定历史版本 cN，生成新版本并立即热重载生效。"""
+    c = container(request)
+    op = operator(request)
+
+    def _do_rollback() -> dict[str, Any]:
+        store = _runtime_store(c)
+        store.rollback(body.targetRev, body.reason, op)
+        c.apply_runtime_config()
+        return {**store.public_state(), "targetRev": body.targetRev.strip()}
+
+    try:
+        out = await asyncio.to_thread(_do_rollback)
+    except RuntimeConfigValidationError as exc:
+        raise bad_request(str(exc), "INVALID_RUNTIME_CONFIG", errors=exc.errors) from exc
+    if hasattr(c.gateway, "aclose_retired"):
+        await c.gateway.aclose_retired()
+    return out
+
+
+class RuntimeSyncEnvBody(BaseModel):
+    note: str = ""
+
+
+@router.post("/settings/runtime/sync-env")
+async def sync_runtime_settings_from_env(request: Request, body: RuntimeSyncEnvBody | None = None) -> dict[str, Any]:
+    """从进程启动时的环境变量重新同步运行配置并立即热重载生效。"""
+    c = container(request)
+    op = operator(request)
+    note_val = body.note if body else ""
+
+    def _do_sync() -> tuple[dict[str, Any], bool]:
+        store = _runtime_store(c)
+        _, did_change = store.sync_from_env(
+            c.env_settings or c.settings,
+            op,
+            note=note_val,
+        )
+        if did_change:
+            c.apply_runtime_config()
+        return store.public_state(), did_change
+
+    try:
+        state, changed = await asyncio.to_thread(_do_sync)
+    except RuntimeConfigValidationError as exc:
+        raise bad_request(str(exc), "INVALID_RUNTIME_CONFIG", errors=exc.errors) from exc
+    if changed and hasattr(c.gateway, "aclose_retired"):
+        await c.gateway.aclose_retired()
+    return state

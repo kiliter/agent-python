@@ -129,11 +129,16 @@ async def call_api(ctx: RunContext[RunDeps], name: str, args: dict[str, Any]) ->
             for k, v in rec.items()
         }
         preview.append({**clipped, "row": i})
+    if contract.response.records.mode == "none" and res.ok and not res.no_data:
+        note = "接口调用成功（该契约声明无业务记录体）"
+    elif not res.records:
+        note = "没有记录"
+    else:
+        note = "预览内容已截断；判断和引用前必须用 query_result 读取完整列值"
     out = {
         "resultId": result.result_id, "ok": True, "count": len(res.records), "columns": result.columns,
         "preview": preview,
-        "note": ("没有记录" if not res.records else
-                 "预览内容已截断；判断和引用前必须用 query_result 读取完整列值"),
+        "note": note,
     }
     _record(ctx, "call_api", {"name": name, "args": clean_args},
             {"resultId": result.result_id, "count": len(res.records)},

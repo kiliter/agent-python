@@ -31,6 +31,7 @@ import type { ApiTestCallResult } from '@/types/platform'
 import CodeMirrorEditor from '@/components/CodeMirrorEditor.vue'
 
 type ConnectorKind = 'unified-gateway-xml' | 'unified-gateway-json'
+type RecordsMode = 'auto' | 'object' | 'list' | 'scalar' | 'none'
 type ParamValueType = 'string' | 'integer' | 'number' | 'boolean'
 type ContentFieldType = 'string' | 'number' | 'boolean' | 'json'
 type VisualSectionTab = 'input' | 'request' | 'response' | 'policy'
@@ -151,10 +152,39 @@ const ENVELOPE_KEYS = [
 
 type EnvelopeKey = (typeof ENVELOPE_KEYS)[number]
 
-const PROTECTED_HEADERS = new Set(['host', 'content-length'])
+const PROTECTED_HEADERS = new Set(['host', 'content-length', 'transfer-encoding'])
 const XML_TAG_RE = /^[A-Za-z_][\w.\-]*$/
 const PLACEHOLDER_RE = /\$\{([^}]+)\}/g
 const PHONE_KEYS = new Set(['route_value', 'userMobile', 'mobile', 'phone', 'billId', 'msisdn'])
+const VALID_RECORDS_MODES = new Set<RecordsMode>(['auto', 'object', 'list', 'scalar', 'none'])
+
+const RECORDS_MODE_OPTIONS: Array<{ value: RecordsMode; label: string; tip: string }> = [
+  {
+    value: 'auto',
+    label: '自动 / 单对象 (auto)',
+    tip: '自动兼容单对象字典或列表数组节点（新建接口默认推荐）',
+  },
+  {
+    value: 'object',
+    label: '固定单对象 (object)',
+    tip: '将匹配节点严格按单行记录 (row=0) 抽取',
+  },
+  {
+    value: 'list',
+    label: '列表数组 (list)',
+    tip: '将重复列表标签或 JSON 数组抽取为多行记录',
+  },
+  {
+    value: 'scalar',
+    label: '单值标量 (scalar)',
+    tip: '提取布尔、数值或纯文本值至标准列 value',
+  },
+  {
+    value: 'none',
+    label: '无业务数据体 (none)',
+    tip: '仅由状态码与无数据规则判定调用成功，不提取业务记录行',
+  },
+]
 
 // ==================== 编辑器 UI 状态 ====================
 const activeTab = ref<VisualSectionTab>('input')
@@ -173,7 +203,7 @@ const validationPopoverOpen = ref(false)
 
 // 响应样例智能识别面板状态
 const SAMPLE_RAW_PLACEHOLDER =
-  '支持粘贴 <operation_out>...</operation_out> 或 {"operation_out": {"content": {"list": [...]}}} 真实响应样例'
+  '支持粘贴单对象 {"operation_out":{"content":{"custName":"张三"}}}、嵌套对象、数组列表、标量或 <operation_out>...</operation_out> 真实响应样例'
 const sampleExtractorOpen = ref(false)
 const sampleRawInput = ref('')
 const sampleParseHint = ref<{ ok: boolean; msg: string } | null>(null)
@@ -212,7 +242,11 @@ const form = reactive({
   successEquals: '0000',
   successMissingAs: 'success' as 'success' | 'failure',
   noDataRules: [] as NoDataRuleRow[],
-  recordsPath: 'operation_out.content.list',
+  recordsMode: 'auto' as RecordsMode,
+  hadRecordsModeKey: false,
+  recordsPath: 'operation_out.content',
+  recordsFlatten: false,
+  recordsExtra: {} as Record<string, unknown>,
   columns: [] as ColumnMapRow[],
   maxPreviewChars: 60,
   previewRowsText: '',
@@ -319,6 +353,11 @@ function parseYamlIntoForm(rawYaml: string) {
     yamlParseError.value = null
     form.name = props.apiName || ''
     form.processCode = props.apiName || ''
+    form.recordsMode = 'auto'
+    form.hadRecordsModeKey = false
+    form.recordsPath = 'operation_out.content'
+    form.recordsFlatten = false
+    form.recordsExtra = {}
     return
   }
 
@@ -482,8 +521,26 @@ function parseYamlIntoForm(rawYaml: string) {
       })
 
     const rawRecords = isPlainObject(rawResp.records) ? rawResp.records : {}
-    form.recordsPath =
-      typeof rawRecords.path === 'string' ? rawRecords.path : 'operation_out.content.list'
+    form.hadRecordsModeKey = 'mode' in rawRecords
+    form.recordsMode =
+      typeof rawRecords.mode === 'string' && VALID_RECORDS_MODES.has(rawRecords.mode as RecordsMode)
+        ? (rawRecords.mode as RecordsMode)
+        : 'auto'
+    if (typeof rawRecords.path === 'string') {
+      form.recordsPath = rawRecords.path
+    } else if (rawRecords.path === null) {
+      form.recordsPath = ''
+    } else {
+      form.recordsPath = form.recordsMode === 'none' ? '' : 'operation_out.content'
+    }
+    form.recordsFlatten = rawRecords.flatten === true
+    const nextRecExtra: Record<string, unknown> = {}
+    for (const [rk, rv] of Object.entries(rawRecords)) {
+      if (!['mode', 'path', 'flatten', 'columns'].includes(rk)) {
+        nextRecExtra[rk] = rv
+      }
+    }
+    form.recordsExtra = nextRecExtra
     const rawCols = isPlainObject(rawRecords.columns) ? rawRecords.columns : {}
     form.columns = Object.entries(rawCols).map(([ck, cv]) => ({
       uid: nextUid('col'),
@@ -612,10 +669,28 @@ function emitSerializedYaml() {
     const ck = col.key.trim()
     if (ck) colsMap[ck] = col.label
   }
-  respObj.records = {
-    path: form.recordsPath.trim() || 'operation_out.content.list',
-    columns: colsMap,
+  const recordsObj: Record<string, unknown> = {}
+  if (form.recordsMode !== 'auto' || form.hadRecordsModeKey) {
+    recordsObj.mode = form.recordsMode
   }
+  if (form.recordsMode === 'none') {
+    if (form.recordsPath.trim()) {
+      recordsObj.path = form.recordsPath.trim()
+    }
+  } else {
+    recordsObj.path = form.recordsPath.trim()
+    if (
+      form.recordsFlatten &&
+      (form.recordsMode === 'auto' || form.recordsMode === 'object' || form.recordsMode === 'list')
+    ) {
+      recordsObj.flatten = true
+    }
+    recordsObj.columns = colsMap
+  }
+  for (const [rk, rv] of Object.entries(form.recordsExtra)) {
+    recordsObj[rk] = rv
+  }
+  respObj.records = recordsObj
 
   const summaryObj: Record<string, unknown> = {
     maxPreviewChars: Math.max(10, Math.round(Number(form.maxPreviewChars) || 60)),
@@ -704,8 +779,12 @@ const localErrors = computed<string[]>(() => {
   if (!form.processCode.trim()) {
     errs.push('交易编码 (processCode) 不能为空')
   }
-  if (!form.recordsPath.trim()) {
-    errs.push('响应记录节点路径 (response.records.path) 不能为空')
+  if (
+    form.recordsMode === 'list' &&
+    form.connector === 'unified-gateway-xml' &&
+    !form.recordsPath.trim()
+  ) {
+    errs.push('XML 协议列表数组模式 (mode=list) 下，响应节点路径 (response.records.path) 不能为空')
   }
 
   // 入参名重名与正则合法性
@@ -1072,7 +1151,44 @@ function removeNoDataRule(idx: number) {
   emitSerializedYaml()
 }
 
+function setRecordsMode(nextMode: RecordsMode) {
+  if (form.recordsMode === nextMode) return
+  const prevMode = form.recordsMode
+  form.recordsMode = nextMode
+  const curPath = form.recordsPath.trim()
+
+  if (nextMode === 'auto' || nextMode === 'object') {
+    if (curPath === 'operation_out.content.list' || !curPath) {
+      form.recordsPath = 'operation_out.content'
+    }
+  } else if (nextMode === 'list') {
+    if (curPath === 'operation_out.content') {
+      form.recordsPath = 'operation_out.content.list'
+    } else if (!curPath && prevMode === 'none') {
+      form.recordsPath = 'operation_out.content.list'
+    }
+  } else if (nextMode === 'scalar') {
+    if (!curPath && prevMode === 'none') {
+      form.recordsPath = 'operation_out.content'
+    }
+  }
+  emitSerializedYaml()
+}
+
+function ensureScalarValueColumn() {
+  const hasValue = form.columns.some(c => c.key.trim() === 'value')
+  if (!hasValue) {
+    form.columns.push({ uid: nextUid('col'), key: 'value', label: '标量返回值' })
+    emitSerializedYaml()
+  }
+}
+
 function addColumnMapRow() {
+  if (form.recordsMode === 'scalar' && !form.columns.some(c => c.key.trim() === 'value')) {
+    form.columns.push({ uid: nextUid('col'), key: 'value', label: '标量返回值' })
+    emitSerializedYaml()
+    return
+  }
   form.columns.push({ uid: nextUid('col'), key: '', label: '' })
 }
 
@@ -1150,20 +1266,117 @@ function handleSyncColumnsClick() {
 }
 
 // ==================== 粘贴 XML / JSON 响应样例智能识别字段 ====================
+const SAMPLE_META_CONTAINERS = new Set(['response', 'header', 'head', 'meta', 'status_info'])
+const SAMPLE_META_SCALARS = new Set([
+  'resp_code',
+  'resp_desc',
+  'resp_result',
+  'code',
+  'msg',
+  'message',
+  'retCode',
+  'retMsg',
+  'returnCode',
+  'returnMsg',
+  'status',
+  'success',
+  'error_code',
+  'error_msg',
+])
+const SAMPLE_PAGING_KEYS = new Set([
+  'total',
+  'count',
+  'totalCount',
+  'page',
+  'pageNo',
+  'pageNum',
+  'pageSize',
+  'pages',
+  'hasMore',
+  'nextCursor',
+])
+const SAMPLE_PAYLOAD_KEYS = ['content', 'data', 'result', 'body', 'payload']
+
+function xmlLocalTag(el: Element): string {
+  const raw = el.localName || el.tagName || ''
+  return raw.includes(':') ? raw.split(':').pop() || raw : raw
+}
+
+function collectJsonObjectColumns(
+  obj: Record<string, unknown>,
+  skipKeys?: Set<string>,
+): { keys: string[]; hasNestedObject: boolean } {
+  const keys: string[] = []
+  let hasNestedObject = false
+
+  function walk(cur: Record<string, unknown>, prefix: string, depth: number) {
+    for (const [k, v] of Object.entries(cur)) {
+      if (!k || (depth === 0 && skipKeys?.has(k))) continue
+      const fullKey = prefix ? `${prefix}.${k}` : k
+      if (isPlainObject(v) && Object.keys(v).length > 0 && depth < 8) {
+        hasNestedObject = true
+        walk(v, fullKey, depth + 1)
+      } else {
+        keys.push(fullKey)
+      }
+    }
+  }
+
+  walk(obj, '', 0)
+  return { keys, hasNestedObject }
+}
+
+function collectXmlElementColumns(
+  el: Element,
+  skipTopTags?: Set<string>,
+): { keys: string[]; hasNestedObject: boolean } {
+  const keys: string[] = []
+  let hasNestedObject = false
+
+  function walk(parent: Element, prefix: string, depth: number) {
+    const grouped = new Map<string, Element[]>()
+    for (const child of Array.from(parent.children)) {
+      const tag = xmlLocalTag(child)
+      if (!tag || (depth === 0 && skipTopTags?.has(tag))) continue
+      const arr = grouped.get(tag) || []
+      arr.push(child)
+      grouped.set(tag, arr)
+    }
+    for (const [tag, els] of grouped.entries()) {
+      const fullKey = prefix ? `${prefix}.${tag}` : tag
+      if (els.length === 1 && els[0].children.length > 0 && depth < 8) {
+        hasNestedObject = true
+        walk(els[0], fullKey, depth + 1)
+      } else {
+        keys.push(fullKey)
+      }
+    }
+  }
+
+  walk(el, '', 0)
+  return { keys, hasNestedObject }
+}
+
 function findBestJsonRecordArray(
   node: unknown,
   pathPrefix = '',
-): { path: string; keys: string[] } | null {
+): { path: string; keys: string[]; hasNestedObject: boolean } | null {
   if (Array.isArray(node)) {
     const objItems = node.filter(item => isPlainObject(item)) as Array<Record<string, unknown>>
     if (objItems.length > 0) {
       const keySet = new Set<string>()
-      objItems.forEach(obj => Object.keys(obj).forEach(k => keySet.add(k)))
-      return { path: pathPrefix, keys: [...keySet] }
+      let nested = false
+      for (const obj of objItems) {
+        const res = collectJsonObjectColumns(obj)
+        if (res.hasNestedObject) nested = true
+        res.keys.forEach(k => keySet.add(k))
+      }
+      return { path: pathPrefix, keys: [...keySet], hasNestedObject: nested }
     }
   }
   if (isPlainObject(node)) {
     for (const [k, v] of Object.entries(node)) {
+      if (SAMPLE_META_CONTAINERS.has(k)) continue
       const subPath = pathPrefix ? `${pathPrefix}.${k}` : k
       const found = findBestJsonRecordArray(v, subPath)
       if (found && found.keys.length > 0) return found
@@ -1172,21 +1385,30 @@ function findBestJsonRecordArray(
   return null
 }
 
-function resolveDotPathInJson(root: unknown, dotPath: string): unknown {
-  const parts = dotPath.split('.').filter(Boolean)
-  let cur: unknown = root
-  for (let i = 0; i < parts.length; i += 1) {
-    if (!isPlainObject(cur)) return undefined
-    const seg = parts[i]
-    if (seg in cur) {
-      cur = cur[seg]
-    } else if (i === 0 && seg === 'operation_out') {
-      continue
-    } else {
-      return undefined
+function isListWrapperObject(obj: Record<string, unknown>): boolean {
+  const entries = Object.entries(obj)
+  if (entries.length === 0) return false
+  let arrayKeyCount = 0
+  for (const [k, v] of entries) {
+    if (Array.isArray(v) && v.some(isPlainObject)) {
+      arrayKeyCount += 1
+    } else if (!SAMPLE_PAGING_KEYS.has(k) && !SAMPLE_META_SCALARS.has(k) && !SAMPLE_META_CONTAINERS.has(k)) {
+      return false
     }
   }
-  return cur
+  return arrayKeyCount === 1
+}
+
+function isStatusOnlyJsonObject(obj: Record<string, unknown>): boolean {
+  const entries = Object.entries(obj)
+  if (entries.length === 0) return true
+  return entries.every(([k, v]) => {
+    if (SAMPLE_META_CONTAINERS.has(k) || SAMPLE_META_SCALARS.has(k)) return true
+    if ((v === null || v === '' || (isPlainObject(v) && Object.keys(v).length === 0)) && SAMPLE_PAYLOAD_KEYS.includes(k)) {
+      return true
+    }
+    return false
+  })
 }
 
 function extractColumnsFromSample() {
@@ -1197,9 +1419,12 @@ function extractColumnsFromSample() {
   }
 
   let detectedPath = ''
+  let hasDetectedPath = false
+  let detectedMode: RecordsMode | null = null
+  let autoFlatten = false
   const extractedKeys = new Set<string>()
 
-  if (raw.startsWith('{') || raw.startsWith('[')) {
+  if (!raw.startsWith('<')) {
     let parsed: unknown
     try {
       parsed = JSON.parse(raw)
@@ -1211,33 +1436,112 @@ function extractColumnsFromSample() {
       return
     }
 
-    // 优先尝试当前配置的 records.path
-    const byConfigured = form.recordsPath.trim()
-      ? resolveDotPathInJson(parsed, form.recordsPath.trim())
-      : undefined
-    if (Array.isArray(byConfigured) && byConfigured.some(isPlainObject)) {
-      detectedPath = form.recordsPath.trim()
-      byConfigured.filter(isPlainObject).forEach(obj => Object.keys(obj).forEach(k => extractedKeys.add(k)))
-    } else if (isPlainObject(byConfigured) && Object.keys(byConfigured).length > 0) {
-      detectedPath = form.recordsPath.trim()
-      Object.keys(byConfigured).forEach(k => extractedKeys.add(k))
-    } else {
-      const best = findBestJsonRecordArray(parsed)
-      if (best) {
-        detectedPath = best.path
-        best.keys.forEach(k => extractedKeys.add(k))
-      } else if (isPlainObject(parsed)) {
-        const contentNode =
-          (isPlainObject(parsed.operation_out) && isPlainObject(parsed.operation_out.content)
-            ? parsed.operation_out.content
-            : isPlainObject(parsed.content)
-              ? parsed.content
-              : parsed) as Record<string, unknown>
-        detectedPath = isPlainObject(parsed.operation_out) ? 'operation_out.content' : ''
-        Object.keys(contentNode).forEach(k => extractedKeys.add(k))
+    if (parsed === null || parsed === undefined) {
+      sampleParseHint.value = { ok: false, msg: '样例报文为 null，未包含可识别结构' }
+      return
+    }
+
+    if (typeof parsed !== 'object') {
+      // 顶层 JSON 标量（如 true / 0 / "PASS"）
+      detectedMode = 'scalar'
+      detectedPath = ''
+      hasDetectedPath = true
+      extractedKeys.add('value')
+    } else if (Array.isArray(parsed)) {
+      hasDetectedPath = true
+      detectedPath = ''
+      if (parsed.some(isPlainObject)) {
+        detectedMode = 'list'
+        for (const item of parsed.filter(isPlainObject)) {
+          const info = collectJsonObjectColumns(item)
+          if (info.hasNestedObject) autoFlatten = true
+          info.keys.forEach(k => extractedKeys.add(k))
+        }
+      } else if (parsed.length > 0) {
+        detectedMode = 'scalar'
+        extractedKeys.add('value')
+      }
+    } else if (isPlainObject(parsed)) {
+      const hasOpOut = isPlainObject(parsed.operation_out)
+      const baseObj = (hasOpOut ? parsed.operation_out : parsed) as Record<string, unknown>
+      const basePrefix = hasOpOut ? 'operation_out' : ''
+
+      // 查找常见业务包裹键（content / data / result / body / payload）
+      const payloadKey = SAMPLE_PAYLOAD_KEYS.find(k => k in baseObj)
+      if (payloadKey !== undefined) {
+        const pVal = baseObj[payloadKey]
+        const pPath = basePrefix ? `${basePrefix}.${payloadKey}` : payloadKey
+        if (Array.isArray(pVal)) {
+          hasDetectedPath = true
+          detectedPath = pPath
+          if (pVal.some(isPlainObject)) {
+            detectedMode = 'list'
+            for (const item of pVal.filter(isPlainObject)) {
+              const info = collectJsonObjectColumns(item)
+              if (info.hasNestedObject) autoFlatten = true
+              info.keys.forEach(k => extractedKeys.add(k))
+            }
+          } else if (pVal.length > 0) {
+            detectedMode = 'scalar'
+            extractedKeys.add('value')
+          }
+        } else if (isPlainObject(pVal)) {
+          if (Object.keys(pVal).length === 0) {
+            detectedMode = 'none'
+            detectedPath = ''
+            hasDetectedPath = true
+          } else if (form.recordsMode !== 'object' && isListWrapperObject(pVal)) {
+            const foundList = findBestJsonRecordArray(pVal, pPath)
+            if (foundList) {
+              detectedMode = 'list'
+              detectedPath = foundList.path
+              hasDetectedPath = true
+              autoFlatten = foundList.hasNestedObject
+              foundList.keys.forEach(k => extractedKeys.add(k))
+            }
+          } else {
+            detectedMode = form.recordsMode === 'object' ? 'object' : 'auto'
+            detectedPath = pPath
+            hasDetectedPath = true
+            const info = collectJsonObjectColumns(pVal)
+            autoFlatten = info.hasNestedObject
+            info.keys.forEach(k => extractedKeys.add(k))
+          }
+        } else if (pVal !== null && pVal !== undefined && pVal !== '') {
+          detectedMode = 'scalar'
+          detectedPath = pPath
+          hasDetectedPath = true
+          extractedKeys.add('value')
+        } else if (isStatusOnlyJsonObject(baseObj)) {
+          detectedMode = 'none'
+          detectedPath = ''
+          hasDetectedPath = true
+        }
+      } else if (form.recordsMode !== 'object' && isListWrapperObject(baseObj)) {
+        const foundList = findBestJsonRecordArray(baseObj, basePrefix)
+        if (foundList) {
+          detectedMode = 'list'
+          detectedPath = foundList.path
+          hasDetectedPath = true
+          autoFlatten = foundList.hasNestedObject
+          foundList.keys.forEach(k => extractedKeys.add(k))
+        }
+      } else if (isStatusOnlyJsonObject(baseObj)) {
+        detectedMode = 'none'
+        detectedPath = ''
+        hasDetectedPath = true
+      } else {
+        // 顶层（或 operation_out 直属）单对象：注意根路径 "" 必须准确写回 form.recordsPath
+        detectedMode = form.recordsMode === 'object' ? 'object' : 'auto'
+        detectedPath = basePrefix
+        hasDetectedPath = true
+        const skip = new Set<string>([...SAMPLE_META_CONTAINERS])
+        const info = collectJsonObjectColumns(baseObj, skip)
+        autoFlatten = info.hasNestedObject
+        info.keys.forEach(k => extractedKeys.add(k))
       }
     }
-  } else if (raw.startsWith('<')) {
+  } else {
     const parser = new DOMParser()
     const xmlDoc = parser.parseFromString(raw, 'application/xml')
     const parseErr = xmlDoc.querySelector('parsererror')
@@ -1247,48 +1551,138 @@ function extractColumnsFromSample() {
     }
 
     const rootEl = xmlDoc.documentElement
-    // 扫描重复出现的列表节点或叶子容器节点
-    let bestPath = ''
-    let bestChildren: Element[] = []
+    const rootTag = xmlLocalTag(rootEl)
 
-    function walkEl(el: Element, currentPath: string) {
-      const children = Array.from(el.children)
-      if (children.length === 0) return
-      const grandChildrenCount = children.reduce((acc, c) => acc + c.children.length, 0)
-      if (grandChildrenCount === 0 && children.length >= bestChildren.length && currentPath.includes('content')) {
-        bestPath = currentPath
-        bestChildren = children
+    // 1) 优先扫描重复同名子标签（典型列表如 <smsList>...</smsList>）
+    let listFound: { path: string; els: Element[]; isScalarItems: boolean } | null = null
+    function scanXmlList(el: Element, currentPath: string) {
+      if (listFound) return
+      const tagMap = new Map<string, Element[]>()
+      for (const child of Array.from(el.children)) {
+        const t = xmlLocalTag(child)
+        if (!t || SAMPLE_META_CONTAINERS.has(t)) continue
+        const arr = tagMap.get(t) || []
+        arr.push(child)
+        tagMap.set(t, arr)
       }
-      // 统计同名重复子标签（典型列表项如 <smsList>...</smsList>）
-      const tagCounts = new Map<string, Element[]>()
-      for (const child of children) {
-        const list = tagCounts.get(child.tagName) || []
-        list.push(child)
-        tagCounts.set(child.tagName, list)
-      }
-      for (const [tag, els] of tagCounts.entries()) {
+      for (const [tag, els] of tagMap.entries()) {
         const childPath = `${currentPath}.${tag}`
-        if (els.length > 1 && els[0].children.length > 0) {
-          bestPath = childPath
-          bestChildren = els.flatMap(item => Array.from(item.children))
+        if (els.length > 1) {
+          const hasElementChildren = els.some(item => item.children.length > 0)
+          listFound = { path: childPath, els, isScalarItems: !hasElementChildren }
           return
         }
-        for (const single of els) {
-          walkEl(single, childPath)
+        if (els[0].children.length > 0) {
+          scanXmlList(els[0], childPath)
         }
       }
     }
+    scanXmlList(rootEl, rootTag)
 
-    walkEl(rootEl, rootEl.tagName)
-    if (bestChildren.length > 0) {
-      detectedPath = bestPath
-      bestChildren.forEach(c => extractedKeys.add(c.tagName))
+    if (listFound && form.recordsMode !== 'object') {
+      const hit = listFound as { path: string; els: Element[]; isScalarItems: boolean }
+      hasDetectedPath = true
+      detectedPath = hit.path
+      if (hit.isScalarItems) {
+        detectedMode = 'scalar'
+        extractedKeys.add('value')
+      } else {
+        detectedMode = 'list'
+        for (const itemEl of hit.els) {
+          const info = collectXmlElementColumns(itemEl)
+          if (info.hasNestedObject) autoFlatten = true
+          info.keys.forEach(k => extractedKeys.add(k))
+        }
+      }
+    } else if (rootEl.children.length === 0) {
+      // 根节点纯文本标量（如 <result>true</result>）
+      const rootText = (rootEl.textContent || '').trim()
+      if (rootText) {
+        detectedMode = 'scalar'
+        detectedPath = rootTag
+        hasDetectedPath = true
+        extractedKeys.add('value')
+      }
     } else {
-      Array.from(rootEl.children).forEach(c => extractedKeys.add(c.tagName))
-      detectedPath = rootEl.tagName
+      const rootChildren = Array.from(rootEl.children)
+      const hasMetaSibling = rootChildren.some(c => {
+        const t = xmlLocalTag(c)
+        return SAMPLE_META_CONTAINERS.has(t) || SAMPLE_META_SCALARS.has(t)
+      })
+      const nonMetaChildren = rootChildren.filter(c => {
+        const t = xmlLocalTag(c)
+        return !SAMPLE_META_CONTAINERS.has(t) && !SAMPLE_META_SCALARS.has(t)
+      })
+      const preferredContainer = nonMetaChildren.find(c =>
+        SAMPLE_PAYLOAD_KEYS.includes(xmlLocalTag(c)),
+      )
+      const payloadEl =
+        preferredContainer ||
+        (hasMetaSibling && nonMetaChildren.length === 1 ? nonMetaChildren[0] : null)
+
+      if (payloadEl) {
+        const payloadTag = xmlLocalTag(payloadEl)
+        const payloadPath = `${rootTag}.${payloadTag}`
+        const pChildren = Array.from(payloadEl.children)
+
+        if (pChildren.length === 0) {
+          const txt = (payloadEl.textContent || '').trim()
+          if (txt) {
+            detectedMode = 'scalar'
+            detectedPath = payloadPath
+            hasDetectedPath = true
+            extractedKeys.add('value')
+          } else {
+            detectedMode = 'none'
+            detectedPath = ''
+            hasDetectedPath = true
+          }
+        } else if (
+          pChildren.length === 1 &&
+          pChildren[0].children.length > 0 &&
+          /(?:list|items|rows|item|row)$/i.test(xmlLocalTag(pChildren[0])) &&
+          form.recordsMode !== 'object'
+        ) {
+          // 单条样例的列表容器（如 <content><smsList>...</smsList></content>）
+          const itemTag = xmlLocalTag(pChildren[0])
+          detectedMode = 'list'
+          detectedPath = `${payloadPath}.${itemTag}`
+          hasDetectedPath = true
+          const info = collectXmlElementColumns(pChildren[0])
+          autoFlatten = info.hasNestedObject
+          info.keys.forEach(k => extractedKeys.add(k))
+        } else {
+          detectedMode = form.recordsMode === 'object' ? 'object' : 'auto'
+          detectedPath = payloadPath
+          hasDetectedPath = true
+          const info = collectXmlElementColumns(payloadEl)
+          autoFlatten = info.hasNestedObject
+          info.keys.forEach(k => extractedKeys.add(k))
+        }
+      } else if (nonMetaChildren.length === 0) {
+        detectedMode = 'none'
+        detectedPath = ''
+        hasDetectedPath = true
+      } else {
+        // 根节点自身即单对象（如 <userProfile><userName>张三</userName></userProfile>）
+        detectedMode = form.recordsMode === 'object' ? 'object' : 'auto'
+        detectedPath = rootTag
+        hasDetectedPath = true
+        const info = collectXmlElementColumns(rootEl, SAMPLE_META_CONTAINERS)
+        autoFlatten = info.hasNestedObject
+        info.keys.forEach(k => extractedKeys.add(k))
+      }
     }
-  } else {
-    sampleParseHint.value = { ok: false, msg: '无法识别报文协议，请粘贴以 { / [ 开头的 JSON 或以 < 开头的 XML' }
+  }
+
+  if (detectedMode === 'none') {
+    form.recordsMode = 'none'
+    form.recordsPath = ''
+    emitSerializedYaml()
+    sampleParseHint.value = {
+      ok: true,
+      msg: '识别为无业务记录体响应，已切换为「无业务数据体 (none)」模式',
+    }
     return
   }
 
@@ -1297,22 +1691,34 @@ function extractColumnsFromSample() {
     return
   }
 
+  if (detectedMode) {
+    form.recordsMode = detectedMode
+  }
+  if (hasDetectedPath) {
+    form.recordsPath = detectedPath
+  }
+  if (autoFlatten && (form.recordsMode === 'auto' || form.recordsMode === 'object' || form.recordsMode === 'list')) {
+    form.recordsFlatten = true
+  }
+
   const existing = new Set(form.columns.map(c => c.key.trim()).filter(Boolean))
   let added = 0
   for (const key of extractedKeys) {
     if (key && key !== 'row' && !existing.has(key)) {
-      form.columns.push({ uid: nextUid('col'), key, label: key })
+      const defaultLabel = key === 'value' && form.recordsMode === 'scalar' ? '标量返回值' : key
+      form.columns.push({ uid: nextUid('col'), key, label: defaultLabel })
       existing.add(key)
       added += 1
     }
   }
-  if (detectedPath) {
-    form.recordsPath = detectedPath
-  }
   emitSerializedYaml()
+  const pathDesc = hasDetectedPath
+    ? `，节点路径已设为 ${detectedPath ? detectedPath : '""（根节点）'}`
+    : ''
+  const flattenDesc = autoFlatten ? '，已自动开启嵌套子对象展平' : ''
   sampleParseHint.value = {
     ok: true,
-    msg: `成功识别 ${extractedKeys.size} 个字段（新增映射 ${added} 列）${detectedPath ? `，记录路径已定位为 ${detectedPath}` : ''}`,
+    msg: `成功识别 ${extractedKeys.size} 个字段（新增映射 ${added} 列）${pathDesc}${flattenDesc}`,
   }
 }
 
@@ -1522,7 +1928,7 @@ defineExpose({
           @click="activeTab = 'response'"
         >
           <span>③ 响应解析与字段映射</span>
-          <span class="ave-count-pill mono">{{ form.columns.length }}</span>
+          <span class="ave-count-pill mono">{{ form.recordsMode === 'none' ? 'none' : form.columns.length }}</span>
         </button>
         <button
           type="button"
@@ -2113,15 +2519,16 @@ defineExpose({
             </div>
           </div>
 
-          <!-- C. 记录列表与字段列映射 (response.records + summary) -->
+          <!-- C. 结构化响应抽取与字段列映射 (response.records + summary) -->
           <div class="ave-panel-card">
             <div class="ave-panel-head">
               <div class="ave-panel-title-wrap">
-                <span class="ave-panel-title">结构化记录抽取与字段列映射 (response.records)</span>
-                <span class="ave-panel-sub">将网关返回的列表节点映射为带中文业务列名的二维证据表供核查智能体取证</span>
+                <span class="ave-panel-title">结构化响应抽取与字段映射 (response.records)</span>
+                <span class="ave-panel-sub">支持单对象、列表数组、单值标量与无业务数据体响应，自动映射为结构化取证结果</span>
               </div>
               <div class="ave-head-right">
                 <button
+                  v-if="form.recordsMode !== 'none'"
                   type="button"
                   class="ave-btn ave-btn-xs"
                   title="从当前详情页最近一次试调用返回记录中自动提取全部字段列"
@@ -2139,7 +2546,12 @@ defineExpose({
                   <Sparkles :size="12" />
                   <span>粘贴 XML/JSON 响应样例智能识别字段</span>
                 </button>
-                <button type="button" class="ave-btn ave-btn-primary" @click="addColumnMapRow">
+                <button
+                  v-if="form.recordsMode !== 'none'"
+                  type="button"
+                  class="ave-btn ave-btn-primary"
+                  @click="addColumnMapRow"
+                >
                   <Plus :size="13" />
                   <span>新增列映射</span>
                 </button>
@@ -2149,7 +2561,7 @@ defineExpose({
             <!-- 内联响应样例智能识别工具舱 -->
             <div v-if="sampleExtractorOpen" class="ave-sample-drawer">
               <div class="ave-sample-top">
-                <span style="font-weight: 600">粘贴原始 XML 或 JSON 响应报文，自动识别记录列表路径与全部字段 Key：</span>
+                <span style="font-weight: 600">粘贴原始 XML 或 JSON 响应报文，自动识别响应结构模式、业务数据节点路径与字段 Key：</span>
                 <button type="button" class="ave-link-btn" @click="sampleExtractorOpen = false">收起工具</button>
               </div>
               <textarea
@@ -2165,7 +2577,7 @@ defineExpose({
                 >
                   {{ sampleParseHint.msg }}
                 </span>
-                <span v-else class="ave-muted">已映射的中文列名将完整保留，仅增量补充新发现字段</span>
+                <span v-else class="ave-muted">支持单对象、嵌套子对象、数组列表、标量及仅含状态码响应；已有中文列名将完整保留</span>
                 <button type="button" class="ave-btn ave-btn-primary" @click="extractColumnsFromSample">
                   <Sparkles :size="12" />
                   <span>立即识别并导入列映射</span>
@@ -2173,85 +2585,160 @@ defineExpose({
               </div>
             </div>
 
-            <div class="ave-form-grid-3 ave-border-bottom">
-              <div>
-                <label class="ave-lbl">记录列表节点路径 (records.path) *</label>
-                <input
-                  v-model="form.recordsPath"
-                  type="text"
-                  class="ave-input mono"
-                  placeholder="operation_out.content.list"
-                  @input="emitSerializedYaml"
-                />
+            <!-- 响应业务体结构模式选择器 -->
+            <div class="ave-mode-bar">
+              <div class="ave-mode-left">
+                <span class="ave-mode-lbl">响应业务体结构 (records.mode)</span>
+                <div class="ave-mode-seg" role="radiogroup" aria-label="响应业务体结构模式">
+                  <button
+                    v-for="opt in RECORDS_MODE_OPTIONS"
+                    :key="opt.value"
+                    type="button"
+                    role="radio"
+                    :aria-checked="form.recordsMode === opt.value"
+                    class="ave-mode-seg-btn"
+                    :class="{ active: form.recordsMode === opt.value }"
+                    :title="opt.tip"
+                    @click="setRecordsMode(opt.value)"
+                  >
+                    {{ opt.label }}
+                  </button>
+                </div>
               </div>
-              <div>
-                <label class="ave-lbl">模型摘要单格截断字数 (maxPreviewChars)</label>
+
+              <label
+                v-if="form.recordsMode === 'auto' || form.recordsMode === 'object' || form.recordsMode === 'list'"
+                class="ave-inline-check ave-flatten-check"
+                title="开启后递归将嵌套子对象/子标签展平为 parent.child 点分列名"
+              >
                 <input
-                  v-model.number="form.maxPreviewChars"
-                  type="number"
-                  min="10"
-                  max="2000"
-                  class="ave-input mono"
-                  @input="emitSerializedYaml"
+                  v-model="form.recordsFlatten"
+                  type="checkbox"
+                  class="ave-checkbox"
+                  @change="emitSerializedYaml"
                 />
-              </div>
-              <div>
-                <label class="ave-lbl">模型摘要预览行数 (previewRows，可空)</label>
-                <input
-                  v-model="form.previewRowsText"
-                  type="number"
-                  min="1"
-                  max="200"
-                  class="ave-input mono"
-                  placeholder="留空则跟随系统默认行数"
-                  @input="emitSerializedYaml"
-                />
+                <span>展平嵌套子对象 (flatten)</span>
+              </label>
+            </div>
+
+            <!-- 无业务数据体 (mode: none) 专属说明面板 -->
+            <div v-if="form.recordsMode === 'none'" class="ave-mode-callout is-none">
+              <div class="ave-callout-title">当前契约声明为「无业务数据体 (mode: none)」</div>
+              <div class="ave-callout-desc">
+                网关调用仅依据上方 <code class="mono">response.success</code> 与 <code class="mono">response.noData</code> 判定业务是否成功，不提取二维记录行；核查智能体调用成功后将收到「接口调用成功（该契约声明无业务记录体）」的明确回执，不会误判为“未查到记录”。
               </div>
             </div>
 
-            <div class="ave-table-wrap">
-              <table class="ave-grid-table">
-                <thead>
-                  <tr>
-                    <th style="width: 38%">响应原始字段 Key</th>
-                    <th>中文业务列名说明（展示给核查大模型与证据表头）</th>
-                    <th style="width: 48px; text-align: right">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-if="form.columns.length === 0">
-                    <td colspan="3" class="ave-empty-td">
-                      <span>未声明特定列映射（未声明时默认透传记录节点下全部原始字段）</span>
-                    </td>
-                  </tr>
-                  <tr v-for="(col, colIdx) in form.columns" :key="col.uid">
-                    <td>
-                      <input
-                        v-model="col.key"
-                        type="text"
-                        class="ave-cell-input mono is-key"
-                        placeholder="如 smsSendTime"
-                        @input="emitSerializedYaml"
-                      />
-                    </td>
-                    <td>
-                      <input
-                        v-model="col.label"
-                        type="text"
-                        class="ave-cell-input"
-                        placeholder="如 短信下发时间 yyyyMMddHHmmss"
-                        @input="emitSerializedYaml"
-                      />
-                    </td>
-                    <td style="text-align: right">
-                      <button type="button" class="ave-icon-btn is-danger" @click="removeColumnMapRow(colIdx)">
-                        <Trash2 :size="13" />
-                      </button>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
+            <template v-else>
+              <!-- 单值标量 (mode: scalar) 字段约定提示 -->
+              <div v-if="form.recordsMode === 'scalar'" class="ave-mode-callout is-scalar">
+                <span>
+                  标量模式下，匹配节点的文本、数值或布尔值（完整保留 <code class="mono">false</code> / <code class="mono">0</code>）统一封装至标准字段列 <code class="mono">value</code> 中供智能体读取与取证引用。
+                </span>
+                <button
+                  v-if="!form.columns.some(c => c.key.trim() === 'value')"
+                  type="button"
+                  class="ave-btn ave-btn-xs"
+                  @click="ensureScalarValueColumn"
+                >
+                  <Plus :size="12" />
+                  <span>添加 value 列中文说明</span>
+                </button>
+              </div>
+
+              <div class="ave-form-grid-3 ave-border-bottom">
+                <div>
+                  <label class="ave-lbl">
+                    业务数据节点路径 (records.path)
+                    <span v-if="form.recordsMode === 'list' && form.connector === 'unified-gateway-xml'" class="ave-req-mark">*</span>
+                    <span v-else class="ave-lbl-hint">（可留空匹配根节点）</span>
+                  </label>
+                  <input
+                    v-model="form.recordsPath"
+                    type="text"
+                    class="ave-input mono"
+                    :placeholder="
+                      form.recordsMode === 'list'
+                        ? '如 operation_out.content.list（JSON 根数组可留空）'
+                        : '如 operation_out.content（留空则匹配响应根节点）'
+                    "
+                    @input="emitSerializedYaml"
+                  />
+                </div>
+                <div>
+                  <label class="ave-lbl">模型摘要单格截断字数 (maxPreviewChars)</label>
+                  <input
+                    v-model.number="form.maxPreviewChars"
+                    type="number"
+                    min="10"
+                    max="2000"
+                    class="ave-input mono"
+                    @input="emitSerializedYaml"
+                  />
+                </div>
+                <div>
+                  <label class="ave-lbl">模型摘要预览行数 (previewRows，可空)</label>
+                  <input
+                    v-model="form.previewRowsText"
+                    type="number"
+                    min="1"
+                    max="200"
+                    class="ave-input mono"
+                    placeholder="留空则跟随系统默认行数"
+                    @input="emitSerializedYaml"
+                  />
+                </div>
+              </div>
+
+              <div class="ave-table-wrap">
+                <table class="ave-grid-table">
+                  <thead>
+                    <tr>
+                      <th style="width: 38%">响应原始字段 Key</th>
+                      <th>中文业务列名说明（展示给核查大模型与证据表头）</th>
+                      <th style="width: 48px; text-align: right">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-if="form.columns.length === 0">
+                      <td colspan="3" class="ave-empty-td">
+                        <span v-if="form.recordsMode === 'scalar'">
+                          未显式声明列映射（标量模式默认输出列名为 <code class="mono">value</code>，可点击上方按钮补充中文列名说明）
+                        </span>
+                        <span v-else>
+                          未声明特定列映射（默认透传节点下全部字段；也可显式声明如 <code class="mono">userInfo.userName</code> 提取嵌套子字段）
+                        </span>
+                      </td>
+                    </tr>
+                    <tr v-for="(col, colIdx) in form.columns" :key="col.uid">
+                      <td>
+                        <input
+                          v-model="col.key"
+                          type="text"
+                          class="ave-cell-input mono is-key"
+                          :placeholder="form.recordsMode === 'scalar' ? 'value' : '如 custName 或 userInfo.userName'"
+                          @input="emitSerializedYaml"
+                        />
+                      </td>
+                      <td>
+                        <input
+                          v-model="col.label"
+                          type="text"
+                          class="ave-cell-input"
+                          :placeholder="form.recordsMode === 'scalar' ? '如 校验通过标识' : '如 客户姓名 或 短信下发时间'"
+                          @input="emitSerializedYaml"
+                        />
+                      </td>
+                      <td style="text-align: right">
+                        <button type="button" class="ave-icon-btn is-danger" @click="removeColumnMapRow(colIdx)">
+                          <Trash2 :size="13" />
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </template>
           </div>
         </div>
 
@@ -2412,10 +2899,10 @@ defineExpose({
 }
 
 .ave-yaml-head {
-  height: 34px;
-  padding: 0 12px;
-  border-bottom: 1px solid var(--border-color);
-  background: var(--bg-subtle);
+  height: 36px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border-light, var(--border-color));
+  background: var(--bg-surface);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2436,7 +2923,7 @@ defineExpose({
 .ave-yaml-editor-host {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 8px;
+  padding: 10px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -2444,7 +2931,7 @@ defineExpose({
 
 /* ==================== YAML 错误保护横幅 ==================== */
 .ave-yaml-err-banner {
-  padding: 8px 12px;
+  padding: 8px 14px;
   background: var(--danger-bg);
   border-bottom: 1px solid var(--danger-border);
   color: var(--danger);
@@ -2474,9 +2961,9 @@ defineExpose({
 .ave-endpoint-bar {
   position: relative;
   z-index: 25;
-  padding: 8px 12px;
-  background: var(--bg-subtle);
-  border-bottom: 1px solid var(--border-color);
+  padding: 8px 14px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-light, var(--border-color));
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -2488,9 +2975,9 @@ defineExpose({
   display: inline-flex;
   align-items: center;
   padding: 2px;
-  border-radius: 5px;
+  border-radius: 6px;
   background: var(--bg-muted);
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border-light, var(--border-color));
   gap: 2px;
   flex-shrink: 0;
 }
@@ -2499,20 +2986,20 @@ defineExpose({
   appearance: none;
   height: 26px;
   padding: 0 9px;
-  border: 1px solid transparent;
+  border: none;
   border-radius: 4px;
   background: transparent;
   color: var(--text-secondary);
   font-family: var(--font-mono);
   font-size: 11.5px;
-  font-weight: 600;
+  font-weight: 500;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: 5px;
   white-space: nowrap;
   flex-shrink: 0;
-  transition: background-color 0.12s, color 0.12s, border-color 0.12s;
+  transition: background-color 0.14s, color 0.14s, box-shadow 0.14s;
 }
 
 .ave-proto-btn:hover:not(:disabled) {
@@ -2520,42 +3007,47 @@ defineExpose({
 }
 
 .ave-proto-btn.is-active-xml {
-  background: var(--primary-bg);
-  border-color: var(--primary-border);
+  background: var(--bg-elevated, var(--bg-surface));
   color: var(--primary);
+  font-weight: 600;
+  box-shadow: var(--shadow-sm);
 }
 
 .ave-proto-btn.is-active-json {
-  background: var(--success-bg);
-  border-color: var(--success-border);
+  background: var(--bg-elevated, var(--bg-surface));
   color: var(--success);
+  font-weight: 600;
+  box-shadow: var(--shadow-sm);
 }
 
 .ave-endpoint-box {
   flex: 1 1 250px;
   min-width: 210px;
   height: 30px;
-  padding: 0 8px;
-  border-radius: 5px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-color);
+  padding: 0 9px;
+  border-radius: 6px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-light, var(--border-color));
   display: flex;
   align-items: center;
   gap: 6px;
+  transition: border-color 0.14s, background-color 0.14s, box-shadow 0.14s;
 }
 
 .ave-endpoint-box:focus-within,
 .ave-title-box:focus-within {
+  background: var(--bg-surface);
   border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary-bg);
 }
 
 .ave-http-method {
   padding: 1px 6px;
-  border-radius: 3px;
-  background: var(--primary);
-  color: #ffffff;
+  border-radius: 4px;
+  background: var(--primary-bg);
+  color: var(--primary);
   font-size: 10.5px;
-  font-weight: 700;
+  font-weight: 600;
   white-space: nowrap;
   flex-shrink: 0;
 }
@@ -2568,7 +3060,7 @@ defineExpose({
 }
 
 .ave-sep-pipe {
-  color: var(--border-strong);
+  color: var(--border-color);
   flex-shrink: 0;
 }
 
@@ -2595,13 +3087,14 @@ defineExpose({
   flex: 1 1 180px;
   min-width: 150px;
   height: 30px;
-  padding: 0 8px;
-  border-radius: 5px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-color);
+  padding: 0 9px;
+  border-radius: 6px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-light, var(--border-color));
   display: flex;
   align-items: center;
   gap: 6px;
+  transition: border-color 0.14s, background-color 0.14s, box-shadow 0.14s;
 }
 
 .ave-endpoint-actions {
@@ -2614,23 +3107,29 @@ defineExpose({
 
 .ave-status-badge {
   appearance: none;
-  height: 28px;
-  padding: 0 9px;
-  border-radius: 4px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 6px;
   font-size: 11.5px;
-  font-weight: 600;
+  font-weight: 500;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: 5px;
   white-space: nowrap;
   flex-shrink: 0;
+  transition: background-color 0.14s, border-color 0.14s;
 }
 
 .ave-status-badge.is-ok {
-  background: var(--success-bg);
-  border: 1px solid var(--success-border);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-light, var(--border-color));
   color: var(--success);
+}
+
+.ave-status-badge.is-ok:hover {
+  background: var(--success-bg);
+  border-color: var(--success-border);
 }
 
 .ave-status-badge.is-err {
@@ -2651,16 +3150,16 @@ defineExpose({
   width: 320px;
   z-index: 60;
   background: var(--bg-elevated, var(--bg-surface));
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
   box-shadow: var(--shadow-lg);
   overflow: hidden;
 }
 
 .ave-pop-header {
-  padding: 7px 10px;
+  padding: 8px 12px;
   background: var(--bg-subtle);
-  border-bottom: 1px solid var(--border-light);
+  border-bottom: 1px solid var(--border-light, var(--border-color));
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2670,7 +3169,7 @@ defineExpose({
 }
 
 .ave-pop-body {
-  padding: 10px;
+  padding: 10px 12px;
   max-height: 240px;
   overflow-y: auto;
   font-size: 12px;
@@ -2699,7 +3198,7 @@ defineExpose({
 
 /* 未声明变量提示条 */
 .ave-undef-strip {
-  padding: 6px 12px;
+  padding: 6px 14px;
   background: var(--warning-bg);
   border-bottom: 1px solid var(--warning-border);
   color: var(--warning);
@@ -2722,7 +3221,7 @@ defineExpose({
 .ave-undef-code {
   margin: 0 3px;
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: 4px;
   background: var(--bg-surface);
   border: 1px solid var(--warning-border);
   font-weight: 600;
@@ -2730,13 +3229,13 @@ defineExpose({
 
 /* ==================== 四页签导航栏（单行 nowrap） ==================== */
 .ave-subtabs-bar {
-  height: 36px;
-  padding: 0 12px;
+  height: 38px;
+  padding: 0 14px;
   background: var(--bg-surface);
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-light, var(--border-color));
   display: flex;
   align-items: stretch;
-  gap: 14px;
+  gap: 18px;
   overflow-x: auto;
   scrollbar-width: none;
   flex-shrink: 0;
@@ -2752,20 +3251,20 @@ defineExpose({
   border-bottom: 2px solid transparent;
   background: transparent;
   padding: 0 2px;
-  color: var(--text-regular);
+  color: var(--text-secondary);
   font-size: 12.5px;
   font-weight: 500;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   white-space: nowrap;
   flex-shrink: 0;
-  transition: color 0.12s, border-color 0.12s;
+  transition: color 0.14s, border-color 0.14s;
 }
 
 .ave-subtab:hover {
-  color: var(--primary);
+  color: var(--text-primary);
 }
 
 .ave-subtab.active {
@@ -2775,9 +3274,9 @@ defineExpose({
 }
 
 .ave-count-pill {
-  padding: 0 5px;
-  line-height: 16px;
-  border-radius: 3px;
+  padding: 0 6px;
+  line-height: 17px;
+  border-radius: 999px;
   font-size: 11px;
   background: var(--bg-muted);
   color: var(--text-secondary);
@@ -2790,13 +3289,13 @@ defineExpose({
 
 @container (max-width: 620px) {
   .ave-subtabs-bar {
-    padding: 0 8px;
-    gap: 8px;
+    padding: 0 10px;
+    gap: 10px;
   }
 
   .ave-subtab {
     font-size: 11.5px;
-    gap: 3px;
+    gap: 4px;
   }
 }
 
@@ -2805,8 +3304,8 @@ defineExpose({
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px;
-  background: var(--bg-muted);
+  padding: 14px;
+  background: var(--bg-subtle);
 }
 
 .ave-tab-scroll.is-disabled-pane {
@@ -2817,19 +3316,20 @@ defineExpose({
 .ave-section-stack {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
 }
 
 .ave-panel-card {
   background: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border: 1px solid var(--border-light, var(--border-color));
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
   overflow: hidden;
 }
 
 .ave-panel-head {
-  padding: 9px 12px;
-  background: var(--bg-subtle);
+  padding: 10px 14px;
+  background: var(--bg-surface);
   border-bottom: 1px solid var(--border-light, var(--border-color));
   display: flex;
   align-items: center;
@@ -2880,24 +3380,24 @@ defineExpose({
 .ave-request-forms {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
   min-width: 0;
 }
 
 .ave-preview-aside {
   background: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  border-top: 2px solid var(--primary);
-  border-radius: 6px;
+  border: 1px solid var(--border-light, var(--border-color));
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
   overflow: hidden;
   position: sticky;
   top: 0;
 }
 
 .ave-preview-head {
-  padding: 8px 10px;
-  background: var(--bg-subtle);
-  border-bottom: 1px solid var(--border-light);
+  padding: 9px 12px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-light, var(--border-color));
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2921,41 +3421,39 @@ defineExpose({
 
 .ave-proto-tag {
   padding: 1px 6px;
-  border-radius: 3px;
+  border-radius: 4px;
   font-size: 10.5px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .ave-proto-tag.is-xml {
   background: var(--primary-bg);
-  border: 1px solid var(--primary-border);
   color: var(--primary);
 }
 
 .ave-proto-tag.is-json {
   background: var(--success-bg);
-  border: 1px solid var(--success-border);
   color: var(--success);
 }
 
 .ave-preview-body {
-  padding: 8px 10px 10px;
+  padding: 10px 12px 12px;
 }
 
 .ave-preview-note {
   font-size: 11px;
   color: var(--text-secondary);
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 
 .ave-preview-code {
   margin: 0;
-  padding: 10px;
+  padding: 10px 12px;
   max-height: 360px;
   overflow: auto;
-  border-radius: 4px;
+  border-radius: 6px;
   background: var(--bg-subtle);
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border-light, var(--border-color));
   color: var(--text-primary);
   font-size: 11.5px;
   line-height: 1.5;
@@ -2964,25 +3462,25 @@ defineExpose({
 
 /* ==================== 网关信封与快捷参数胶囊 ==================== */
 .ave-envelope-body {
-  padding: 10px 12px 12px;
+  padding: 12px 14px 14px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 
 .ave-var-bar {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 5px;
-  padding: 6px 8px;
-  border-radius: 4px;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 6px;
   background: var(--bg-subtle);
-  border: 1px dashed var(--border-color);
+  border: 1px solid var(--border-light, var(--border-color));
 }
 
 .ave-var-bar-sub {
-  margin: 8px 12px 0;
+  margin: 10px 14px 0;
 }
 
 .ave-var-bar-lbl {
@@ -2994,34 +3492,36 @@ defineExpose({
 .ave-var-chip {
   appearance: none;
   height: 22px;
-  padding: 0 7px;
-  border-radius: 3px;
-  border: 1px solid var(--primary-border);
-  background: var(--primary-bg);
-  color: var(--primary);
+  padding: 0 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-surface);
+  color: var(--text-regular);
   font-size: 11.5px;
-  font-weight: 600;
+  font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
   flex-shrink: 0;
+  transition: border-color 0.14s, color 0.14s, background-color 0.14s;
 }
 
 .ave-var-chip:hover {
-  background: var(--primary);
-  color: #ffffff;
+  border-color: var(--primary);
+  background: var(--primary-bg);
+  color: var(--primary);
 }
 
 .ave-env-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+  gap: 12px;
 }
 
 .ave-form-grid-3 {
-  padding: 10px 12px 12px;
+  padding: 12px 14px 14px;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+  gap: 12px;
 }
 
 @container (max-width: 680px) {
@@ -3040,26 +3540,39 @@ defineExpose({
   font-size: 11.5px;
   font-weight: 600;
   color: var(--text-regular);
-  margin-bottom: 4px;
+  margin-bottom: 5px;
+}
+
+.ave-req-mark {
+  color: var(--danger);
+  margin-left: 2px;
+}
+
+.ave-lbl-hint {
+  font-weight: 400;
+  color: var(--text-secondary);
+  margin-left: 2px;
 }
 
 .ave-input,
 .ave-select {
   width: 100%;
   height: 30px;
-  padding: 0 8px;
-  border-radius: 4px;
+  padding: 0 9px;
+  border-radius: 6px;
   border: 1px solid var(--border-color);
   background: var(--bg-surface);
   color: var(--text-primary);
   font-size: 12px;
   outline: none;
+  transition: border-color 0.14s, box-shadow 0.14s;
 }
 
 .ave-input:focus,
 .ave-select:focus,
 .ave-textarea:focus {
   border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary-bg);
 }
 
 .ave-input[readonly] {
@@ -3070,7 +3583,7 @@ defineExpose({
 .ave-textarea {
   width: 100%;
   padding: 8px 10px;
-  border-radius: 4px;
+  border-radius: 6px;
   border: 1px solid var(--border-color);
   background: var(--bg-surface);
   color: var(--text-primary);
@@ -3078,6 +3591,109 @@ defineExpose({
   line-height: 1.5;
   resize: vertical;
   outline: none;
+  transition: border-color 0.14s, box-shadow 0.14s;
+}
+
+/* ==================== 响应结构模式选择器与提示面板 ==================== */
+.ave-mode-bar {
+  padding: 10px 14px;
+  background: var(--bg-subtle);
+  border-bottom: 1px solid var(--border-light, var(--border-color));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.ave-mode-left {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ave-mode-lbl {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-regular);
+  white-space: nowrap;
+}
+
+.ave-mode-seg {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 2px;
+  border-radius: 6px;
+  background: var(--bg-muted);
+  border: 1px solid var(--border-light, var(--border-color));
+  gap: 2px;
+}
+
+.ave-mode-seg-btn {
+  appearance: none;
+  height: 25px;
+  padding: 0 9px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background-color 0.14s, color 0.14s, box-shadow 0.14s;
+}
+
+.ave-mode-seg-btn:hover {
+  color: var(--text-primary);
+}
+
+.ave-mode-seg-btn.active {
+  background: var(--bg-elevated, var(--bg-surface));
+  color: var(--primary);
+  font-weight: 600;
+  box-shadow: var(--shadow-sm);
+}
+
+.ave-flatten-check {
+  font-size: 11.5px;
+  color: var(--text-regular);
+}
+
+.ave-mode-callout {
+  margin: 12px 14px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-light, var(--border-color));
+  color: var(--text-regular);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.ave-mode-callout.is-scalar {
+  margin-bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  background: var(--primary-bg);
+  border-color: var(--primary-border);
+}
+
+.ave-callout-title {
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.ave-callout-desc {
+  color: var(--text-secondary);
 }
 
 /* ==================== 表格编排样式 ==================== */
@@ -3093,18 +3709,18 @@ defineExpose({
 }
 
 .ave-grid-table th {
-  padding: 7px 8px;
+  padding: 7px 10px;
   text-align: left;
   font-size: 11.5px;
   font-weight: 600;
   color: var(--text-secondary);
   background: var(--bg-subtle);
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-light, var(--border-color));
   white-space: nowrap;
 }
 
 .ave-grid-table td {
-  padding: 5px 6px;
+  padding: 6px 8px;
   border-bottom: 1px solid var(--border-light, var(--border-color));
   vertical-align: middle;
 }
@@ -3120,19 +3736,21 @@ defineExpose({
 .ave-cell-input,
 .ave-cell-select {
   width: 100%;
-  height: 27px;
-  padding: 0 7px;
-  border-radius: 4px;
-  border: 1px solid var(--border-color);
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 5px;
+  border: 1px solid var(--border-light, var(--border-color));
   background: var(--bg-surface);
   color: var(--text-primary);
   font-size: 12px;
   outline: none;
+  transition: border-color 0.14s, box-shadow 0.14s;
 }
 
 .ave-cell-input:focus,
 .ave-cell-select:focus {
   border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary-bg);
 }
 
 .ave-cell-input.is-key {
@@ -3141,7 +3759,7 @@ defineExpose({
 }
 
 .ave-empty-td {
-  padding: 18px 12px !important;
+  padding: 18px 14px !important;
   text-align: center;
   color: var(--text-secondary);
 }
@@ -3172,12 +3790,13 @@ defineExpose({
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  transition: background-color 0.14s, color 0.14s, border-color 0.14s;
 }
 
 .ave-icon-btn:hover:not(:disabled) {
   background: var(--bg-hover);
   color: var(--primary);
-  border-color: var(--border-color);
+  border-color: var(--border-light, var(--border-color));
 }
 
 .ave-icon-btn.is-danger:hover:not(:disabled) {
@@ -3196,7 +3815,7 @@ defineExpose({
   appearance: none;
   height: 28px;
   padding: 0 10px;
-  border-radius: 4px;
+  border-radius: 6px;
   border: 1px solid var(--border-color);
   background: var(--bg-surface);
   color: var(--text-primary);
@@ -3208,7 +3827,7 @@ defineExpose({
   gap: 4px;
   white-space: nowrap;
   flex-shrink: 0;
-  transition: background-color 0.12s, border-color 0.12s, color 0.12s;
+  transition: background-color 0.14s, border-color 0.14s, color 0.14s;
 }
 
 .ave-btn:hover:not(:disabled) {
@@ -3225,9 +3844,10 @@ defineExpose({
 }
 
 .ave-btn-xs {
-  height: 24px;
+  height: 25px;
   padding: 0 8px;
   font-size: 11.5px;
+  border-radius: 5px;
 }
 
 .ave-btn-primary {
@@ -3285,9 +3905,9 @@ defineExpose({
 .ave-mini-seg {
   display: inline-flex;
   padding: 2px;
-  border-radius: 4px;
+  border-radius: 6px;
   background: var(--bg-muted);
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border-light, var(--border-color));
   gap: 2px;
 }
 
@@ -3296,7 +3916,7 @@ defineExpose({
   height: 22px;
   padding: 0 8px;
   border: none;
-  border-radius: 3px;
+  border-radius: 4px;
   background: transparent;
   color: var(--text-secondary);
   font-size: 11.5px;
@@ -3307,7 +3927,7 @@ defineExpose({
 }
 
 .ave-mini-seg-btn.active {
-  background: var(--bg-surface);
+  background: var(--bg-elevated, var(--bg-surface));
   color: var(--primary);
   font-weight: 600;
   box-shadow: var(--shadow-sm);
@@ -3329,7 +3949,7 @@ defineExpose({
 }
 
 .ave-json-editor-box {
-  padding: 10px 12px 12px;
+  padding: 12px 14px 14px;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -3337,7 +3957,7 @@ defineExpose({
 
 .ave-inline-err {
   padding: 5px 8px;
-  border-radius: 4px;
+  border-radius: 5px;
   background: var(--danger-bg);
   border: 1px solid var(--danger-border);
   color: var(--danger);
@@ -3346,9 +3966,9 @@ defineExpose({
 
 /* 响应样例识别内联工具舱 */
 .ave-sample-drawer {
-  padding: 10px 12px;
+  padding: 12px 14px;
   background: var(--bg-subtle);
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-light, var(--border-color));
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -3366,10 +3986,10 @@ defineExpose({
 
 /* 策略页签附加样式 */
 .ave-policy-body {
-  padding: 12px;
+  padding: 14px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
 }
 
 .ave-policy-body .ave-form-grid-3 {
@@ -3384,9 +4004,9 @@ defineExpose({
 
 .ave-preset-pill {
   appearance: none;
-  height: 28px;
-  padding: 0 8px;
-  border-radius: 4px;
+  height: 30px;
+  padding: 0 9px;
+  border-radius: 6px;
   border: 1px solid var(--border-color);
   background: var(--bg-subtle);
   color: var(--text-regular);
@@ -3394,6 +4014,7 @@ defineExpose({
   cursor: pointer;
   white-space: nowrap;
   flex-shrink: 0;
+  transition: border-color 0.14s, background-color 0.14s, color 0.14s;
 }
 
 .ave-preset-pill.active,
@@ -3406,9 +4027,9 @@ defineExpose({
 
 .ave-idempotent-box {
   padding: 10px 12px;
-  border-radius: 5px;
+  border-radius: 6px;
   background: var(--bg-subtle);
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border-light, var(--border-color));
 }
 
 .ave-muted {

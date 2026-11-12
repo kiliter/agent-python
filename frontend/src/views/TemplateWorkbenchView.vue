@@ -218,7 +218,7 @@ const debugSlotStyle = computed(() => {
 function openVersionDriftDiff() {
   store.ideLeftSection = 'history'
   store.ideSelectedRev = 'working'
-  store.ideDiffTargetRev = tpl.value.onlineRev || 'online'
+  store.ideDiffTargetRev = hasOnline.value ? 'online' : tpl.value.onlineRev || ''
   store.ideCenterMode = 'diff'
 }
 
@@ -272,7 +272,7 @@ function handleStatusSyntaxClick() {
     store.ideDebugMaximized = false
   }
   if (store.ideCenterMode === 'preview' || store.ideCenterMode === 'diff') {
-    store.ideCenterMode = 'split'
+    store.ideCenterMode = 'code'
   }
   void store.validateCurrentTemplate()
 }

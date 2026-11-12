@@ -19,6 +19,7 @@ from jsonschema.exceptions import SchemaError
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ConnectorType = Literal["unified-gateway-xml", "unified-gateway-json"]
+RecordsMode = Literal["auto", "object", "list", "scalar", "none"]
 
 _PLACEHOLDER_RE = re.compile(r"\$\{([^}]+)\}")
 _XML_TAG_RE = re.compile(r"^[A-Za-z_][\w.\-]*$")
@@ -53,10 +54,27 @@ class NoDataRule(_Base):
 
 
 class RecordsSpec(_Base):
-    """记录列表的位置与列说明（列说明会展示给模型）。"""
+    """业务记录抽取模式、节点路径与列说明（列说明会展示给模型）。"""
 
-    path: str
+    mode: RecordsMode = "auto"
+    path: str = "operation_out.content"
+    flatten: bool = False
     columns: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("path", mode="before")
+    @classmethod
+    def _normalize_path(cls, val: Any) -> Any:
+        return "" if val is None else val
+
+    @field_validator("columns", mode="before")
+    @classmethod
+    def _normalize_columns(cls, val: Any) -> Any:
+        if val is None:
+            return {}
+        if isinstance(val, dict):
+            return {str(k): ("" if v is None else str(v) if isinstance(v, (int, float, bool, str)) else v)
+                    for k, v in val.items()}
+        return val
 
 
 class SummarySpec(_Base):
@@ -71,8 +89,18 @@ class ResponseSpec(_Base):
 
     success: SuccessSpec | None = None
     noData: list[NoDataRule] = Field(default_factory=list)
-    records: RecordsSpec
+    records: RecordsSpec = Field(default_factory=RecordsSpec)
     summary: SummarySpec = Field(default_factory=SummarySpec)
+
+    @field_validator("noData", mode="before")
+    @classmethod
+    def _normalize_no_data(cls, val: Any) -> Any:
+        return [] if val is None else val
+
+    @field_validator("records", "summary", mode="before")
+    @classmethod
+    def _normalize_sub_specs(cls, val: Any) -> Any:
+        return {} if val is None else val
 
 
 class ApiContract(_Base):
@@ -89,7 +117,12 @@ class ApiContract(_Base):
     headers: dict[str, str] = Field(default_factory=dict)
     input: dict[str, Any] = Field(default_factory=lambda: {"type": "object", "properties": {}})
     request: dict[str, Any] = Field(default_factory=dict)
-    response: ResponseSpec
+    response: ResponseSpec = Field(default_factory=ResponseSpec)
+
+    @field_validator("response", mode="before")
+    @classmethod
+    def _normalize_response(cls, val: Any) -> Any:
+        return {} if val is None else val
 
     @field_validator("headers", mode="before")
     @classmethod

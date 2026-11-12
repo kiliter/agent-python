@@ -47,21 +47,22 @@ class ReleaseStore:
     # ------------------------------------------------------------------ 索引
     def entries(self) -> list[dict[str, Any]]:
         """全部版本元数据，按版本号升序。自动跳过损坏或不完整的索引行。"""
-        if self._entries is None:
-            valid: list[dict[str, Any]] = []
-            for item in read_jsonl(self.layout.release_index):
-                rev = item.get("rev")
-                commit = item.get("commit")
-                if not isinstance(rev, str) or not REV_RE.match(rev) or not isinstance(commit, str) or not commit:
-                    continue
-                try:
-                    n = int(item.get("n") or rev[1:])
-                except (TypeError, ValueError):
-                    continue
-                valid.append({**item, "n": n})
-            valid.sort(key=lambda e: e["n"])
-            self._entries = valid
-        return self._entries
+        with self.lock:
+            if self._entries is None:
+                valid: list[dict[str, Any]] = []
+                for item in read_jsonl(self.layout.release_index):
+                    rev = item.get("rev")
+                    commit = item.get("commit")
+                    if not isinstance(rev, str) or not REV_RE.match(rev) or not isinstance(commit, str) or not commit:
+                        continue
+                    try:
+                        n = int(item.get("n") or rev[1:])
+                    except (TypeError, ValueError):
+                        continue
+                    valid.append({**item, "n": n})
+                valid.sort(key=lambda e: e["n"])
+                self._entries = valid
+            return list(self._entries)
 
     def entry(self, rev: str) -> dict[str, Any]:
         if not isinstance(rev, str) or not REV_RE.match(rev):
@@ -157,20 +158,24 @@ class ReleaseStore:
         entry = self.entry(rev)
         rel_dir = self.layout.release_dir(rev)
         path = ensure_within(rel_dir, rel_dir / rel_path)
-        if path.is_file():
-            return path.read_text(encoding="utf-8")
+        try:
+            if path.is_file():
+                return path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            pass
         data = self.repo.show(entry["commit"], rel_path)
         return data.decode("utf-8") if data is not None else None
 
     # ------------------------------------------------------------------ 写入（调用方持有写锁）
     def add(self, entry: dict[str, Any], built_dir: Path) -> None:
         """登记新版本并切换为线上版本。"""
-        final = self.layout.release_dir(entry["rev"])
-        write_json(built_dir / ".release.json", entry)
-        os.replace(built_dir, final)
-        append_line(self.layout.release_index, _dumps(entry))
-        self._entries = None
-        atomic_symlink(entry["rev"], self.layout.current)
+        with self.lock:
+            final = self.layout.release_dir(entry["rev"])
+            write_json(built_dir / ".release.json", entry)
+            os.replace(built_dir, final)
+            append_line(self.layout.release_index, _dumps(entry))
+            self._entries = None
+            atomic_symlink(entry["rev"], self.layout.current)
 
     def switch(self, rev: str) -> None:
         """紧急切换线上版本。"""
@@ -179,13 +184,14 @@ class ReleaseStore:
 
     def prune(self) -> None:
         """只保留最近 keep 个版本目录和线上版本目录，更早的可随时从 Git 恢复。"""
-        live = self.live_rev()
-        revs = [e["rev"] for e in self.entries()]
-        keep = set(revs[-self.keep:]) | ({live} if live else set())
-        for rev in revs:
-            path = self.layout.release_dir(rev)
-            if rev not in keep and path.exists():
-                shutil.rmtree(path, ignore_errors=True)
+        with self.lock:
+            live = self.live_rev()
+            revs = [e["rev"] for e in self.entries()]
+            keep = set(revs[-self.keep:]) | ({live} if live else set())
+            for rev in revs:
+                path = self.layout.release_dir(rev)
+                if rev not in keep and path.exists():
+                    shutil.rmtree(path, ignore_errors=True)
 
     def recover(self) -> None:
         """启动时清理未完成的构建目录与临时草稿目录，并确保线上版本目录存在。"""

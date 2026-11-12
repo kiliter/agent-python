@@ -21,6 +21,9 @@ import type {
   Revision,
   RunDetail,
   RunRecord,
+  RuntimeConfigRevision,
+  RuntimeConfigState,
+  RuntimeConfigUpdatePayload,
   SkillDetail,
   SkillItem,
   SystemPromptState,
@@ -120,43 +123,94 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 
 const enc = encodeURIComponent
 
-/** 读取 SSE 流：每收到一个过程事件调用 onEvent，返回 final 结果 */
-async function streamRun<T>(path: string, body: unknown, onEvent: (ev: ProcessEvent) => void): Promise<T> {
-  const resp = await fetch(`${API_BASE}${path}`, {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...authHeaders() },
-    body: JSON.stringify(body),
-  })
+/** 读取 SSE 流：每收到一个过程事件调用 onEvent，返回 final 结果；支持 AbortSignal、CRLF 分块与流尾冲刷 */
+async function streamRun<T>(
+  path: string,
+  body: unknown,
+  onEvent: (ev: ProcessEvent) => void,
+  signal?: AbortSignal,
+): Promise<T> {
+  let resp: Response
+  try {
+    resp = await fetch(`${API_BASE}${path}`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...authHeaders() },
+      body: JSON.stringify(body),
+      signal,
+    })
+  } catch (err) {
+    if ((err as { name?: string })?.name === 'AbortError') throw err
+    throw new ApiError(0, 'NETWORK_ERROR', `无法连接后端服务：${(err as Error).message}`)
+  }
   if (!resp.ok || !resp.body) {
     const err = await parseError(resp)
     if (resp.status === 401) window.dispatchEvent(new CustomEvent('auth:unauthorized'))
     throw err
   }
+
+  const processBlock = (block: string): { finished: true; result: T } | { finished: false } => {
+    let kind = 'message'
+    const dataLines: string[] = []
+    block.split(/\r?\n/).forEach(line => {
+      if (line.startsWith('event:')) kind = line.slice(6).trim()
+      else if (line.startsWith('data:')) {
+        const raw = line.slice(5)
+        dataLines.push(raw.startsWith(' ') ? raw.slice(1) : raw)
+      }
+    })
+    if (!dataLines.length) return { finished: false }
+    const data = JSON.parse(dataLines.join('\n'))
+    if (kind === 'event') {
+      onEvent(data as ProcessEvent)
+      return { finished: false }
+    }
+    if (kind === 'final') {
+      return { finished: true, result: data as T }
+    }
+    if (kind === 'error') {
+      throw new ApiError(400, data.code || 'RUN_ERROR', data.message || '运行失败', data)
+    }
+    return { finished: false }
+  }
+
   const reader = resp.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
-  for (;;) {
-    const { value, done } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    let idx: number
-    while ((idx = buffer.indexOf('\n\n')) >= 0) {
-      const block = buffer.slice(0, idx)
-      buffer = buffer.slice(idx + 2)
-      let kind = 'message'
-      const dataLines: string[] = []
-      block.split('\n').forEach(line => {
-        if (line.startsWith('event:')) kind = line.slice(6).trim()
-        else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart())
-      })
-      if (!dataLines.length) continue
-      const data = JSON.parse(dataLines.join('\n'))
-      if (kind === 'event') onEvent(data as ProcessEvent)
-      else if (kind === 'final') return data as T
-      else if (kind === 'error') throw new ApiError(400, data.code || 'RUN_ERROR', data.message || '运行失败', data)
+  const sepRe = /\r?\n\r?\n/
+
+  try {
+    for (;;) {
+      const { value, done } = await reader.read()
+      if (done) {
+        buffer += decoder.decode()
+        break
+      }
+      buffer += decoder.decode(value, { stream: true })
+      let match: RegExpExecArray | null
+      while ((match = sepRe.exec(buffer)) !== null) {
+        const block = buffer.slice(0, match.index)
+        buffer = buffer.slice(match.index + match[0].length)
+        const outcome = processBlock(block)
+        if (outcome.finished) return outcome.result
+      }
+    }
+
+    if (buffer.trim()) {
+      for (const trailing of buffer.split(sepRe)) {
+        if (!trailing.trim()) continue
+        const outcome = processBlock(trailing)
+        if (outcome.finished) return outcome.result
+      }
+    }
+  } finally {
+    try {
+      reader.releaseLock()
+    } catch {
+      /* 忽略流锁释放异常 */
     }
   }
+
   throw new ApiError(0, 'STREAM_CLOSED', '运行过程推送意外中断，请到运行记录查看结果')
 }
 
@@ -281,8 +335,12 @@ export const platformApi = {
   // ==================== 试运行 ====================
   executeDryRun: (id: number, payload: DryRunPayload) =>
     request<RunDetail>('POST', `/templates/${id}/dryrun`, payload),
-  executeDryRunStream: (id: number, payload: DryRunPayload, onEvent: (ev: ProcessEvent) => void) =>
-    streamRun<RunDetail>(`/templates/${id}/dryrun/stream`, payload, onEvent),
+  executeDryRunStream: (
+    id: number,
+    payload: DryRunPayload,
+    onEvent: (ev: ProcessEvent) => void,
+    signal?: AbortSignal,
+  ) => streamRun<RunDetail>(`/templates/${id}/dryrun/stream`, payload, onEvent, signal),
 
   // ==================== Skill 库 ====================
   fetchSkills: () => request<SkillItem[]>('GET', '/skills'),
@@ -339,7 +397,8 @@ export const platformApi = {
     request<{ activeRev: string }>('POST', '/releases/emergency-switch', { targetRev, reason }),
 
   // ==================== 系统设置 ====================
-  fetchSystemPrompt: () => request<SystemPromptState>('GET', '/settings/system-prompt'),
+  fetchSystemPrompt: (version?: string) =>
+    request<SystemPromptState>('GET', `/settings/system-prompt${query({ version })}`),
   saveSystemPromptDraft: (sysPromptText: string, revision?: number | null) =>
     request<SystemPromptState & { status: ResourceStatus }>('PUT', '/settings/system-prompt/draft',
       { sysPromptText, revision }),
@@ -347,8 +406,20 @@ export const platformApi = {
     request<{ status: ResourceStatus; rev: string }>('POST', '/settings/system-prompt/publish', { sysPromptText, note }),
   discardSystemPromptDraft: () => request<SystemPromptState>('POST', '/settings/system-prompt/discard-draft'),
   rollbackSystemPrompt: (targetRev: string, mode: 'draft_only' | 'publish_now' = 'draft_only', reason = '') =>
-    request<SystemPromptState & { status: ResourceStatus }>('POST', '/settings/system-prompt/rollback',
+    request<SystemPromptState & { status: ResourceStatus; rev?: string }>('POST', '/settings/system-prompt/rollback',
       { targetRev, mode, reason }),
   fetchSystemPromptRevisions: () => request<Revision[]>('GET', '/settings/system-prompt/revisions'),
   fetchModelInfo: () => request<ModelInfo>('GET', '/settings/model'),
+  fetchRuntimeConfig: () => request<RuntimeConfigState>('GET', '/settings/runtime'),
+  updateRuntimeConfig: (payload: RuntimeConfigUpdatePayload) =>
+    request<RuntimeConfigState>('PUT', '/settings/runtime', payload),
+  fetchRuntimeConfigRevisions: () =>
+    request<RuntimeConfigRevision[]>('GET', '/settings/runtime/revisions'),
+  rollbackRuntimeConfig: (targetRev: string, reason = '') =>
+    request<RuntimeConfigState & { targetRev?: string }>('POST', '/settings/runtime/rollback', {
+      targetRev,
+      reason,
+    }),
+  syncRuntimeConfigFromEnv: (note = '') =>
+    request<RuntimeConfigState>('POST', '/settings/runtime/sync-env', { note }),
 }

@@ -11,7 +11,7 @@ import YAML from 'yaml'
 import { diffLines } from 'diff'
 import { FileEdit, Link2, History, Maximize2, Minimize2 } from 'lucide-vue-next'
 import { usePlatformStore } from '@/stores/platform'
-import { platformApi } from '@/api/platformApi'
+import { escapeHtml, sanitizeHtml } from '@/utils/sanitizeHtml'
 import SvgIcon from '@/components/SvgIcon.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import CodeMirrorEditor from '@/components/CodeMirrorEditor.vue'
@@ -80,8 +80,7 @@ function resetSkillFilters() {
 }
 
 function handleBackToSkillList() {
-  store.toggleFocusFullscreen(false)
-  store.skillsSubView = 'list'
+  store.navigate('skills')
 }
 
 watch(
@@ -171,12 +170,6 @@ const renderedPreviewHtml = computed(() => {
     markdownBody = fmMatch[2] || ''
   }
 
-  const escapeHtml = (s: unknown) =>
-    String(s ?? '')
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-
   let fmHtml = ''
   if (Object.keys(fmMeta).length > 0) {
     const apisText = Array.isArray(fmMeta.apis)
@@ -203,7 +196,8 @@ const renderedPreviewHtml = computed(() => {
     `
   }
 
-  const bodyHtml = marked.parse(markdownBody, { async: false }) as string
+  const rawBodyHtml = marked.parse(markdownBody, { async: false }) as string
+  const bodyHtml = sanitizeHtml(rawBodyHtml)
   return fmHtml + `<div class="markdown-rendered-body">${bodyHtml}</div>`
 })
 
@@ -261,7 +255,6 @@ async function handlePublishFromList(skillId: string) {
 
 /** 把历史版本内容恢复到草稿（不直接发布） */
 function handleRollbackRevision(rev: string) {
-  const id = store.selectedSkillId
   ElMessageBox.confirm(
     `确认把 Skill「${currentSkill.value.name}」的历史版本 ${rev} 恢复到草稿吗？${store.skillDirty ? '当前未保存的修改将被覆盖。' : ''}`,
     '确认恢复到草稿',
@@ -272,14 +265,29 @@ function handleRollbackRevision(rev: string) {
     },
   )
     .then(async () => {
-      try {
-        await platformApi.rollbackSkill(id, rev, 'draft_only')
-        await store.loadSkill(id)
-        await store.refreshSkills()
-        store.showToast(`已将 ${rev} 的内容恢复到草稿，核对无误后再发布`)
-      } catch (err) {
-        store.showError(err, '恢复到草稿失败')
+      const ok = await store.rollbackCurrentSkill(rev, 'draft_only')
+      if (ok) {
+        store.skillDetailTab = 'editor'
       }
+    })
+    .catch(() => {})
+}
+
+/** 直接回退历史版本并上线生效 */
+function handleDirectRollbackSkill(rev: string) {
+  ElMessageBox.prompt(
+    `将 Skill「${currentSkill.value.name}」直接回退至历史版本 ${rev} 并立即生成新线上版本生效，请填写回退原因（必填）：`,
+    `直接回退上线 · ${rev}`,
+    {
+      confirmButtonText: '回退并上线',
+      cancelButtonText: '取消',
+      type: 'warning',
+      inputPlaceholder: '例如：新规程步骤校验过严，回退至稳定版',
+      inputValidator: val => (val && val.trim().length > 0 ? true : '请填写回退原因'),
+    },
+  )
+    .then(async ({ value }) => {
+      await store.rollbackCurrentSkill(rev, 'publish_now', value.trim())
     })
     .catch(() => {})
 }
@@ -574,6 +582,12 @@ function refTemplateStatus(tplLabel: string) {
           <span class="chip-tag mono id-code-chip">{{ currentSkill.id }}</span>
           <StatusTag :status="currentSkill.status" />
           <span
+            v-if="currentSkill.onlineRev && currentSkill.onlineRev !== '—'"
+            class="chip-tag mono online-rev-chip"
+          >
+            线上基线 {{ currentSkill.onlineRev }}
+          </span>
+          <span
             v-if="store.skillDirty"
             class="chip-tag dirty-pill"
           >
@@ -756,7 +770,7 @@ function refTemplateStatus(tplLabel: string) {
               <th style="width: 130px; white-space: nowrap">操作人</th>
               <th style="width: 155px; white-space: nowrap">发布时间</th>
               <th>修订说明</th>
-              <th class="action-col">操作</th>
+              <th class="action-col-wide">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -771,10 +785,13 @@ function refTemplateStatus(tplLabel: string) {
               <td style="white-space: nowrap">{{ r.operator || '—' }}</td>
               <td class="mono pub-time-cell" style="white-space: nowrap">{{ r.time }}</td>
               <td>{{ r.note || r.summary || '—' }}</td>
-              <td class="action-col">
+              <td class="action-col-wide">
                 <div class="row-actions row-action-group">
                   <span v-if="r.online" class="status-tag status-published" style="white-space: nowrap">当前线上</span>
-                  <button v-else class="btn-link" @click="handleRollbackRevision(r.rev)">恢复到草稿</button>
+                  <template v-else>
+                    <button class="btn-link" @click="handleRollbackRevision(r.rev)">恢复到草稿</button>
+                    <button class="btn-link" @click="handleDirectRollbackSkill(r.rev)">回退上线</button>
+                  </template>
                 </div>
               </td>
             </tr>
@@ -827,7 +844,6 @@ function refTemplateStatus(tplLabel: string) {
   flex-shrink: 0;
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
-  border-top: var(--kpi-top-line, 1px solid var(--border-color));
   border-radius: 6px;
   padding: 10px 16px;
   display: flex;
@@ -993,7 +1009,7 @@ function refTemplateStatus(tplLabel: string) {
 }
 
 .seg-filter-btn.active {
-  background: var(--bg-surface);
+  background: var(--bg-elevated);
   border-color: var(--border-color);
   color: var(--primary);
   font-weight: 600;
@@ -1176,13 +1192,20 @@ function refTemplateStatus(tplLabel: string) {
 .detail-header-card {
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
-  border-top: var(--kpi-top-line, 1px solid var(--border-color));
 }
 
 .id-code-chip {
   background: var(--bg-subtle);
   border-color: var(--border-color);
   color: var(--text-regular);
+  white-space: nowrap;
+}
+
+.online-rev-chip {
+  background: var(--bg-subtle);
+  border-color: var(--border-color);
+  color: var(--primary);
+  font-weight: 600;
   white-space: nowrap;
 }
 
@@ -1252,7 +1275,6 @@ function refTemplateStatus(tplLabel: string) {
 
 .preview-sheet {
   border: 1px solid var(--border-color);
-  border-top: 2px solid var(--primary);
   background: var(--bg-surface);
 }
 
@@ -1280,7 +1302,7 @@ function refTemplateStatus(tplLabel: string) {
   text-align: center;
   color: var(--text-secondary);
   background: var(--bg-subtle);
-  border: 1px dashed var(--border-color);
+  border: 1px solid var(--border-color);
   border-radius: 4px;
 }
 

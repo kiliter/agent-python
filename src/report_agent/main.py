@@ -35,19 +35,39 @@ log = logging.getLogger("report_agent")
 
 
 def setup_logging(settings: Settings) -> None:
-    """控制台日志 + 可选的按天滚动文件日志。"""
+    """控制台日志 + 可选的按天滚动文件日志（幂等防句柄泄漏）。"""
     fmt = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
     root = logging.getLogger()
     root.setLevel(settings.log_level.upper())
-    if not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
+    has_console = any(
+        isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+        for h in root.handlers
+    )
+    if not has_console:
         sh = logging.StreamHandler()
         sh.setFormatter(fmt)
         root.addHandler(sh)
-    if settings.log_dir:
-        settings.log_dir.mkdir(parents=True, exist_ok=True)
-        fh = logging.handlers.TimedRotatingFileHandler(settings.log_dir / "report-agent.log", when="midnight",
-                                                       backupCount=30, encoding="utf-8")
+
+    target_log_file = (Path(settings.log_dir) / "report-agent.log").resolve() if settings.log_dir else None
+    has_target_file = False
+    for h in list(root.handlers):
+        if isinstance(h, logging.FileHandler):
+            existing_file = Path(getattr(h, "baseFilename", "")).resolve()
+            if target_log_file is not None and existing_file == target_log_file:
+                h.setFormatter(fmt)
+                has_target_file = True
+                continue
+            if getattr(h, "_report_agent_managed", False):
+                root.removeHandler(h)
+                h.close()
+
+    if target_log_file is not None and not has_target_file:
+        target_log_file.parent.mkdir(parents=True, exist_ok=True)
+        fh = logging.handlers.TimedRotatingFileHandler(
+            target_log_file, when="midnight", backupCount=30, encoding="utf-8"
+        )
         fh.setFormatter(fmt)
+        fh._report_agent_managed = True  # type: ignore[attr-defined]
         root.addHandler(fh)
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -147,16 +167,22 @@ def create_app(settings: Settings | None = None, container: Container | None = N
 
     dist = settings.frontend_dist
     if dist and Path(dist).exists():
-        app.mount("/assets", StaticFiles(directory=Path(dist) / "assets"), name="assets")
+        dist_dir = Path(dist).resolve()
+        assets_dir = dist_dir / "assets"
+        if assets_dir.is_dir():
+            app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
         @app.get("/{path:path}", include_in_schema=False)
         def spa(path: str):
-            if path.startswith("api/"):
+            if path == "api" or path.startswith("api/"):
                 return _error(404, "NOT_FOUND", f"接口 /{path} 不存在")
-            target = (Path(dist) / path).resolve()
-            if path and target.is_file() and Path(dist).resolve() in target.parents:
+            target = (dist_dir / path).resolve()
+            if path and target.is_file() and target.is_relative_to(dist_dir):
                 return FileResponse(target)
-            return FileResponse(Path(dist) / "index.html")
+            index_file = dist_dir / "index.html"
+            if index_file.is_file():
+                return FileResponse(index_file)
+            return _error(404, "NOT_FOUND", "前端构建产物 index.html 不存在")
 
     return app
 

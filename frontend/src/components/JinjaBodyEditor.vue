@@ -694,10 +694,7 @@ const previewMatchedCount = computed(() => previewFields.value.filter(f => f.run
       <div class="card-header">
         <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
           <div class="card-title">正文编辑器 (Jinja2)</div>
-          <span
-            class="chip-tag"
-            style="font-size: 11px; color: var(--primary); background: var(--primary-bg); border-color: var(--primary-border);"
-          >
+          <span class="chip-tag" style="font-size: 11px;">
             输入 <code class="mono">&#123;&#123;</code> 或 <code class="mono">&#123;&#123;&#125;&#125;</code> 弹出字段补全 · 回车填充
           </span>
         </div>
@@ -1022,9 +1019,9 @@ const previewMatchedCount = computed(() => previewFields.value.filter(f => f.run
   display: inline-flex;
   align-items: center;
   padding: 1px 8px;
-  border-radius: 3px;
-  font-size: 11.5px;
-  font-weight: 600;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
   background: var(--bg-subtle);
   border: 1px solid var(--border-color);
   color: var(--text-secondary);
@@ -1033,8 +1030,8 @@ const previewMatchedCount = computed(() => previewFields.value.filter(f => f.run
 
 .preview-stat-pill.is-verified {
   color: var(--success);
-  background: var(--success-bg, rgba(7, 136, 85, 0.12));
-  border-color: var(--success-border, rgba(7, 136, 85, 0.32));
+  background: var(--success-bg);
+  border-color: var(--success-border);
 }
 
 .preview-card-body {
@@ -1058,7 +1055,7 @@ const previewMatchedCount = computed(() => previewFields.value.filter(f => f.run
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  background: var(--bg-muted);
+  background: var(--bg-subtle);
   display: flex;
   flex-direction: column;
 }
@@ -1090,10 +1087,11 @@ const previewMatchedCount = computed(() => previewFields.value.filter(f => f.run
 
 .audit-report-sheet {
   background: var(--bg-surface);
-  border: 1px solid var(--border-strong, var(--border-color));
-  border-top: 3px solid var(--primary);
-  border-radius: 4px;
-  padding: 16px 20px 22px;
+  border: 1px solid var(--border-color);
+  border-top: 2px solid var(--primary);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: 18px 22px 24px;
   color: var(--text-primary);
   overflow: visible;
 }

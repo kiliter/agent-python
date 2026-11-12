@@ -249,14 +249,14 @@ class ResourceService:
                 sk = self._skill_from_draft(key)
                 if sk:
                     rs.skills[sk.id] = sk
-            except InvalidResource as exc:
+            except (InvalidResource, ValueError) as exc:
                 rs.load_issues.append(Issue("error", "DRAFT_INVALID", str(exc), "skill", key))
         for key in self.drafts.list_keys("api"):
             try:
                 api = self._api_from_draft(key)
                 if api:
                     rs.apis[api.name] = api
-            except InvalidResource as exc:
+            except (InvalidResource, ValueError) as exc:
                 rs.load_issues.append(Issue("error", "DRAFT_INVALID", str(exc), "api", key))
         sp = self.drafts.read_file(SP_REF, SYSTEM_PROMPT_FILE)
         if sp is not None:
@@ -270,7 +270,7 @@ class ResourceService:
             return None
         try:
             return load_template_dir(self.layout.draft_dir(ref))
-        except (ValidationError, yaml.YAMLError, OSError) as exc:
+        except (ValidationError, yaml.YAMLError, ValueError, OSError) as exc:
             raise InvalidResource(f"模板 {tid} 草稿无法解析：{exc}") from exc
 
     def template_online(self, tid: int) -> Template | None:
@@ -346,7 +346,7 @@ class ResourceService:
             return None
         try:
             return parse_skill_markdown(text)
-        except (SkillParseError, ValidationError) as exc:
+        except (SkillParseError, ValidationError, yaml.YAMLError, ValueError, OSError) as exc:
             raise InvalidResource(f"Skill {sid} 草稿无法解析：{exc}") from exc
 
     def skill_online(self, sid: str) -> Skill | None:
@@ -397,7 +397,7 @@ class ResourceService:
             return None
         try:
             return parse_api_yaml(text)
-        except (ValidationError, yaml.YAMLError) as exc:
+        except (ValidationError, yaml.YAMLError, ValueError, OSError) as exc:
             raise InvalidResource(f"接口 {name} 草稿无法解析：{exc}") from exc
 
     def api_online(self, name: str) -> ApiContract | None:
@@ -425,7 +425,7 @@ class ResourceService:
         """保存接口草稿（先检查 YAML 能解析、name 一致、Schema 合法）。"""
         try:
             api = parse_api_yaml(yaml_text)
-        except (ValidationError, yaml.YAMLError) as exc:
+        except (ValidationError, yaml.YAMLError, ValueError) as exc:
             raise InvalidResource(f"接口 YAML 无法解析：{exc}") from exc
         if api.name != name:
             raise InvalidResource(f"YAML 中 name={api.name} 必须与接口编码 {name} 一致")

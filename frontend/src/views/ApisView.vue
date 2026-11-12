@@ -20,7 +20,6 @@ import {
   Minimize2,
 } from 'lucide-vue-next'
 import { usePlatformStore } from '@/stores/platform'
-import { platformApi } from '@/api/platformApi'
 import type { ApiItem } from '@/types/platform'
 import SvgIcon from '@/components/SvgIcon.vue'
 import StatusTag from '@/components/StatusTag.vue'
@@ -165,8 +164,7 @@ function resetApiFilters() {
 }
 
 function handleBackToApiList() {
-  store.toggleFocusFullscreen(false)
-  store.apisSubView = 'list'
+  store.navigate('apis')
 }
 
 watch(
@@ -627,14 +625,30 @@ function handleRollbackRevision(rev: string) {
     },
   )
     .then(async () => {
-      try {
-        await platformApi.rollbackApi(name, rev, 'draft_only')
-        await store.loadApi(name)
-        await store.refreshApis()
-        store.showToast(`已将 ${rev} 的内容恢复到草稿，核对无误后再发布`)
-      } catch (err) {
-        store.showError(err, '恢复到草稿失败')
+      const ok = await store.rollbackCurrentApi(rev, 'draft_only')
+      if (ok) {
+        store.apiDetailTab = 'schema'
       }
+    })
+    .catch(() => {})
+}
+
+/** 直接回退接口历史版本并立即上线生效 */
+function handleDirectRollbackApi(rev: string) {
+  const name = store.selectedApiName
+  ElMessageBox.prompt(
+    `将 API「${name}」契约直接回退至历史版本 ${rev} 并立即生成新线上版本生效，请填写回退原因（必填）：`,
+    `直接回退上线 · ${rev}`,
+    {
+      confirmButtonText: '回退并上线',
+      cancelButtonText: '取消',
+      type: 'warning',
+      inputPlaceholder: '例如：响应列映射变更导致网关解析异常，紧急回退',
+      inputValidator: val => (val && val.trim().length > 0 ? true : '请填写回退原因'),
+    },
+  )
+    .then(async ({ value }) => {
+      await store.rollbackCurrentApi(rev, 'publish_now', value.trim())
     })
     .catch(() => {})
 }
@@ -959,6 +973,12 @@ function handleRollbackRevision(rev: string) {
             <span>{{ liveMeta.isJson ? '统一网关 JSON' : '统一网关 XML' }}</span>
           </span>
           <StatusTag :status="api.status" />
+          <span
+            v-if="api.onlineRev && api.onlineRev !== '—'"
+            class="chip-tag mono online-rev-chip"
+          >
+            线上基线 {{ api.onlineRev }}
+          </span>
           <span v-if="store.apiDirty" class="chip-tag dirty-pill">
             有未保存修改
           </span>
@@ -1405,7 +1425,7 @@ function handleRollbackRevision(rev: string) {
               <th style="width: 130px; white-space: nowrap">操作人</th>
               <th style="width: 155px; white-space: nowrap">发布时间</th>
               <th>修订说明</th>
-              <th class="action-col">操作</th>
+              <th class="action-col-wide">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -1422,14 +1442,19 @@ function handleRollbackRevision(rev: string) {
               <td style="white-space: nowrap">{{ r.operator || '—' }}</td>
               <td class="mono" style="font-size: 12px; white-space: nowrap">{{ r.time }}</td>
               <td>{{ r.note || r.summary || '—' }}</td>
-              <td class="action-col">
+              <td class="action-col-wide">
                 <div class="row-actions row-action-group">
                   <span v-if="r.online" class="status-tag status-published" style="white-space: nowrap">
                     当前线上
                   </span>
-                  <button v-else class="btn-link" @click="handleRollbackRevision(r.rev)">
-                    恢复到草稿
-                  </button>
+                  <template v-else>
+                    <button class="btn-link" @click="handleRollbackRevision(r.rev)">
+                      恢复到草稿
+                    </button>
+                    <button class="btn-link" @click="handleDirectRollbackApi(r.rev)">
+                      回退上线
+                    </button>
+                  </template>
                 </div>
               </td>
             </tr>
@@ -1497,7 +1522,6 @@ function handleRollbackRevision(rev: string) {
   flex-shrink: 0;
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
-  border-top: var(--kpi-top-line, 1px solid var(--border-color));
   border-radius: 6px;
   padding: 10px 16px;
   display: flex;
@@ -1672,7 +1696,7 @@ function handleRollbackRevision(rev: string) {
 }
 
 .seg-filter-btn.active {
-  background: var(--bg-surface);
+  background: var(--bg-elevated);
   border-color: var(--border-color);
   color: var(--primary);
   font-weight: 600;
@@ -1877,13 +1901,20 @@ function handleRollbackRevision(rev: string) {
 .detail-header-card {
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
-  border-top: var(--kpi-top-line, 1px solid var(--border-color));
 }
 
 .id-code-chip {
   background: var(--bg-subtle);
   border-color: var(--border-color);
   color: var(--text-regular);
+  white-space: nowrap;
+}
+
+.online-rev-chip {
+  background: var(--bg-subtle);
+  border-color: var(--border-color);
+  color: var(--primary);
+  font-weight: 600;
   white-space: nowrap;
 }
 
@@ -2094,7 +2125,7 @@ function handleRollbackRevision(rev: string) {
   text-align: center;
   color: var(--text-secondary);
   background: var(--bg-subtle);
-  border: 1px dashed var(--border-color);
+  border: 1px solid var(--border-color);
   border-radius: 4px;
 }
 

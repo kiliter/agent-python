@@ -449,34 +449,34 @@ onBeforeUnmount(() => {
 <style scoped>
 /* ==================== 双主题色板精确定义（极昼云原生 + 省网指挥大屏，零渐变） ==================== */
 .portal-screen {
-  --p-canvas: #e9eef5;
+  --p-canvas: #f2f5f9;
   --p-topbar: #ffffff;
   --p-surface: #ffffff;
-  --p-subtle: #f7f9fc;
-  --p-muted: #eef2f8;
-  --p-border-light: #e8eef6;
-  --p-border: #d7e0ed;
-  --p-border-strong: #bcc9dc;
-  --p-text-1: #0c1524;
-  --p-text-2: #3d4b63;
-  --p-text-3: #6f7f96;
-  --p-text-4: #9ba8bc;
+  --p-subtle: #f8fafc;
+  --p-muted: #f1f5f9;
+  --p-border-light: #eef2f6;
+  --p-border: #e2e8f0;
+  --p-border-strong: #cbd5e1;
+  --p-text-1: #0f172a;
+  --p-text-2: #334155;
+  --p-text-3: #64748b;
+  --p-text-4: #94a3b8;
   --p-brand: #0052d9;
   --p-brand-hover: #003fa8;
-  --p-brand-soft: #ebf3ff;
-  --p-brand-border: #bdd4ff;
-  --p-cta-bg: #0c1524;
+  --p-brand-soft: #f0f5ff;
+  --p-brand-border: #c6dcff;
+  --p-cta-bg: #0052d9;
   --p-cta-fg: #ffffff;
-  --p-ok: #078855;
-  --p-ok-soft: #e8f7f0;
-  --p-ok-border: #b6e6d0;
-  --p-err: #dc2626;
+  --p-ok: #0d8a59;
+  --p-ok-soft: #ecfdf5;
+  --p-ok-border: #a7f3d0;
+  --p-err: #d93026;
   --p-err-soft: #fef2f2;
   --p-err-border: #fecaca;
-  --p-grid-minor: rgba(0, 82, 217, 0.055);
-  --p-grid-major: rgba(0, 82, 217, 0.11);
-  --p-dot: rgba(0, 82, 217, 0.12);
-  --p-shadow: 0 2px 8px rgba(12, 21, 36, 0.05);
+  --p-grid-minor: rgba(15, 23, 42, 0.028);
+  --p-grid-major: rgba(15, 23, 42, 0.055);
+  --p-dot: rgba(15, 23, 42, 0.08);
+  --p-shadow: 0 2px 10px rgba(15, 23, 42, 0.04);
 
   position: relative;
   width: 100vw;
@@ -491,34 +491,34 @@ onBeforeUnmount(() => {
 }
 
 .portal-screen[data-portal-theme="dark"] {
-  --p-canvas: #080d17;
-  --p-topbar: #0d1525;
-  --p-surface: #101a2c;
-  --p-subtle: #0c1422;
-  --p-muted: #09101c;
-  --p-border-light: #18253b;
-  --p-border: #20314d;
-  --p-border-strong: #2f4870;
-  --p-text-1: #ebf2fc;
-  --p-text-2: #9eb1cc;
-  --p-text-3: #647896;
-  --p-text-4: #41536e;
-  --p-brand: #3b8aff;
-  --p-brand-hover: #5ca0ff;
-  --p-brand-soft: rgba(59, 138, 255, 0.14);
-  --p-brand-border: rgba(59, 138, 255, 0.36);
-  --p-cta-bg: #1a68ff;
+  --p-canvas: #0a0f1a;
+  --p-topbar: #0e1625;
+  --p-surface: #111a2b;
+  --p-subtle: #0e1625;
+  --p-muted: #0b1220;
+  --p-border-light: #19253a;
+  --p-border: #21304a;
+  --p-border-strong: #2d4266;
+  --p-text-1: #e8eef7;
+  --p-text-2: #9fb0c7;
+  --p-text-3: #697d99;
+  --p-text-4: #475973;
+  --p-brand: #408cff;
+  --p-brand-hover: #66a3ff;
+  --p-brand-soft: rgba(64, 140, 255, 0.12);
+  --p-brand-border: rgba(64, 140, 255, 0.28);
+  --p-cta-bg: #2563eb;
   --p-cta-fg: #ffffff;
-  --p-ok: #19be7d;
-  --p-ok-soft: rgba(25, 190, 125, 0.14);
-  --p-ok-border: rgba(25, 190, 125, 0.34);
+  --p-ok: #22c584;
+  --p-ok-soft: rgba(34, 197, 132, 0.11);
+  --p-ok-border: rgba(34, 197, 132, 0.25);
   --p-err: #f87171;
-  --p-err-soft: rgba(239, 68, 68, 0.15);
-  --p-err-border: rgba(239, 68, 68, 0.38);
-  --p-grid-minor: rgba(59, 138, 255, 0.06);
-  --p-grid-major: rgba(59, 138, 255, 0.13);
-  --p-dot: rgba(64, 150, 255, 0.16);
-  --p-shadow: none;
+  --p-err-soft: rgba(248, 113, 113, 0.12);
+  --p-err-border: rgba(248, 113, 113, 0.28);
+  --p-grid-minor: rgba(64, 140, 255, 0.035);
+  --p-grid-major: rgba(64, 140, 255, 0.075);
+  --p-dot: rgba(64, 140, 255, 0.1);
+  --p-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
 }
 
 /* 全屏工程网格 SVG 背景层 */
@@ -583,12 +583,12 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 6px;
   padding: 3px 10px;
-  border-radius: 4px;
-  background-color: var(--p-ok-soft);
-  border: 1px solid var(--p-ok-border);
-  color: var(--p-ok);
+  border-radius: 999px;
+  background-color: var(--p-subtle);
+  border: 1px solid var(--p-border);
+  color: var(--p-text-2);
   font-size: 11.5px;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .portal-net-dot {
@@ -602,24 +602,25 @@ onBeforeUnmount(() => {
   appearance: none;
   height: 30px;
   padding: 0 12px;
-  border-radius: 5px;
+  border-radius: 6px;
   border: 1px solid var(--p-border);
-  background-color: var(--p-subtle);
+  background-color: var(--p-surface);
   background-image: none;
-  color: var(--p-text-1);
+  color: var(--p-text-2);
   font-family: inherit;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   cursor: pointer;
-  transition: border-color 0.14s ease, color 0.14s ease;
+  transition: border-color 0.14s ease, color 0.14s ease, background-color 0.14s ease;
 }
 
 .portal-theme-btn:hover {
-  border-color: var(--p-brand);
-  color: var(--p-brand);
+  border-color: var(--p-border-strong);
+  color: var(--p-text-1);
+  background-color: var(--p-subtle);
 }
 
 /* 中央门户主区 */
@@ -648,9 +649,9 @@ onBeforeUnmount(() => {
 .portal-login-card {
   background-color: var(--p-surface);
   background-image: none;
-  border: 1px solid var(--p-border-strong);
-  border-top: 3px solid var(--p-brand);
-  border-radius: 6px;
+  border: 1px solid var(--p-border);
+  border-top: 2px solid var(--p-brand);
+  border-radius: 8px;
   box-shadow: var(--p-shadow);
   display: flex;
   flex-direction: column;
@@ -924,8 +925,7 @@ onBeforeUnmount(() => {
   background-color: var(--p-surface);
   background-image: none;
   border: 1px solid var(--p-border);
-  border-top: 2px solid var(--p-brand);
-  border-radius: 6px;
+  border-radius: 8px;
   box-shadow: var(--p-shadow);
   padding: 18px 22px;
   display: flex;

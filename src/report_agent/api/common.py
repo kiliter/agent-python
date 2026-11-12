@@ -18,6 +18,7 @@ from ..runtime.runner import AgentRunner, InputValidationError, RunRequest, Temp
 from ..runtime.workspace import queue_listener
 
 log = logging.getLogger(__name__)
+_BG_TASKS: set[asyncio.Task[Any]] = set()
 
 
 def container(request: Request) -> Container:
@@ -59,6 +60,8 @@ def sse_run(runner: AgentRunner, req: RunRequest, shape: Callable[[dict[str, Any
             await queue.put(("error", {"code": "INTERNAL_ERROR", "message": f"{type(exc).__name__}: {exc}"}))
 
     task = asyncio.create_task(worker())
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
 
     async def gen():
         yield ": connected\n\n"

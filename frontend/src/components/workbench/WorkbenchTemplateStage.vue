@@ -121,6 +121,26 @@ function toggleMoreMenu() {
   moreMenuOpen.value = next
 }
 
+const lastEditMode = ref<'code' | 'split'>('code')
+
+watch(
+  () => store.currentTemplateId,
+  () => {
+    lastEditMode.value = 'code'
+  },
+)
+
+watch(
+  () => store.ideCenterMode,
+  mode => {
+    if (mode === 'code' || mode === 'split') {
+      lastEditMode.value = mode
+      void nextTick(() => view?.requestMeasure())
+    }
+  },
+  { immediate: true },
+)
+
 function setCenterMode(mode: 'code' | 'preview' | 'split' | 'diff') {
   closeAllMenus()
   store.ideCenterMode = mode
@@ -177,7 +197,6 @@ async function handleRestoreOffline() {
   closeAllMenus()
   if (!tpl.value.id) return
   await store.restoreOfflineTemplate(tpl.value.id)
-  await store.loadTemplate(tpl.value.id)
 }
 
 function handleOpenDiffWithOnline() {
@@ -539,7 +558,7 @@ function scrollActiveAcItemIntoView() {
 
 function insertSnippetAtCursor(snippet: string) {
   if (!isCodeVisible.value) {
-    store.ideCenterMode = 'split'
+    store.ideCenterMode = 'code'
   }
   void nextTick(() => {
     if (!view) {
@@ -602,7 +621,7 @@ const condOptions = computed<CondOption[]>(() => {
 
 function insertCondBlock(opt: CondOption) {
   closeAllMenus()
-  if (!isCodeVisible.value) store.ideCenterMode = 'split'
+  if (!isCodeVisible.value) store.ideCenterMode = 'code'
   void nextTick(() => {
     if (!view) return
     const docStr = view.state.doc.toString()
@@ -642,7 +661,7 @@ function locateFieldInEditor(fieldName: string) {
   const fname = fieldName.trim()
   if (!fname) return
   if (!isCodeVisible.value) {
-    store.ideCenterMode = 'split'
+    store.ideCenterMode = 'code'
   }
   void nextTick(() => {
     if (!view) return
@@ -686,7 +705,7 @@ function locateFieldInEditor(fieldName: string) {
 function locateLineInEditor(lineNumber?: number) {
   if (!lineNumber || lineNumber < 1) return
   closeAllMenus()
-  if (!isCodeVisible.value) store.ideCenterMode = 'split'
+  if (!isCodeVisible.value) store.ideCenterMode = 'code'
   void nextTick(() => {
     if (!view) return
     const clamped = Math.min(lineNumber, view.state.doc.lines)
@@ -808,26 +827,37 @@ watch(
   () => [
     store.bodyText,
     store.currentTemplateId,
+    tpl.value.onlineRev,
+    store.onlineBaselineSeq,
     store.templateFields.map(f => `${f.name}:${f.whenMissing}:${f.defaultValue}`).join('|'),
   ],
   () => scheduleStaticPreview(),
 )
 
-// 当快照为线上版本运行时，按需拉取线上 bodyText 用于同值不同 Key 的精确映射
+// 当快照为线上版本运行或线上基线变更时，按需拉取最新线上 bodyText 用于精确映射
 watch(
-  () => [store.currentTemplateId, store.dryRunResult?.target, store.dryRunResult?.rev] as const,
+  () =>
+    [
+      store.currentTemplateId,
+      store.dryRunResult?.target,
+      store.dryRunResult?.rev,
+      tpl.value.onlineRev,
+      store.onlineBaselineSeq,
+    ] as const,
   async ([id, target]) => {
     if (!id) {
       onlineBodyText.value = ''
       return
     }
-    if (target === 'online') {
+    if (target === 'online' || hasOnline.value) {
       try {
         const onlineTpl = await platformApi.getTemplate(id, 'online')
         onlineBodyText.value = onlineTpl.bodyText || ''
       } catch {
         onlineBodyText.value = ''
       }
+    } else {
+      onlineBodyText.value = ''
     }
   },
   { immediate: true },
@@ -875,6 +905,7 @@ const diffBaselineRev = ref<string>('online')
 const diffLoading = ref(false)
 const diffError = ref<string | null>(null)
 const baselineDetail = ref<TemplateDetail | null>(null)
+let diffLoadSeq = 0
 
 interface BaselineOption {
   value: string
@@ -904,39 +935,57 @@ async function loadBaselineForDiff(targetRev?: string) {
     ver = hasOnline.value ? 'online' : validValues[0] || ''
   }
   diffBaselineRev.value = ver
+  if (store.ideDiffTargetRev !== ver) {
+    store.ideDiffTargetRev = ver
+  }
   if (!ver) {
     baselineDetail.value = null
+    store.templateDiff = null
     diffError.value = null
     return
   }
+  const reqSeq = ++diffLoadSeq
   diffLoading.value = true
   diffError.value = null
   try {
     const detail = await platformApi.getTemplate(id, ver)
+    if (reqSeq !== diffLoadSeq) return
     baselineDetail.value = detail
-    // 同步调用后端 diff 接口（已保存版本对），保留 store.templateDiff 兼容引用
+    // 同步调用后端 diff 接口（已保存版本对），保留 store.templateDiff 兼容引用；若两端同源则清空旧缓存
     const serverA = store.templateDetail?.draft ? 'draft' : ver
     if (serverA !== ver) {
       void platformApi.fetchTemplateDiff(id, serverA, ver).then(
         d => {
-          store.templateDiff = d
+          if (reqSeq === diffLoadSeq) store.templateDiff = d
         },
         () => {},
       )
+    } else {
+      store.templateDiff = null
     }
   } catch (err) {
+    if (reqSeq !== diffLoadSeq) return
     diffError.value = errorMessage(err)
     baselineDetail.value = null
   } finally {
-    diffLoading.value = false
+    if (reqSeq === diffLoadSeq) diffLoading.value = false
   }
 }
 
 watch(
-  () => [store.ideCenterMode, store.ideDiffTargetRev, store.currentTemplateId] as const,
+  () =>
+    [
+      store.ideCenterMode,
+      store.ideDiffTargetRev,
+      store.currentTemplateId,
+      tpl.value.onlineRev,
+      store.onlineBaselineSeq,
+    ] as const,
   ([mode, targetRev]) => {
     if (mode === 'diff') {
       void loadBaselineForDiff(targetRev || undefined)
+    } else {
+      baselineDetail.value = null
     }
   },
   { immediate: true },
@@ -1224,7 +1273,7 @@ onBeforeUnmount(() => {
         <div v-if="isDiffMode" class="diff-active-pill">
           <GitCompare :size="12" />
           <span class="diff-pill-text">行级差异对比</span>
-          <button type="button" class="pill-inline-btn" @click="setCenterMode('split')">
+          <button type="button" class="pill-inline-btn" @click="setCenterMode(lastEditMode)">
             返回编辑
           </button>
         </div>
@@ -1981,7 +2030,7 @@ onBeforeUnmount(() => {
 }
 
 .stage-seg-btn.active {
-  background: var(--bg-surface);
+  background: var(--bg-elevated);
   color: var(--primary);
   font-weight: 600;
   box-shadow: var(--shadow-sm);
@@ -2659,8 +2708,8 @@ onBeforeUnmount(() => {
   max-width: 820px;
   margin: 0 auto;
   background: var(--bg-surface);
-  border: 1px solid var(--border-strong, var(--border-color));
-  border-top: 3px solid var(--primary);
+  border: 1px solid var(--border-color);
+  border-top: 2px solid var(--primary);
   border-radius: 4px;
   padding: 12px 16px 18px;
   color: var(--text-primary);
@@ -2752,7 +2801,7 @@ onBeforeUnmount(() => {
 }
 
 .sheet-view-btn.active {
-  background: var(--bg-surface);
+  background: var(--bg-elevated);
   color: var(--primary);
   font-weight: 600;
 }

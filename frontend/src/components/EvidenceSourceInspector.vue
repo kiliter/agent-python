@@ -412,13 +412,13 @@ watch(
 }
 
 .insp-active-chip {
-  font-size: 11.5px;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 3px;
-  background-color: var(--highlight-bg);
-  border: 1px solid var(--highlight-border);
-  color: var(--highlight-text);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background-color: var(--primary-bg);
+  border: 1px solid var(--primary-border);
+  color: var(--primary);
   white-space: nowrap;
   flex-shrink: 0;
 }
@@ -428,8 +428,8 @@ watch(
   align-items: center;
   gap: 16px;
   padding: 0 14px;
-  background-color: var(--bg-subtle);
-  border-bottom: 1px solid var(--border-color);
+  background-color: var(--bg-surface);
+  border-bottom: 1px solid var(--border-light);
   flex-wrap: nowrap;
   flex-shrink: 0;
 }
@@ -439,7 +439,7 @@ watch(
   border: none;
   background: transparent;
   padding: 8px 2px 9px;
-  color: var(--text-regular);
+  color: var(--text-secondary);
   font-family: inherit;
   font-size: 12.5px;
   font-weight: 500;
@@ -450,10 +450,11 @@ watch(
   gap: 5px;
   white-space: nowrap;
   flex-shrink: 0;
+  transition: color 0.12s;
 }
 
 .insp-tab-btn:hover {
-  color: var(--primary);
+  color: var(--text-primary);
 }
 
 .insp-tab-btn.active {
@@ -469,14 +470,15 @@ watch(
   bottom: -1px;
   height: 2px;
   background-color: var(--primary);
+  border-radius: 2px 2px 0 0;
 }
 
 .insp-tab-count {
   font-size: 10.5px;
   padding: 0 5px;
   line-height: 16px;
-  border-radius: 3px;
-  background-color: var(--bg-muted);
+  border-radius: 4px;
+  background-color: var(--bg-subtle);
   border: 1px solid var(--border-light);
   color: var(--text-secondary);
   white-space: nowrap;
@@ -522,14 +524,14 @@ watch(
   flex-shrink: 0;
   margin: 10px 12px 8px;
   background-color: var(--bg-subtle);
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  padding: 8px 11px;
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  padding: 8px 12px;
   font-size: 12px;
 }
 
 .insp-summary-banner.has-field {
-  border-left: 3px solid var(--primary);
+  border-left: 2.5px solid var(--primary);
 }
 
 .insp-summary-top {
@@ -569,7 +571,7 @@ watch(
 
 .insp-res-id {
   padding: 1px 6px;
-  border-radius: 3px;
+  border-radius: 4px;
   background-color: var(--primary-bg);
   border: 1px solid var(--primary-border);
   color: var(--primary);
@@ -577,8 +579,8 @@ watch(
 }
 
 .insp-table-wrap {
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
   overflow: hidden;
 }
 

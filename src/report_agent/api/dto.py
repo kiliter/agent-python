@@ -9,8 +9,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from jinja2 import meta, nodes
+
 from ..domain.api_contract import ApiContract, fixed_params
-from ..domain.resources import ResourceSet
+from ..domain.jinja_env import BodySyntaxError, parse_body
+from ..domain.resources import ResourceSet, _RESERVED_FIELD_NAMES
 from ..domain.skill import Skill
 from ..domain.template import FieldDef, InputDef, Template
 from ..store.fsutil import fmt_time
@@ -29,18 +32,47 @@ def dash(value: Any) -> str:
     return "—" if value in (None, "") else str(value)
 
 
+_FALLBACK_TOKEN_RE = re.compile(
+    r"""('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")"""
+    r"""|(\|\s*[A-Za-z_][A-Za-z0-9_]*)"""
+    r"""|(\.\s*[^\W\d]\w*)"""
+    r"""|([^\W\d]\w*)""",
+    re.UNICODE,
+)
+
+
 # ============================================================================ 字段
 def body_usage(body: str) -> dict[str, int]:
-    """统计正文中每个名字出现的次数（{{ }} 输出与 {% %} 条件都算），与前端算法一致。"""
+    """统计正文中每个名字出现的次数（{{ }} / {{- -}} 输出与 {% %} / {%- -%} 条件都算）。"""
     counts: dict[str, int] = {}
-    for m in re.finditer(r"\{\{([^{}\n]+)\}\}", body):
-        name = m.group(1).strip().split("|")[0].strip()
-        counts[name] = counts.get(name, 0) + 1
-    for m in re.finditer(r"\{%([\s\S]*?)%\}", body):
-        for tm in re.finditer(r"\b(if|elif|else|endif|and|or|not|in)\b|(\"[^\"]*\")|([\u4e00-\u9fa5A-Za-z0-9_]+)",
-                              m.group(1)):
-            if tm.group(3):
-                counts[tm.group(3)] = counts.get(tm.group(3), 0) + 1
+    if not body:
+        return counts
+    try:
+        tree = parse_body(body)
+        undeclared = set(meta.find_undeclared_variables(tree))
+        for node in tree.find_all(nodes.Name):
+            if node.ctx == "load" and node.name in undeclared:
+                counts[node.name] = counts.get(node.name, 0) + 1
+        return counts
+    except BodySyntaxError:
+        pass
+
+    for m in re.finditer(r"\{\{[+-]?([\s\S]*?)[+-]?\}\}", body):
+        for tm in _FALLBACK_TOKEN_RE.finditer(m.group(1)):
+            ident = tm.group(4)
+            if ident and ident not in _RESERVED_FIELD_NAMES:
+                counts[ident] = counts.get(ident, 0) + 1
+    for m in re.finditer(r"\{%[+-]?([\s\S]*?)[+-]?%\}", body):
+        first = True
+        for tm in _FALLBACK_TOKEN_RE.finditer(m.group(1)):
+            ident = tm.group(4)
+            if not ident:
+                continue
+            if first:
+                first = False
+                continue
+            if ident not in _RESERVED_FIELD_NAMES:
+                counts[ident] = counts.get(ident, 0) + 1
     return counts
 
 

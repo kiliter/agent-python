@@ -345,10 +345,10 @@ onBeforeUnmount(() => {
 
 .report-seg-token {
   position: relative;
-  padding: 1px 6px;
-  margin: 0 2px;
-  border-radius: 3px;
-  font-weight: 600;
+  padding: 1px 5px;
+  margin: 0 1px;
+  border-radius: 4px;
+  font-weight: 500;
   cursor: pointer;
   background-image: none;
   transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
@@ -356,32 +356,32 @@ onBeforeUnmount(() => {
 
 .report-seg-token.filled-val {
   background-color: var(--primary-bg);
-  border-bottom: 1.5px solid var(--primary);
+  border-bottom: 1px solid var(--primary-border);
   color: var(--primary);
 }
 
 .report-seg-token.is-default-val {
-  background-color: var(--bg-muted);
-  border-bottom: 1.5px dashed var(--primary);
+  background-color: var(--bg-subtle);
+  border-bottom: 1px dashed var(--border-strong);
   color: var(--text-regular);
 }
 
 .report-seg-token.missing-placeholder {
-  background-color: rgba(200, 105, 6, 0.13);
-  border-bottom: 1.5px dashed var(--warning);
+  background-color: var(--warning-bg);
+  border-bottom: 1px dashed var(--warning-border);
   color: var(--warning);
   font-family: var(--font-mono);
   font-size: 0.94em;
 }
 
 .report-seg-token.is-same-key {
-  outline: 1px solid var(--primary);
+  outline: 1px solid var(--primary-border);
   outline-offset: 1px;
 }
 
 .report-seg-token.is-active-evidence {
   background-color: var(--highlight-bg);
-  border-bottom: 2px solid var(--highlight-border);
+  border-bottom: 1.5px solid var(--highlight-border);
   color: var(--highlight-text);
 }
 </style>
@@ -394,21 +394,21 @@ onBeforeUnmount(() => {
   pointer-events: none;
   max-width: 380px;
   padding: 7px 11px;
-  border-radius: 5px;
-  background-color: #0c1524;
+  border-radius: 6px;
+  background-color: #0f172a;
   background-image: none;
   border: 1px solid #243552;
   color: #f8fafc;
-  box-shadow: 0 6px 18px rgba(8, 13, 23, 0.28);
+  box-shadow: 0 6px 18px rgba(8, 13, 23, 0.24);
   font-size: 12px;
   line-height: 1.45;
 }
 
 [data-theme="dark"] .report-field-tooltip {
-  background-color: #142038;
-  border-color: #3b8aff;
-  color: #ebf2fc;
-  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.58);
+  background-color: #162238;
+  border-color: #2b3f63;
+  color: #e8eef7;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5);
 }
 
 .report-key-tooltip-main {
@@ -487,12 +487,12 @@ onBeforeUnmount(() => {
   position: absolute;
   width: 8px;
   height: 8px;
-  background-color: #0c1524;
+  background-color: #0f172a;
   transform: translateX(-50%) rotate(45deg);
 }
 
 [data-theme="dark"] .report-key-tooltip-arrow {
-  background-color: #142038;
+  background-color: #162238;
 }
 
 .report-field-tooltip.is-top .report-key-tooltip-arrow {
@@ -502,8 +502,8 @@ onBeforeUnmount(() => {
 }
 
 [data-theme="dark"] .report-field-tooltip.is-top .report-key-tooltip-arrow {
-  border-right-color: #3b8aff;
-  border-bottom-color: #3b8aff;
+  border-right-color: #2b3f63;
+  border-bottom-color: #2b3f63;
 }
 
 .report-field-tooltip.is-bottom .report-key-tooltip-arrow {
@@ -513,7 +513,7 @@ onBeforeUnmount(() => {
 }
 
 [data-theme="dark"] .report-field-tooltip.is-bottom .report-key-tooltip-arrow {
-  border-left-color: #3b8aff;
-  border-top-color: #3b8aff;
+  border-left-color: #2b3f63;
+  border-top-color: #2b3f63;
 }
 </style>

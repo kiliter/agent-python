@@ -61,83 +61,98 @@ const resolvedValue = computed(() => props.value || props.status)
 </template>
 
 <style scoped>
-.status-tag,
-.ev-badge {
+.status-tag {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 2px 8px;
-  border-radius: 3px;
+  padding: 1px 8px;
+  border-radius: 999px;
   font-size: 11.5px;
-  font-weight: 600;
-  line-height: 1.4;
+  font-weight: 500;
+  line-height: 18px;
   white-space: nowrap;
   background-image: none;
   border: 1px solid var(--border-color);
-  background-color: var(--bg-muted);
+  background-color: var(--bg-subtle);
+  color: var(--text-regular);
+}
+
+.ev-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+  white-space: nowrap;
+  background-image: none;
+  border: 1px solid var(--border-color);
+  background-color: var(--bg-subtle);
   color: var(--text-regular);
 }
 
 .status-published {
-  background-color: var(--status-pub-bg, var(--success-bg, rgba(7, 136, 85, 0.12)));
-  border-color: var(--status-pub-border, var(--success-border, rgba(7, 136, 85, 0.34)));
-  color: var(--status-pub-fg, var(--success));
+  background-color: var(--status-pub-bg, var(--success-bg));
+  border-color: var(--status-pub-border, var(--success-border));
+  color: var(--status-pub-text, var(--success));
 }
 
 .run-success {
-  background-color: var(--success-bg, rgba(7, 136, 85, 0.12));
-  border-color: var(--success-border, rgba(7, 136, 85, 0.34));
+  background-color: var(--success-bg);
+  border-color: var(--success-border);
   color: var(--success);
 }
 
 .status-published-draft,
 .run-partial {
-  background-color: var(--warning-bg, rgba(200, 105, 6, 0.12));
-  border-color: var(--warning-border, rgba(200, 105, 6, 0.34));
-  color: var(--warning);
+  background-color: var(--status-pub-draft-bg, var(--warning-bg));
+  border-color: var(--status-pub-draft-border, var(--warning-border));
+  color: var(--status-pub-draft-text, var(--warning));
 }
 
 .draft-dot {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
-  background-color: var(--warning);
+  background-color: var(--status-pub-draft-dot, currentColor);
   flex-shrink: 0;
 }
 
 .run-failed {
-  background-color: var(--danger-bg, rgba(220, 38, 38, 0.11));
-  border-color: var(--danger-border, rgba(220, 38, 38, 0.34));
+  background-color: var(--danger-bg);
+  border-color: var(--danger-border);
   color: var(--danger);
 }
 
 .status-draft {
-  background-color: var(--bg-muted);
-  border-color: var(--border-color);
-  color: var(--text-secondary);
+  background-color: var(--status-draft-bg, var(--bg-subtle));
+  border-color: var(--status-draft-border, var(--border-color));
+  color: var(--status-draft-text, var(--text-secondary));
 }
 
 .status-offline {
-  background-color: var(--bg-subtle);
-  border-color: var(--border-color);
-  color: var(--text-placeholder);
+  background-color: var(--status-offline-bg, var(--bg-subtle));
+  border-color: var(--status-offline-border, var(--border-light));
+  color: var(--status-offline-text, var(--text-placeholder));
 }
 
 .ev-quote {
-  background-color: var(--primary-bg);
-  border-color: var(--primary-border);
-  color: var(--primary);
+  background-color: var(--ev-quote-bg, var(--primary-bg));
+  border-color: var(--ev-quote-border, var(--primary-border));
+  color: var(--ev-quote-text, var(--primary));
 }
 
 .ev-input {
-  background-color: var(--success-bg, rgba(7, 136, 85, 0.11));
-  border-color: var(--success-border, rgba(7, 136, 85, 0.3));
-  color: var(--success);
+  background-color: var(--ev-input-bg, var(--success-bg));
+  border-color: var(--ev-input-border, var(--success-border));
+  color: var(--ev-input-text, var(--success));
 }
 
 .ev-derive {
-  background-color: var(--bg-subtle);
-  border-color: var(--border-strong);
-  color: var(--text-regular);
+  background-color: var(--ev-derive-bg, var(--bg-subtle));
+  border-color: var(--ev-derive-border, var(--border-color));
+  color: var(--ev-derive-text, var(--text-regular));
 }
 </style>

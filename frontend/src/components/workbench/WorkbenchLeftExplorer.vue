@@ -962,12 +962,12 @@ onBeforeUnmount(() => {
 
 .act-tab-btn.is-Remembered {
   color: var(--primary);
-  background: var(--bg-surface);
+  background: var(--bg-elevated);
   border-color: var(--border-light);
 }
 
 .act-tab-btn.active {
-  background: var(--bg-surface);
+  background: var(--bg-elevated);
   border-color: var(--border-color);
   color: var(--primary);
 }

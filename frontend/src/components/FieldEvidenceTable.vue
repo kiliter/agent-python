@@ -165,11 +165,11 @@ function locateField(f: TemplateField) {
 }
 
 .ev-field-row.row-selected td {
-  background-color: var(--primary-bg);
+  background-color: var(--bg-active);
 }
 
 .ev-field-row.row-selected td:first-child {
-  box-shadow: inset 3px 0 0 var(--primary);
+  box-shadow: inset 2.5px 0 0 var(--primary);
 }
 
 .ev-field-name {
@@ -185,12 +185,12 @@ function locateField(f: TemplateField) {
 }
 
 .ev-meta-chip {
-  font-size: 10px;
+  font-size: 10.5px;
   padding: 0 5px;
   line-height: 16px;
-  border-radius: 3px;
-  background-color: var(--bg-muted);
-  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background-color: var(--bg-subtle);
+  border: 1px solid var(--border-light);
   color: var(--text-regular);
 }
 
@@ -199,47 +199,47 @@ function locateField(f: TemplateField) {
 }
 
 .ev-meta-chip.warn {
-  background-color: rgba(200, 105, 6, 0.13);
-  border-color: rgba(200, 105, 6, 0.34);
+  background-color: var(--warning-bg);
+  border-color: var(--warning-border);
   color: var(--warning);
 }
 
 .ev-meta-chip.err {
-  background-color: rgba(220, 38, 38, 0.13);
-  border-color: rgba(220, 38, 38, 0.34);
+  background-color: var(--danger-bg);
+  border-color: var(--danger-border);
   color: var(--danger);
 }
 
 .ev-state-pill {
   display: inline-block;
   font-size: 11px;
-  font-weight: 600;
-  padding: 1px 7px;
-  border-radius: 3px;
+  font-weight: 500;
+  padding: 1px 8px;
+  border-radius: 999px;
 }
 
 .ev-state-pill.ok {
-  background-color: rgba(7, 136, 85, 0.13);
-  border: 1px solid rgba(7, 136, 85, 0.34);
+  background-color: var(--success-bg);
+  border: 1px solid var(--success-border);
   color: var(--success);
 }
 
 .ev-state-pill.warn {
-  background-color: rgba(200, 105, 6, 0.13);
-  border: 1px solid rgba(200, 105, 6, 0.34);
+  background-color: var(--warning-bg);
+  border: 1px solid var(--warning-border);
   color: var(--warning);
 }
 
 .ev-found-val {
-  font-weight: 550;
+  font-weight: 500;
   color: var(--text-primary);
 }
 
 .ev-unfound-val {
-  padding: 1px 5px;
-  border-radius: 3px;
-  background-color: rgba(200, 105, 6, 0.12);
-  border-bottom: 1px dashed var(--warning);
+  padding: 1px 6px;
+  border-radius: 4px;
+  background-color: var(--warning-bg);
+  border-bottom: 1px dashed var(--warning-border);
   color: var(--warning);
 }
 

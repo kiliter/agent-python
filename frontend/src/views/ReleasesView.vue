@@ -73,6 +73,14 @@ function swapDiffRevs() {
 // 版本列表刷新后补齐默认版本；对比版本变化由下面的 watcher 负责重新加载差异
 watch(() => store.globalReleases, () => ensureDefaultRevs(), { deep: true })
 
+watch(
+  () => store.onlineBaselineSeq,
+  () => {
+    ensureDefaultRevs()
+    reloadDiff()
+  },
+)
+
 watch([diffVerA, diffVerB], () => reloadDiff())
 
 onMounted(() => {
@@ -88,7 +96,7 @@ function canOpen(row: ReleaseDiffItem) {
 }
 
 /** 跳转到某个资源的详情（发布变更 chip 与差异表共用） */
-function openResource(kind: ReleaseChange['kind'], key: string) {
+function openResource(kind: ReleaseChange['kind'], key: string, rev = '') {
   if (kind === 'template') {
     void store.openTemplateWorkbench(Number(key), 'history')
   } else if (kind === 'skill') {
@@ -96,7 +104,7 @@ function openResource(kind: ReleaseChange['kind'], key: string) {
   } else if (kind === 'api') {
     void store.openApiDetail(key, 'history')
   } else {
-    store.navigate('settings')
+    store.openSysPromptRollback(rev)
   }
 }
 
@@ -233,7 +241,7 @@ function openEmergencySwitch(rev: string) {
                       :key="`${c.kind}-${c.key}-${ci}`"
                       class="chip-tag clickable rel-change-chip"
                       :title="`点击查看 ${KIND_LABELS[c.kind] || c.kind} ${c.key}`"
-                      @click="openResource(c.kind, c.key)"
+                      @click="openResource(c.kind, c.key, rel.rev)"
                     >
                       {{ changeChipText(c) }}
                     </span>
@@ -380,7 +388,7 @@ function openEmergencySwitch(rev: string) {
                     <button
                       type="button"
                       class="btn-link"
-                      @click="openResource(row.kind, row.key)"
+                      @click="openResource(row.kind, row.key, diffVerB)"
                     >
                       查看
                     </button>
@@ -406,7 +414,6 @@ function openEmergencySwitch(rev: string) {
   flex-shrink: 0;
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
-  border-top: var(--kpi-top-line, 1px solid var(--border-color));
   border-radius: 6px;
   padding: 9px 16px;
   display: flex;
@@ -530,7 +537,7 @@ function openEmergencySwitch(rev: string) {
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-left: 3px solid var(--border-strong);
-  border-radius: 5px;
+  border-radius: 6px;
   overflow: hidden;
   transition: border-color 0.14s ease;
 }
@@ -539,11 +546,10 @@ function openEmergencySwitch(rev: string) {
   border-color: var(--primary-border);
 }
 
-/* 当前线上生产基线突出 var(--primary) 左侧/顶部标识线 */
+/* 当前线上生产基线突出 var(--primary) 左侧标识线 */
 .rel-baseline-card.is-live-card {
   border-color: var(--primary-border);
-  border-top: 2px solid var(--primary);
-  border-left: 3.5px solid var(--primary);
+  border-left: 3px solid var(--primary);
 }
 
 .rel-card-head {
@@ -655,7 +661,7 @@ function openEmergencySwitch(rev: string) {
   flex-wrap: wrap;
   gap: 8px;
   padding-top: 6px;
-  border-top: 1px dashed var(--border-light);
+  border-top: 1px solid var(--border-light);
 }
 
 .rel-compare-quick {

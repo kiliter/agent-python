@@ -1141,8 +1141,7 @@ async function handleSaveAndLeave() {
 .modal-dialog {
   background-color: var(--bg-surface);
   background-image: none;
-  border: 1px solid var(--border-strong);
-  border-top: 2.5px solid var(--primary);
+  border: 1px solid var(--border-color);
   color: var(--text-primary);
 }
 
@@ -1207,12 +1206,12 @@ async function handleSaveAndLeave() {
 }
 
 .gm-radio-card.is-primary {
-  border: 1.5px solid var(--primary);
+  border-color: var(--primary);
   background-color: var(--primary-bg);
 }
 
 .gm-radio-card.is-danger {
-  border: 1.5px solid var(--danger);
+  border-color: var(--danger);
   background-color: rgba(220, 38, 38, 0.1);
 }
 
@@ -1240,7 +1239,7 @@ async function handleSaveAndLeave() {
 }
 
 .gm-proto-card.is-active {
-  border: 1.5px solid var(--primary);
+  border-color: var(--primary);
   background-color: var(--primary-bg);
 }
 

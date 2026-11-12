@@ -129,11 +129,16 @@ def _is_xsi_nil(el: ET.Element) -> bool:
     return False
 
 
+_MAX_FLATTEN_DEPTH = 128
+
+
 def _find_all(root: ET.Element, path: str) -> list[ET.Element]:
-    """按 a.b.c 路径查找元素（兼容默认命名空间与前缀）；第一段可以是根元素名。最后一段匹配全部同名子元素。"""
+    """按 a.b.c 路径查找元素（兼容默认命名空间与前缀）；空路径匹配根元素，第一段可以是根元素名。"""
+    if not (path or "").strip():
+        return [root]
     parts = [_local_tag(p) for p in path.split(".") if p.strip()]
     if not parts:
-        return []
+        return [root]
     if parts[0] == _local_tag(root.tag):
         parts = parts[1:]
     nodes = [root]
@@ -165,34 +170,155 @@ def _is_empty_record_node(el: ET.Element) -> bool:
     return not children and not (el.text or "").strip()
 
 
-def element_to_record(el: ET.Element) -> dict[str, str]:
-    """把一条记录元素转成 子元素名→文本。没有子元素时整个文本作为 value。"""
+def _group_xml_children(parent: ET.Element) -> list[tuple[str, list[ET.Element]]]:
+    order: list[str] = []
+    grouped: dict[str, list[ET.Element]] = {}
+    for c in parent:
+        if not isinstance(c.tag, str):
+            continue
+        k = _local_tag(c.tag)
+        if not k:
+            continue
+        if k not in grouped:
+            order.append(k)
+            grouped[k] = []
+        grouped[k].append(c)
+    return [(k, grouped[k]) for k in order]
+
+
+def _flatten_xml_element(el: ET.Element) -> dict[str, str]:
+    """显式栈递归展平 XML 记录节点，嵌套子元素生成 parent.child 点分列名。"""
     children = [c for c in el if isinstance(c.tag, str)]
     if not children:
         return {"value": "" if _is_xsi_nil(el) else (el.text or "").strip()}
     rec: dict[str, str] = {}
-    for child in children:
-        key = _local_tag(child.tag)
-        if not key:
+    stack: list[tuple[str, list[ET.Element], int]] = [
+        (k, els, 1) for k, els in reversed(_group_xml_children(el))
+    ]
+    while stack:
+        key, els, depth = stack.pop()
+        if len(els) > 1:
+            rec[key] = _json_cell_to_str([_xml_node_to_json(x) for x in els])
             continue
-        if _is_xsi_nil(child):
+        node = els[0]
+        if _is_xsi_nil(node):
             rec[key] = ""
-        elif not any(isinstance(sub.tag, str) for sub in child):
-            rec[key] = (child.text or "").strip()
+            continue
+        sub_children = [c for c in node if isinstance(c.tag, str)]
+        if not sub_children:
+            rec[key] = (node.text or "").strip()
+        elif depth >= _MAX_FLATTEN_DEPTH:
+            rec[key] = ET.tostring(node, encoding="unicode")
         else:
-            rec[key] = ET.tostring(child, encoding="unicode")
+            grouped_sub = _group_xml_children(node)
+            if not grouped_sub:
+                rec[key] = (node.text or "").strip()
+            else:
+                for sub_k, sub_els in reversed(grouped_sub):
+                    stack.append((f"{key}.{sub_k}", sub_els, depth + 1))
     return rec
 
 
+def _extract_xml_dotted(el: ET.Element, dotted_key: str) -> tuple[bool, str]:
+    """按显式声明的点分列名（如 userInfo.userName）从 XML 元素提取嵌套子路径值。"""
+    parts = [_local_tag(p) for p in dotted_key.split(".") if p.strip()]
+    if len(parts) < 2:
+        return False, ""
+    nodes: list[ET.Element] = [el]
+    for part in parts:
+        nxt: list[ET.Element] = []
+        for node in nodes:
+            if _is_xsi_nil(node):
+                continue
+            nxt.extend(c for c in node if isinstance(c.tag, str) and _local_tag(c.tag) == part)
+        if not nxt:
+            return False, ""
+        nodes = nxt
+    if len(nodes) == 1:
+        target = nodes[0]
+        if _is_xsi_nil(target):
+            return True, ""
+        sub_els = [c for c in target if isinstance(c.tag, str)]
+        if not sub_els:
+            return True, (target.text or "").strip()
+        return True, ET.tostring(target, encoding="unicode")
+    return True, _json_cell_to_str([_xml_node_to_json(n) for n in nodes])
+
+
+def _xml_scalar_to_record(el: ET.Element) -> dict[str, str]:
+    """将匹配到的 XML 节点作为标量行 {'value': ...} 提取。"""
+    if _is_xsi_nil(el):
+        return {"value": ""}
+    children = [c for c in el if isinstance(c.tag, str)]
+    if not children:
+        return {"value": (el.text or "").strip()}
+    return {"value": ET.tostring(el, encoding="unicode")}
+
+
+def element_to_record(
+    el: ET.Element,
+    *,
+    flatten: bool = False,
+    columns: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """把一条记录元素转成 子元素名→文本。没有子元素时整个文本作为 value；支持嵌套展平与点分列提取。"""
+    if flatten:
+        rec = _flatten_xml_element(el)
+    else:
+        children = [c for c in el if isinstance(c.tag, str)]
+        if not children:
+            return {"value": "" if _is_xsi_nil(el) else (el.text or "").strip()}
+        rec = {}
+        for child in children:
+            key = _local_tag(child.tag)
+            if not key:
+                continue
+            if _is_xsi_nil(child):
+                rec[key] = ""
+            elif not any(isinstance(sub.tag, str) for sub in child):
+                rec[key] = (child.text or "").strip()
+            else:
+                rec[key] = ET.tostring(child, encoding="unicode")
+    if columns:
+        for col_key in columns:
+            if "." in col_key and col_key not in rec:
+                found, val = _extract_xml_dotted(el, col_key)
+                if found:
+                    rec[col_key] = val
+    return rec
+
+
+_AUTO_LIST_CONTAINER_KEYS = frozenset({
+    "list", "total", "count", "totalCount", "page", "pageNo", "pageNum", "pageSize", "pages", "hasMore", "nextCursor",
+})
+
+
+def _auto_unwrap_xml_list(nodes: list[ET.Element], columns: dict[str, str] | None) -> list[ET.Element]:
+    """mode='auto' 时，若路径指向诸如 operation_out.content 的包裹节点且其下仅含 <list> 记录集（及分页元数据），自动解包 <list>。"""
+    if len(nodes) != 1:
+        return nodes
+    cols = columns or {}
+    if "list" in cols or any(k.startswith("list.") for k in cols):
+        return nodes
+    children = [c for c in nodes[0] if isinstance(c.tag, str)]
+    list_children = [c for c in children if _local_tag(c.tag) == "list"]
+    if not list_children or not all(_local_tag(c.tag) in _AUTO_LIST_CONTAINER_KEYS for c in children):
+        return nodes
+    if not any(any(isinstance(gc.tag, str) for gc in lc) or _is_empty_record_node(lc) for lc in list_children):
+        return nodes
+    return [c for c in list_children if not _is_empty_record_node(c)]
+
+
 def extract_records(contract: ApiContract, root: ET.Element) -> ApiCallResult:
-    """按契约 response 判断成功并抽取记录。"""
+    """按契约 response 判断成功并按 records.mode 抽取记录。"""
     resp = contract.response
-    root_name = _local_tag(root.tag)
-    rec_parts = [_local_tag(p) for p in resp.records.path.split(".") if p.strip()]
-    if len(rec_parts) >= 2 and root_name != rec_parts[0]:
-        if not any(_local_tag(c.tag) == rec_parts[0] for c in root):
-            return ApiCallResult(ok=False, error=f"响应根元素异常：期望 {rec_parts[0]}，实际为 {root_name or '未知'}")
-    records_nodes = [n for n in _find_all(root, resp.records.path) if not _is_empty_record_node(n)]
+    mode = resp.records.mode
+    if mode != "none":
+        root_name = _local_tag(root.tag)
+        rec_parts = [_local_tag(p) for p in (resp.records.path or "").split(".") if p.strip()]
+        if len(rec_parts) >= 2 and root_name != rec_parts[0]:
+            if not any(_local_tag(c.tag) == rec_parts[0] for c in root):
+                return ApiCallResult(ok=False, error=f"响应根元素异常：期望 {rec_parts[0]}，实际为 {root_name or '未知'}")
     for rule in resp.noData:
         val = text_at(root, rule.path)
         if val is None:
@@ -207,7 +333,20 @@ def extract_records(contract: ApiContract, root: ET.Element) -> ApiCallResult:
         elif code != resp.success.equals:
             desc = _first_text(root, ["resp_desc", "respDesc", "message", "msg", "faultstring"])
             return ApiCallResult(ok=False, error=f"业务返回码 {code}" + (f"：{desc}" if desc else ""))
-    records = [element_to_record(n) for n in records_nodes]
+    if mode == "none":
+        return ApiCallResult(ok=True, records=[], no_data=False)
+    records_nodes = [n for n in _find_all(root, resp.records.path) if not _is_empty_record_node(n)]
+    if mode == "scalar":
+        records = [_xml_scalar_to_record(n) for n in records_nodes]
+        return ApiCallResult(ok=True, records=records, no_data=not records)
+    if mode == "auto":
+        records_nodes = _auto_unwrap_xml_list(records_nodes, resp.records.columns)
+    elif mode == "object":
+        records_nodes = records_nodes[:1]
+    records = [
+        element_to_record(n, flatten=resp.records.flatten, columns=resp.records.columns)
+        for n in records_nodes
+    ]
     return ApiCallResult(ok=True, records=records, no_data=not records)
 
 
@@ -313,10 +452,59 @@ def _is_empty_json_record(item: Any) -> bool:
     return False
 
 
-def _json_item_to_record(item: Any) -> dict[str, str]:
-    """把单个 JSON 记录节点转换为 列名→文本 字典；标量节点映射为 {'value': ...}。"""
+def _flatten_json_dict(d: dict[str, Any]) -> dict[str, str]:
+    """显式栈递归展平嵌套 JSON 字典，生成 parent.child 点分列名并防范超深嵌套栈溢出。"""
+    rec: dict[str, str] = {}
+    stack: list[tuple[str, Any, int]] = [
+        (str(k), v, 1) for k, v in reversed(list(d.items())) if str(k)
+    ]
+    while stack:
+        key, val, depth = stack.pop()
+        if isinstance(val, dict):
+            if not val:
+                rec[key] = ""
+            elif depth >= _MAX_FLATTEN_DEPTH:
+                rec[key] = _json_cell_to_str(val)
+            else:
+                for sub_k, sub_v in reversed(list(val.items())):
+                    sk = str(sub_k)
+                    if sk:
+                        stack.append((f"{key}.{sk}", sub_v, depth + 1))
+        else:
+            rec[key] = _json_cell_to_str(val)
+    return rec
+
+
+def _extract_json_dotted(item: dict[str, Any], dotted_key: str) -> tuple[bool, str]:
+    """按显式声明的点分列名（如 userInfo.userName 或 detail.eff）从 JSON 字典提取嵌套值。"""
+    parts = [p.strip() for p in dotted_key.split(".") if p.strip()]
+    if len(parts) < 2:
+        return False, ""
+    cur: Any = item
+    for part in parts:
+        if isinstance(cur, dict) and part in cur:
+            cur = cur[part]
+        else:
+            return False, ""
+    return True, _json_cell_to_str(cur)
+
+
+def _json_item_to_record(
+    item: Any,
+    *,
+    flatten: bool = False,
+    columns: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """把单个 JSON 记录节点转换为 列名→文本 字典；支持嵌套展平与点分列提取。"""
     if isinstance(item, dict):
-        return {str(k): _json_cell_to_str(v) for k, v in item.items() if str(k)}
+        rec = _flatten_json_dict(item) if flatten else {str(k): _json_cell_to_str(v) for k, v in item.items() if str(k)}
+        if columns:
+            for col_key in columns:
+                if "." in col_key and col_key not in rec:
+                    found, val = _extract_json_dotted(item, col_key)
+                    if found:
+                        rec[col_key] = val
+        return rec
     return {"value": _json_cell_to_str(item)}
 
 
@@ -350,11 +538,27 @@ def _find_json_key_first(node: Any, key: str) -> str | None:
     return None
 
 
+def _auto_unwrap_json_list(items: list[Any], columns: dict[str, str] | None) -> list[Any]:
+    """mode='auto' 时，若路径指向诸如 operation_out.content 的包裹字典且仅含 list 数组（及分页元数据），自动解包 list。"""
+    if len(items) != 1 or not isinstance(items[0], dict):
+        return items
+    d = items[0]
+    cols = columns or {}
+    if "list" not in d or not isinstance(d["list"], list):
+        return items
+    if "list" in cols or any(k.startswith("list.") for k in cols):
+        return items
+    if not (set(d.keys()) <= _AUTO_LIST_CONTAINER_KEYS):
+        return items
+    return [item for item in d["list"] if not _is_empty_json_record(item)]
+
+
 def extract_json_records(contract: ApiContract, data: Any) -> ApiCallResult:
-    """按契约 response 判断 JSON 响应成功状态并抽取记录列表。"""
-    if not isinstance(data, (dict, list)):
-        return ApiCallResult(ok=False, error="JSON 响应顶层必须是对象或数组")
+    """按契约 response 判断 JSON 响应成功状态并按 records.mode 抽取记录列表。"""
     resp = contract.response
+    mode = resp.records.mode
+    if mode not in ("scalar", "none") and not isinstance(data, (dict, list)):
+        return ApiCallResult(ok=False, error="JSON 响应顶层必须是对象或数组")
     try:
         for rule in resp.noData:
             val = json_text_at(data, rule.path)
@@ -370,26 +574,40 @@ def extract_json_records(contract: ApiContract, data: Any) -> ApiCallResult:
             elif code != resp.success.equals:
                 desc = _first_json_text(data, ["resp_desc", "respDesc", "message", "msg", "error_msg", "faultstring"])
                 return ApiCallResult(ok=False, error=f"业务返回码 {code}" + (f"：{desc}" if desc else ""))
-        raw_items = _json_find_all(data, resp.records.path)
-        records = [_json_item_to_record(item) for item in raw_items if not _is_empty_json_record(item)]
+        if mode == "none":
+            return ApiCallResult(ok=True, records=[], no_data=False)
+        raw_items = [item for item in _json_find_all(data, resp.records.path) if not _is_empty_json_record(item)]
+        if mode == "scalar":
+            records = [{"value": _json_cell_to_str(item)} for item in raw_items]
+            return ApiCallResult(ok=True, records=records, no_data=not records)
+        if mode == "auto":
+            raw_items = _auto_unwrap_json_list(raw_items, resp.records.columns)
+        elif mode == "object":
+            raw_items = raw_items[:1]
+        records = [
+            _json_item_to_record(item, flatten=resp.records.flatten, columns=resp.records.columns)
+            for item in raw_items
+        ]
         return ApiCallResult(ok=True, records=records, no_data=not records)
     except (RecursionError, ValueError) as exc:
         return ApiCallResult(ok=False, error=f"JSON 响应抽取失败：{exc}")
 
 
-def _xml_node_to_json(el: ET.Element) -> Any:
+def _xml_node_to_json(el: ET.Element, _depth: int = 0) -> Any:
     """递归将 XML 元素无损转换为等价 JSON 值（同名兄弟节点自动聚合成数组，xsi:nil 转为 None）。"""
     if _is_xsi_nil(el):
         return None
     children = [c for c in el if isinstance(c.tag, str)]
     if not children:
         return (el.text or "").strip()
+    if _depth >= _MAX_FLATTEN_DEPTH:
+        return ET.tostring(el, encoding="unicode")
     obj: dict[str, Any] = {}
     for child in children:
         key = _local_tag(child.tag)
         if not key:
             continue
-        val = _xml_node_to_json(child)
+        val = _xml_node_to_json(child, _depth + 1)
         if key in obj:
             if isinstance(obj[key], list):
                 obj[key].append(val)

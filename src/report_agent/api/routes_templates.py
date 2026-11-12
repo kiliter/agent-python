@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
 from ..domain.jinja_env import BodySyntaxError, TrackedValue, body_variables, render_body
+from ..domain.resources import _RESERVED_FIELD_NAMES
 from ..domain.template import Template, TemplateDef
 from ..runtime.runner import RunRequest
 from ..store.cases import CaseStore
@@ -51,8 +52,14 @@ def _working(request: Request, tid: int) -> Template:
 
 
 def _item(request: Request, tid: int) -> dict[str, Any]:
+    _check_tid(tid)
     c = container(request)
-    tpl = _working(request, tid)
+    try:
+        tpl = c.service.template_working(tid)
+    except InvalidResource:
+        tpl = c.service.template_online(tid)
+    if tpl is None:
+        raise not_found(f"模板 {tid} 不存在")
     _, live = c.service.live()
     return template_item(tpl, c.service.state(tpl_ref(tid), live), c.service.overlay(), c.runs.stats_7d(),
                          c.cases.count(tid))
@@ -402,17 +409,111 @@ def render_preview(request: Request, tid: int, body: PreviewBody) -> dict[str, A
     return {"text": rendered, "usedFields": sorted(used), "undefinedFields": undefined, "error": None}
 
 
+_RENAME_TAG_TOKEN_RE = re.compile(
+    r"""('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")"""
+    r"""|(\|\s*[A-Za-z_][A-Za-z0-9_]*)"""
+    r"""|(\.\s*[^\W\d]\w*)"""
+    r"""|([^\W\d]\w*)""",
+    re.UNICODE,
+)
+
+
+def _rename_body_variable(text: str, old_name: str, new_name: str) -> str:
+    """在 Jinja2 输出块 {{ ... }} / {{- ... -}} 与控制块 {% ... %} / {%- ... -%} 中安全重命名变量，
+    跳过注释 {# ... #}、字符串字面量、过滤器名（| filter）及属性访问（.attr）。"""
+    if not text or not old_name or old_name == new_name:
+        return text
+    out: list[str] = []
+    n = len(text)
+    i = 0
+    while i < n:
+        brace = text.find("{", i)
+        if brace == -1 or brace + 1 >= n:
+            out.append(text[i:])
+            break
+        nxt = text[brace + 1]
+        if nxt not in ("#", "{", "%"):
+            out.append(text[i:brace + 1])
+            i = brace + 1
+            continue
+        out.append(text[i:brace])
+        if nxt == "#":
+            end_comment = text.find("#}", brace + 2)
+            if end_comment == -1:
+                out.append(text[brace:])
+                break
+            out.append(text[brace:end_comment + 2])
+            i = end_comment + 2
+            continue
+
+        is_block = nxt == "%"
+        close_tok = "%}" if is_block else "}}"
+        open_end = brace + 3 if (brace + 2 < n and text[brace + 2] in "+-") else brace + 2
+        quote_ch: str | None = None
+        close_pos = -1
+        j = open_end
+        while j < n:
+            ch = text[j]
+            if quote_ch is not None:
+                if ch == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                if ch == quote_ch:
+                    quote_ch = None
+                j += 1
+                continue
+            if ch in ("'", '"'):
+                quote_ch = ch
+                j += 1
+                continue
+            if text.startswith(close_tok, j):
+                close_pos = j
+                break
+            j += 1
+
+        if close_pos == -1:
+            out.append(text[brace:])
+            break
+
+        inner = text[open_end:close_pos]
+        first_ident = True
+
+        def _sub_tok(m: re.Match[str]) -> str:
+            nonlocal first_ident
+            ident = m.group(4)
+            if not ident:
+                return m.group(0)
+            if is_block and first_ident:
+                first_ident = False
+                return m.group(0)
+            return new_name if ident == old_name else m.group(0)
+
+        out.append(text[brace:open_end])
+        out.append(_RENAME_TAG_TOKEN_RE.sub(_sub_tok, inner))
+        out.append(close_tok)
+        i = close_pos + 2
+    return "".join(out)
+
+
 # ============================================================================ 字段 / 入参 / Skill 的细粒度修改
 @router.put("/templates/{tid}/fields/{name}")
 def save_field(request: Request, tid: int, name: str, body: dict[str, Any]) -> dict[str, Any]:
     """新增或修改一个字段。改名时传 originalName（不传时把路径中的 name 当作原名）。
-    改名会同步替换正文中的 {{旧名}}。"""
+    改名会同步替换正文中的 {{旧名}}、{{- 旧名 -}} 与 {% if 旧名 %} 等引用。"""
     new = dto_to_field(body)
     if not new["name"]:
         new["name"] = name.strip()
-    if not new["name"] or not new["name"].isidentifier() or _BAD_FIELD_NAME_RE.search(new["name"]):
-        raise bad_request(f"字段名「{new['name']}」不合法：只能使用中英文、数字和下划线，且不能以数字开头",
-                          "INVALID_FIELD_NAME")
+    if (
+        not new["name"]
+        or not new["name"].isidentifier()
+        or new["name"].startswith("_")
+        or new["name"] in _RESERVED_FIELD_NAMES
+        or _BAD_FIELD_NAME_RE.search(new["name"])
+    ):
+        raise bad_request(
+            f"字段名「{new['name']}」不合法：只能使用中英文、数字和下划线，不能以下划线或数字开头，且不能为模板保留字",
+            "INVALID_FIELD_NAME",
+        )
     original = str(body.get("originalName") or name).strip()
     revision = body.get("revision")
 
@@ -427,8 +528,7 @@ def save_field(request: Request, tid: int, name: str, body: dict[str, Any]) -> d
                 fields.append(new)
             else:
                 fields[orig_idx] = new
-            pattern = re.compile(rf"(\{{\{{\s*){re.escape(original)}(\s*(?:\|[^{{}}]*)?\}}\}})")
-            text = pattern.sub(rf"\g<1>{new['name']}\g<2>", text)
+            text = _rename_body_variable(text, original, new["name"])
         else:
             if orig_idx is None:
                 fields.append(new)

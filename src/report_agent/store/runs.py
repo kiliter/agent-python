@@ -251,26 +251,31 @@ class RunStore:
 
     # ------------------------------------------------------------------ 写入
     async def start(self) -> None:
-        self._queue = asyncio.Queue()
-        self._task = asyncio.create_task(self._writer(), name="run-store-writer")
+        if self._task is not None and not self._task.done():
+            return
+        queue: asyncio.Queue[tuple[dict[str, Any], dict[str, Any]] | None] = asyncio.Queue()
+        self._queue = queue
+        self._task = asyncio.create_task(self._writer(queue), name="run-store-writer")
 
     async def stop(self) -> None:
-        """停止前把队列中剩余的记录写完。"""
-        if self._queue is not None and self._task is not None:
-            await self._queue.put(None)
-            await self._task
+        """停止前把队列中剩余的记录写完，并重置状态使后续投递退回同步落盘。"""
+        queue, task = self._queue, self._task
+        self._queue = None
+        self._task = None
+        if queue is not None and task is not None:
+            await queue.put(None)
+            await task
 
     def submit(self, summary: dict[str, Any], detail: dict[str, Any]) -> None:
-        """投递一条运行记录。未启动后台写入（如单元测试、命令行）时同步写入。"""
+        """投递一条运行记录。未启动后台写入（如单元测试、命令行、已停止后）时同步写入。"""
         if self._queue is None:
             self._write(summary, detail)
         else:
             self._queue.put_nowait((summary, detail))
 
-    async def _writer(self) -> None:
-        assert self._queue is not None
+    async def _writer(self, queue: asyncio.Queue[tuple[dict[str, Any], dict[str, Any]] | None]) -> None:
         while True:
-            item = await self._queue.get()
+            item = await queue.get()
             if item is None:
                 break
             try:

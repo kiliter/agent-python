@@ -1,74 +1,66 @@
 <!--
-  5.9 引擎与系统设置视图（系统提示词 CodeMirror 6 编排工作区 + 大模型与 API 统一网关参数面板 + 历史版本基线）
-  所有数据来自后端 /api/v1/system-prompt 与 /api/v1/settings/model，没有写死的演示数据。
+  5.9 引擎与系统设置视图
+  - Tab 1（提示词与运行配置）：保留经典左编辑工作区 + 右运行参数与历史基线双栏布局；右侧支持统一网关与大模型参数热更新编辑（免重启立即生效）
+  - Tab 2（系统提示词版本回滚）：独立版本时间线 + 历史快照拉取 + 行级 Diff 对比（对比线上 / 对比工作区草稿）+ 恢复至草稿 / 直接回退上线双动作
+  - Tab 3（引擎与网关配置回滚）：c1..cN 配置快照历史、变更字段高亮对比、一键热回滚与环境变量重同步
   #Created By AiCoding(codex)
 -->
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { ElMessageBox } from 'element-plus'
-import { Maximize2, Minimize2 } from 'lucide-vue-next'
-import { usePlatformStore } from '@/stores/platform'
-import type { ModelInfo } from '@/types/platform'
+import { diffLines } from 'diff'
+import {
+  Maximize2,
+  Minimize2,
+  History,
+  SlidersHorizontal,
+  RotateCcw,
+  RefreshCw,
+  Copy,
+  Edit3,
+  Check,
+  X,
+} from 'lucide-vue-next'
+import { usePlatformStore, type SettingsSubView } from '@/stores/platform'
+import { platformApi, errorMessage } from '@/api/platformApi'
+import type {
+  ModelInfo,
+  Revision,
+  RuntimeConfig,
+  RuntimeConfigRevision,
+  RuntimeConfigUpdatePayload,
+} from '@/types/platform'
 import StatusTag from '@/components/StatusTag.vue'
 import CodeMirrorEditor from '@/components/CodeMirrorEditor.vue'
 
 const store = usePlatformStore()
 const sysPromptEditorRef = ref<InstanceType<typeof CodeMirrorEditor> | null>(null)
 
-// 直接通过地址进入本页时 navigate 可能未触发，这里主动加载一次
-onMounted(() => {
-  void store.loadSettings()
+// ==================== 1. 顶部子视图切换 ====================
+const activeSubView = computed<SettingsSubView>({
+  get: () => store.settingsSubView,
+  set: val => {
+    if (val !== 'workspace' && store.isFocusFullscreen) {
+      store.toggleFocusFullscreen(false)
+    }
+    store.settingsSubView = val
+  },
 })
 
-/** 编辑器内容与最近一次从后端加载/保存的内容不一致即视为有未保存修改 */
-const isDirty = computed(() =>
-  store.sysPromptState !== null && store.sysPromptText !== store.sysPromptState.sysPromptText,
+function switchSubView(view: SettingsSubView) {
+  activeSubView.value = view
+}
+
+// ==================== 2. 全局系统提示词编辑工作区 ====================
+const isDirty = computed(
+  () => store.sysPromptState !== null && store.sysPromptText !== store.sysPromptState.sysPromptText,
 )
-
-/** 是否存在已保存的草稿 */
 const hasDraft = computed(() => Boolean(store.sysPromptState?.draft))
-
-/** 线上版本内容（为空时禁用“恢复线上版本”） */
 const onlineText = computed(() => store.sysPromptState?.onlineText || '')
-
-/** 提示词行数统计 */
+const onlinePromptRev = computed(() => store.sysPromptState?.onlineRev || '')
 const promptLineCount = computed(() =>
   store.sysPromptText ? store.sysPromptText.split(/\r?\n/).length : 0,
 )
-
-function formatModelField(info: ModelInfo, key: keyof ModelInfo, suffix = ''): string {
-  const v = info[key]
-  if (v === null || v === undefined || v === '') return '—'
-  return `${v}${suffix}`
-}
-
-/** 大模型推理与配额参数 */
-const engineSpecRows = computed(() => {
-  const info = store.modelInfo
-  if (!info) return []
-  return [
-    { label: '推理模型名称', value: formatModelField(info, 'model'), full: true },
-    { label: '推理服务地址', value: formatModelField(info, 'baseUrl'), full: true },
-    { label: '采样温度 (Temp)', value: formatModelField(info, 'temperature') },
-    { label: '结构化输出模式', value: formatModelField(info, 'outputMode') },
-    { label: '模型请求超时', value: formatModelField(info, 'timeoutS', ' 秒') },
-    { label: '单次核查总超时', value: formatModelField(info, 'runTimeoutS', ' 秒') },
-    { label: '单次请求轮数上限', value: formatModelField(info, 'requestLimit', ' 次') },
-    { label: '工具调用次数上限', value: formatModelField(info, 'toolCallsLimit', ' 次') },
-    { label: '校验退回重试上限', value: formatModelField(info, 'outputRetries', ' 次') },
-    { label: '最大并发运行配额', value: formatModelField(info, 'maxConcurrentRuns', ' 路') },
-  ]
-})
-
-/** API 统一网关参数 */
-const gatewaySpecRows = computed(() => {
-  const info = store.modelInfo
-  if (!info) return []
-  return [
-    { label: '统一网关接入模式', value: formatModelField(info, 'gatewayMode') },
-    { label: '统一 XML 报文风格', value: formatModelField(info, 'gatewayXmlStyle') },
-  ]
-})
 
 function handleUndo() {
   sysPromptEditorRef.value?.undoEdit()
@@ -78,14 +70,13 @@ function handleRedo() {
   sysPromptEditorRef.value?.redoEdit()
 }
 
-/** 把编辑器内容恢复为当前线上版本（仅修改本地编辑内容，需保存草稿或发布后生效） */
 function handleResetOnline() {
   if (!onlineText.value) return
   ElMessageBox.confirm(
     '确认用当前线上系统提示词替换编辑器中的内容吗？替换后需保存草稿或发布才会生效。',
-    '确认恢复线上版本',
+    '确认载入线上版本',
     {
-      confirmButtonText: '确认恢复',
+      confirmButtonText: '确认载入',
       cancelButtonText: '取消',
       type: 'warning',
     },
@@ -101,7 +92,6 @@ async function handleSaveDraft() {
   await store.saveSysPromptDraft()
 }
 
-/** 发布系统提示词：二次确认并可填写发布说明 */
 function handlePublish() {
   ElMessageBox.prompt(
     '发布系统提示词将影响平台上全部模板的智能体核查与取值行为，发布后线上立即生效。可填写发布说明（选填）：',
@@ -119,230 +109,1925 @@ function handlePublish() {
     .catch(() => {})
 }
 
-/** 放弃已保存的草稿，恢复为线上内容 */
 function handleDiscardDraft() {
   if (!hasDraft.value) return
-  ElMessageBox.confirm('确认放弃系统提示词草稿吗？放弃后将恢复为线上内容，此操作不可撤销。', '确认放弃草稿', {
-    confirmButtonText: '确认放弃',
-    cancelButtonText: '取消',
-    type: 'warning',
-  })
+  ElMessageBox.confirm(
+    '确认放弃系统提示词草稿吗？放弃后将恢复为线上生效内容，此操作不可撤销。',
+    '确认放弃草稿',
+    {
+      confirmButtonText: '确认放弃',
+      cancelButtonText: '取消',
+      type: 'warning',
+    },
+  )
     .then(async () => {
       await store.discardSysPromptDraft()
     })
     .catch(() => {})
 }
 
-/** 把某个历史版本恢复到草稿 */
-function handleRollback(rev: string) {
+// ==================== 3. 系统提示词专属版本回滚与差异对比（Requirement #3） ====================
+const selectedPromptRev = ref<string>('')
+const promptCompareBase = ref<'online' | 'working'>('online')
+const promptInspectMode = ref<'diff' | 'preview'>('diff')
+const promptVersionCache = reactive<Record<string, string>>({})
+const promptVersionLoading = ref(false)
+const promptVersionError = ref('')
+let promptFetchSeq = 0
+
+const selectedPromptRevMeta = computed<Revision | null>(() => {
+  if (!selectedPromptRev.value) return null
+  return store.sysPromptRevisions.find(r => r.rev === selectedPromptRev.value) || null
+})
+
+function ensureDefaultPromptRev() {
+  const list = store.sysPromptRevisions
+  if (!list.length) {
+    selectedPromptRev.value = ''
+    return
+  }
+  if (store.settingsTargetPromptRev && list.some(r => r.rev === store.settingsTargetPromptRev)) {
+    selectedPromptRev.value = store.settingsTargetPromptRev
+    store.settingsTargetPromptRev = ''
+    return
+  }
+  if (!selectedPromptRev.value || !list.some(r => r.rev === selectedPromptRev.value)) {
+    const firstNonOnline = list.find(r => !r.online)
+    selectedPromptRev.value = (firstNonOnline || list[0]).rev
+  }
+}
+
+async function fetchPromptRevisionText(rev: string, force = false) {
+  if (!rev) return
+  if (!force && rev in promptVersionCache) {
+    promptVersionError.value = ''
+    return
+  }
+  const reqSeq = ++promptFetchSeq
+  promptVersionLoading.value = true
+  promptVersionError.value = ''
+  try {
+    const res = await platformApi.fetchSystemPrompt(rev)
+    if (reqSeq !== promptFetchSeq) return
+    const text = res.versionText ?? res.sysPromptText ?? ''
+    promptVersionCache[rev] = text
+  } catch (err) {
+    if (reqSeq !== promptFetchSeq) return
+    promptVersionError.value = errorMessage(err)
+  } finally {
+    if (reqSeq === promptFetchSeq) {
+      promptVersionLoading.value = false
+    }
+  }
+}
+
+function openPromptRollbackView(rev = '') {
+  if (rev) {
+    selectedPromptRev.value = rev
+  }
+  activeSubView.value = 'prompt-rollback'
+  ensureDefaultPromptRev()
+  if (selectedPromptRev.value) {
+    void fetchPromptRevisionText(selectedPromptRev.value)
+  }
+}
+
+watch(
+  () => [store.sysPromptRevisions, store.settingsTargetPromptRev] as const,
+  () => {
+    ensureDefaultPromptRev()
+    if (activeSubView.value === 'prompt-rollback' && selectedPromptRev.value) {
+      void fetchPromptRevisionText(selectedPromptRev.value)
+    }
+  },
+  { deep: true },
+)
+
+watch(
+  () => [activeSubView.value, selectedPromptRev.value] as const,
+  ([sub, rev]) => {
+    if (sub === 'prompt-rollback' && rev) {
+      void fetchPromptRevisionText(rev)
+    }
+  },
+)
+
+watch(
+  () => store.onlineBaselineSeq,
+  () => {
+    if (activeSubView.value === 'prompt-rollback' && selectedPromptRev.value) {
+      void fetchPromptRevisionText(selectedPromptRev.value, true)
+    }
+  },
+)
+
+const selectedPromptRevText = computed(() => {
+  const rev = selectedPromptRev.value
+  if (!rev) return ''
+  return promptVersionCache[rev] ?? ''
+})
+
+const promptBaselineCompareText = computed(() =>
+  promptCompareBase.value === 'online'
+    ? store.sysPromptState?.onlineText || ''
+    : store.sysPromptText || '',
+)
+
+interface PromptDiffRow {
+  kind: 'add' | 'del' | 'ctx'
+  baseNo: number | null
+  targetNo: number | null
+  text: string
+}
+
+const promptDiffRows = computed<PromptDiffRow[]>(() => {
+  if (!selectedPromptRev.value || promptVersionLoading.value || promptVersionError.value) return []
+  const baseStr = promptBaselineCompareText.value
+  const targetStr = selectedPromptRevText.value
+  const parts = diffLines(baseStr, targetStr)
+  const rows: PromptDiffRow[] = []
+  let bNo = 1
+  let tNo = 1
+  for (const part of parts) {
+    const lines = part.value.split('\n')
+    if (lines[lines.length - 1] === '') lines.pop()
+    for (const line of lines) {
+      if (part.added) {
+        rows.push({ kind: 'add', baseNo: null, targetNo: tNo++, text: line })
+      } else if (part.removed) {
+        rows.push({ kind: 'del', baseNo: bNo++, targetNo: null, text: line })
+      } else {
+        rows.push({ kind: 'ctx', baseNo: bNo++, targetNo: tNo++, text: line })
+      }
+    }
+  }
+  return rows
+})
+
+const promptDiffStats = computed(() => {
+  let added = 0
+  let removed = 0
+  for (const r of promptDiffRows.value) {
+    if (r.kind === 'add') added += 1
+    else if (r.kind === 'del') removed += 1
+  }
+  return { added, removed, identical: added === 0 && removed === 0 }
+})
+
+function handleRollbackToDraft(rev: string) {
+  if (!rev) return
   ElMessageBox.confirm(
-    `确认把系统提示词历史版本 ${rev} 的内容恢复到草稿吗？恢复后核对无误再点击发布生效。`,
-    '确认恢复到草稿',
+    `确认将系统提示词历史版本 ${rev} 恢复至当前工作区草稿吗？${isDirty.value ? '当前编辑器未保存内容将被覆盖。' : '恢复后可在编辑器内核对并选择何时发布。'}`,
+    `恢复至草稿 · ${rev}`,
     {
-      confirmButtonText: '确认恢复',
+      confirmButtonText: '恢复至草稿',
       cancelButtonText: '取消',
       type: 'warning',
     },
   )
     .then(async () => {
-      await store.rollbackSysPrompt(rev)
+      const ok = await store.rollbackSysPrompt(rev, 'draft_only')
+      if (ok) {
+        activeSubView.value = 'workspace'
+      }
     })
     .catch(() => {})
 }
+
+function handleDirectRollbackPublish(rev: string) {
+  if (!rev) return
+  ElMessageBox.prompt(
+    `确认将系统提示词直接回退至 ${rev} 并立即生成新生产基线上线生效吗？下一个智能体请求将立即采用该版本提示词。请填写回退原因（必填）：`,
+    `直接回退上线 · ${rev}`,
+    {
+      confirmButtonText: '确认回退并上线',
+      cancelButtonText: '取消',
+      type: 'warning',
+      inputPlaceholder: '例如：新提示词导致证据摘录过严，紧急回退稳定版本',
+      inputValidator: val => (val && val.trim().length > 0 ? true : '请填写回退上线原因'),
+    },
+  )
+    .then(async ({ value }) => {
+      await store.rollbackSysPrompt(rev, 'publish_now', value.trim())
+    })
+    .catch(() => {})
+}
+
+// ==================== 4. 统一网关与大模型运行配置热更新（Requirement #5） ====================
+const isEditingRuntime = ref(false)
+const savingRuntime = ref(false)
+const syncingEnv = ref(false)
+
+interface RuntimeFormModel {
+  gatewayMode: string
+  gatewayXmlStyle: string
+  gatewayUrl: string
+  gatewayConnectTimeoutS: number
+  gatewayAppIdInput: string
+  clearGatewayAppId: boolean
+  gatewayAccessTokenInput: string
+  clearGatewayAccessToken: boolean
+  llmModel: string
+  llmBaseUrl: string
+  llmApiKeyInput: string
+  clearLlmApiKey: boolean
+  llmTemperature: number
+  llmMaxTokensStr: string
+  llmTimeoutS: number
+  llmHttpRetries: number
+  llmParallelToolCalls: 'null' | 'true' | 'false'
+  llmStrictTools: 'null' | 'true' | 'false'
+  llmToolChoiceRequired: 'null' | 'true' | 'false'
+  agentOutputMode: string
+  agentNativeStrict: boolean
+  agentOutputRetries: number
+  agentToolRetries: number
+  agentRequestLimit: number
+  agentToolCallsLimit: number
+  agentRunTimeoutS: number
+  agentMaxConcurrentRuns: number
+  agentPreviewRows: number
+  note: string
+}
+
+const runtimeForm = reactive<RuntimeFormModel>({
+  gatewayMode: 'mock',
+  gatewayXmlStyle: 'java',
+  gatewayUrl: '',
+  gatewayConnectTimeoutS: 5,
+  gatewayAppIdInput: '',
+  clearGatewayAppId: false,
+  gatewayAccessTokenInput: '',
+  clearGatewayAccessToken: false,
+  llmModel: '',
+  llmBaseUrl: '',
+  llmApiKeyInput: '',
+  clearLlmApiKey: false,
+  llmTemperature: 0.1,
+  llmMaxTokensStr: '',
+  llmTimeoutS: 60,
+  llmHttpRetries: 2,
+  llmParallelToolCalls: 'null',
+  llmStrictTools: 'null',
+  llmToolChoiceRequired: 'null',
+  agentOutputMode: 'tool',
+  agentNativeStrict: true,
+  agentOutputRetries: 2,
+  agentToolRetries: 2,
+  agentRequestLimit: 12,
+  agentToolCallsLimit: 16,
+  agentRunTimeoutS: 120,
+  agentMaxConcurrentRuns: 4,
+  agentPreviewRows: 50,
+  note: '',
+})
+
+function triFromBool(v: boolean | null | undefined): 'null' | 'true' | 'false' {
+  if (v === true) return 'true'
+  if (v === false) return 'false'
+  return 'null'
+}
+
+function boolFromTri(v: 'null' | 'true' | 'false'): boolean | null {
+  if (v === 'true') return true
+  if (v === 'false') return false
+  return null
+}
+
+const effectiveRuntimeConfig = computed<RuntimeConfig | null>(() => {
+  if (store.runtimeState?.config) return store.runtimeState.config
+  const info: ModelInfo | null = store.modelInfo
+  if (!info) return null
+  return {
+    llmBaseUrl: info.baseUrl || '',
+    hasLlmApiKey: false,
+    llmApiKeyMasked: '',
+    llmModel: info.model || '',
+    llmTemperature: info.temperature ?? 0.1,
+    llmMaxTokens: info.maxTokens ?? null,
+    llmTimeoutS: info.timeoutS ?? 60,
+    llmHttpRetries: info.httpRetries ?? 2,
+    llmParallelToolCalls: null,
+    llmStrictTools: null,
+    llmToolChoiceRequired: null,
+    agentOutputMode: info.outputMode || 'tool',
+    agentNativeStrict: true,
+    agentOutputRetries: info.outputRetries ?? 2,
+    agentToolRetries: info.toolRetries ?? 2,
+    agentRequestLimit: info.requestLimit ?? 12,
+    agentToolCallsLimit: info.toolCallsLimit ?? 16,
+    agentRunTimeoutS: info.runTimeoutS ?? 120,
+    agentMaxConcurrentRuns: info.maxConcurrentRuns ?? 4,
+    agentPreviewRows: 50,
+    gatewayMode: info.gatewayMode || 'mock',
+    gatewayUrl: info.gatewayUrl || '',
+    hasGatewayAppId: false,
+    gatewayAppIdMasked: '',
+    hasGatewayAccessToken: false,
+    gatewayAccessTokenMasked: '',
+    gatewayXmlStyle: info.gatewayXmlStyle || 'java',
+    gatewayConnectTimeoutS: info.gatewayConnectTimeoutS ?? 5,
+  }
+})
+
+const runtimeActiveRev = computed(
+  () => store.runtimeState?.activeRev || store.modelInfo?.activeRev || 'c1',
+)
+
+function populateRuntimeForm(cfg: RuntimeConfig | null, note = '') {
+  if (!cfg) return
+  runtimeForm.gatewayMode = cfg.gatewayMode || 'mock'
+  runtimeForm.gatewayXmlStyle = cfg.gatewayXmlStyle || 'java'
+  runtimeForm.gatewayUrl = cfg.gatewayUrl || ''
+  runtimeForm.gatewayConnectTimeoutS = cfg.gatewayConnectTimeoutS ?? 5
+  runtimeForm.gatewayAppIdInput = ''
+  runtimeForm.clearGatewayAppId = false
+  runtimeForm.gatewayAccessTokenInput = ''
+  runtimeForm.clearGatewayAccessToken = false
+  runtimeForm.llmModel = cfg.llmModel || ''
+  runtimeForm.llmBaseUrl = cfg.llmBaseUrl || ''
+  runtimeForm.llmApiKeyInput = ''
+  runtimeForm.clearLlmApiKey = false
+  runtimeForm.llmTemperature = cfg.llmTemperature ?? 0.1
+  runtimeForm.llmMaxTokensStr =
+    cfg.llmMaxTokens !== null && cfg.llmMaxTokens !== undefined ? String(cfg.llmMaxTokens) : ''
+  runtimeForm.llmTimeoutS = cfg.llmTimeoutS ?? 60
+  runtimeForm.llmHttpRetries = cfg.llmHttpRetries ?? 2
+  runtimeForm.llmParallelToolCalls = triFromBool(cfg.llmParallelToolCalls)
+  runtimeForm.llmStrictTools = triFromBool(cfg.llmStrictTools)
+  runtimeForm.llmToolChoiceRequired = triFromBool(cfg.llmToolChoiceRequired)
+  runtimeForm.agentOutputMode = cfg.agentOutputMode || 'tool'
+  runtimeForm.agentNativeStrict = Boolean(cfg.agentNativeStrict)
+  runtimeForm.agentOutputRetries = cfg.agentOutputRetries ?? 2
+  runtimeForm.agentToolRetries = cfg.agentToolRetries ?? 2
+  runtimeForm.agentRequestLimit = cfg.agentRequestLimit ?? 12
+  runtimeForm.agentToolCallsLimit = cfg.agentToolCallsLimit ?? 16
+  runtimeForm.agentRunTimeoutS = cfg.agentRunTimeoutS ?? 120
+  runtimeForm.agentMaxConcurrentRuns = cfg.agentMaxConcurrentRuns ?? 4
+  runtimeForm.agentPreviewRows = cfg.agentPreviewRows ?? 50
+  runtimeForm.note = note
+}
+
+watch(
+  effectiveRuntimeConfig,
+  cfg => {
+    if (!isEditingRuntime.value && cfg) {
+      populateRuntimeForm(cfg)
+    }
+  },
+  { immediate: true },
+)
+
+function startEditRuntime() {
+  populateRuntimeForm(effectiveRuntimeConfig.value)
+  isEditingRuntime.value = true
+}
+
+function cancelEditRuntime() {
+  populateRuntimeForm(effectiveRuntimeConfig.value)
+  isEditingRuntime.value = false
+}
+
+watch(isEditingRuntime, editing => {
+  store.runtimeFormDirty = editing
+})
+
+watch(
+  () => store.runtimeFormDirty,
+  dirty => {
+    if (!dirty && isEditingRuntime.value) {
+      cancelEditRuntime()
+    }
+  },
+)
+
+async function handleSaveRuntimeConfig() {
+  if (savingRuntime.value) return
+  if (runtimeForm.gatewayMode === 'live') {
+    const url = runtimeForm.gatewayUrl.trim()
+    if (!url || !/^https?:\/\//i.test(url)) {
+      store.showToast('统一网关为 live 真实调用模式时，必须填写 http:// 或 https:// 开头的网关地址', 'warning')
+      return
+    }
+  }
+  if (!runtimeForm.llmModel.trim()) {
+    store.showToast('请填写推理模型名称（llmModel）', 'warning')
+    return
+  }
+  if (!runtimeForm.llmBaseUrl.trim() || !/^https?:\/\//i.test(runtimeForm.llmBaseUrl.trim())) {
+    store.showToast('推理服务地址（llmBaseUrl）必须以 http:// 或 https:// 开头', 'warning')
+    return
+  }
+
+  const maxTokensTrim = String(runtimeForm.llmMaxTokensStr ?? '').trim()
+  let parsedMaxTokens: number | null = null
+  if (maxTokensTrim !== '') {
+    const n = Number(maxTokensTrim)
+    if (!Number.isInteger(n) || n < 1) {
+      store.showToast('最大输出 Token（llmMaxTokens）必须为正整数，或留空表示不限制', 'warning')
+      return
+    }
+    parsedMaxTokens = n
+  }
+
+  function parseRequiredNum(
+    raw: unknown,
+    label: string,
+    opts: { int?: boolean; min?: number; max?: number; gtZero?: boolean } = {},
+  ): number | null {
+    if (raw === '' || raw === null || raw === undefined || (typeof raw === 'string' && raw.trim() === '')) {
+      store.showToast(`请填写有效的${label}`, 'warning')
+      return null
+    }
+    const n = Number(raw)
+    if (!Number.isFinite(n)) {
+      store.showToast(`${label}必须是有效数值`, 'warning')
+      return null
+    }
+    if (opts.int && !Number.isInteger(n)) {
+      store.showToast(`${label}必须为整数`, 'warning')
+      return null
+    }
+    if (opts.gtZero && n <= 0) {
+      store.showToast(`${label}必须大于 0`, 'warning')
+      return null
+    }
+    if (opts.min !== undefined && n < opts.min) {
+      const rangeMsg = opts.max !== undefined ? `${opts.min} ~ ${opts.max}` : `≥ ${opts.min}`
+      store.showToast(`${label}必须在 ${rangeMsg} 范围内`, 'warning')
+      return null
+    }
+    if (opts.max !== undefined && n > opts.max) {
+      const rangeMsg = opts.min !== undefined ? `${opts.min} ~ ${opts.max}` : `≤ ${opts.max}`
+      store.showToast(`${label}必须在 ${rangeMsg} 范围内`, 'warning')
+      return null
+    }
+    return n
+  }
+
+  const gatewayConnectTimeoutS = parseRequiredNum(runtimeForm.gatewayConnectTimeoutS, '网关连接超时 (gatewayConnectTimeoutS)', { gtZero: true })
+  if (gatewayConnectTimeoutS === null) return
+  const llmTemperature = parseRequiredNum(runtimeForm.llmTemperature, '采样温度 (llmTemperature)', { min: 0, max: 2 })
+  if (llmTemperature === null) return
+  const llmTimeoutS = parseRequiredNum(runtimeForm.llmTimeoutS, '模型请求超时 (llmTimeoutS)', { gtZero: true })
+  if (llmTimeoutS === null) return
+  const llmHttpRetries = parseRequiredNum(runtimeForm.llmHttpRetries, '模型 HTTP 重试次数 (llmHttpRetries)', { int: true, min: 0, max: 10 })
+  if (llmHttpRetries === null) return
+  const agentOutputRetries = parseRequiredNum(runtimeForm.agentOutputRetries, '校验退回重试上限 (agentOutputRetries)', { int: true, min: 0, max: 10 })
+  if (agentOutputRetries === null) return
+  const agentToolRetries = parseRequiredNum(runtimeForm.agentToolRetries, '工具报错重试上限 (agentToolRetries)', { int: true, min: 0, max: 10 })
+  if (agentToolRetries === null) return
+  const agentRequestLimit = parseRequiredNum(runtimeForm.agentRequestLimit, '单次请求轮数上限 (agentRequestLimit)', { int: true, min: 1, max: 200 })
+  if (agentRequestLimit === null) return
+  const agentToolCallsLimit = parseRequiredNum(runtimeForm.agentToolCallsLimit, '工具调用次数上限 (agentToolCallsLimit)', { int: true, min: 1, max: 500 })
+  if (agentToolCallsLimit === null) return
+  const agentRunTimeoutS = parseRequiredNum(runtimeForm.agentRunTimeoutS, '单次核查总超时 (agentRunTimeoutS)', { gtZero: true })
+  if (agentRunTimeoutS === null) return
+  const agentMaxConcurrentRuns = parseRequiredNum(runtimeForm.agentMaxConcurrentRuns, '最大并发运行路数 (agentMaxConcurrentRuns)', { int: true, min: 1, max: 128 })
+  if (agentMaxConcurrentRuns === null) return
+  const agentPreviewRows = parseRequiredNum(runtimeForm.agentPreviewRows, '工具预览行数上限 (agentPreviewRows)', { int: true, min: 1, max: 200 })
+  if (agentPreviewRows === null) return
+
+  const payload: RuntimeConfigUpdatePayload = {
+    gatewayMode: runtimeForm.gatewayMode,
+    gatewayXmlStyle: runtimeForm.gatewayXmlStyle,
+    gatewayUrl: runtimeForm.gatewayUrl.trim(),
+    gatewayConnectTimeoutS,
+    llmModel: runtimeForm.llmModel.trim(),
+    llmBaseUrl: runtimeForm.llmBaseUrl.trim(),
+    llmTemperature,
+    llmMaxTokens: parsedMaxTokens,
+    llmTimeoutS,
+    llmHttpRetries,
+    llmParallelToolCalls: boolFromTri(runtimeForm.llmParallelToolCalls),
+    llmStrictTools: boolFromTri(runtimeForm.llmStrictTools),
+    llmToolChoiceRequired: boolFromTri(runtimeForm.llmToolChoiceRequired),
+    agentOutputMode: runtimeForm.agentOutputMode,
+    agentNativeStrict: Boolean(runtimeForm.agentNativeStrict),
+    agentOutputRetries,
+    agentToolRetries,
+    agentRequestLimit,
+    agentToolCallsLimit,
+    agentRunTimeoutS,
+    agentMaxConcurrentRuns,
+    agentPreviewRows,
+    note: runtimeForm.note.trim(),
+  }
+
+  if (runtimeForm.clearLlmApiKey) {
+    payload.clearLlmApiKey = true
+  } else if (runtimeForm.llmApiKeyInput.trim()) {
+    payload.llmApiKey = runtimeForm.llmApiKeyInput.trim()
+  }
+
+  if (runtimeForm.clearGatewayAppId) {
+    payload.clearGatewayAppId = true
+  } else if (runtimeForm.gatewayAppIdInput.trim()) {
+    payload.gatewayAppId = runtimeForm.gatewayAppIdInput.trim()
+  }
+
+  if (runtimeForm.clearGatewayAccessToken) {
+    payload.clearGatewayAccessToken = true
+  } else if (runtimeForm.gatewayAccessTokenInput.trim()) {
+    payload.gatewayAccessToken = runtimeForm.gatewayAccessTokenInput.trim()
+  }
+
+  savingRuntime.value = true
+  try {
+    const saved = await store.saveRuntimeConfig(payload)
+    if (saved) {
+      populateRuntimeForm(saved.config)
+      isEditingRuntime.value = false
+    }
+  } finally {
+    savingRuntime.value = false
+  }
+}
+
+function handleSyncFromEnv() {
+  ElMessageBox.prompt(
+    '将重新读取服务端启动环境变量中的默认网关与大模型参数，生成新配置版本并立即热重载生效。可填写备注（选填）：',
+    '从环境变量同步默认参数',
+    {
+      confirmButtonText: '立即同步并热重载',
+      cancelButtonText: '取消',
+      type: 'warning',
+      inputPlaceholder: '同步说明（选填）',
+    },
+  )
+    .then(async ({ value }) => {
+      syncingEnv.value = true
+      try {
+        const synced = await store.syncRuntimeConfigEnv((value || '').trim())
+        if (synced) {
+          populateRuntimeForm(synced.config)
+          isEditingRuntime.value = false
+        }
+      } finally {
+        syncingEnv.value = false
+      }
+    })
+    .catch(() => {})
+}
+
+const gatewaySpecRows = computed(() => {
+  const cfg = effectiveRuntimeConfig.value
+  if (!cfg) return []
+  return [
+    { label: '统一网关接入模式', value: cfg.gatewayMode === 'live' ? 'live（真实网关）' : 'mock（本地样例）' },
+    { label: '统一 XML 报文风格', value: cfg.gatewayXmlStyle || '—' },
+    { label: '统一网关服务地址', value: cfg.gatewayUrl || '（mock 模式免配）', full: true },
+    { label: '网关连接超时', value: `${cfg.gatewayConnectTimeoutS ?? '—'} 秒` },
+    {
+      label: '网关鉴权凭据',
+      value:
+        cfg.hasGatewayAppId || cfg.hasGatewayAccessToken
+          ? `AppId ${cfg.gatewayAppIdMasked || '未配'} · Token ${cfg.hasGatewayAccessToken ? cfg.gatewayAccessTokenMasked || '已配置' : '未配'}`
+          : '未配置密钥',
+    },
+  ]
+})
+
+const engineSpecRows = computed(() => {
+  const cfg = effectiveRuntimeConfig.value
+  if (!cfg) return []
+  return [
+    { label: '推理模型名称', value: cfg.llmModel || '—', full: true },
+    { label: '推理服务地址', value: cfg.llmBaseUrl || '—', full: true },
+    {
+      label: '模型 API 密钥',
+      value: cfg.hasLlmApiKey ? `已配置 (${cfg.llmApiKeyMasked})` : '未配置',
+    },
+    { label: '采样温度 / 最大 Token', value: `${cfg.llmTemperature} / ${cfg.llmMaxTokens ?? '不限'}` },
+    { label: '结构化输出模式', value: `${cfg.agentOutputMode}${cfg.agentNativeStrict ? ' (strict)' : ''}` },
+    { label: '模型超时 / HTTP 重试', value: `${cfg.llmTimeoutS}s / ${cfg.llmHttpRetries} 次` },
+    { label: '单次核查总超时', value: `${cfg.agentRunTimeoutS} 秒` },
+    { label: '最大并发运行配额', value: `${cfg.agentMaxConcurrentRuns} 路` },
+    { label: '请求轮数 / 工具上限', value: `${cfg.agentRequestLimit} 轮 / ${cfg.agentToolCallsLimit} 次` },
+    { label: '输出重试 / 工具重试', value: `${cfg.agentOutputRetries} 次 / ${cfg.agentToolRetries} 次` },
+  ]
+})
+
+// ==================== 5. 运行配置快照回滚与字段级对比（Tab 3） ====================
+const selectedRuntimeRevKey = ref<string>('')
+const runtimeShowDiffOnly = ref(false)
+
+const RUNTIME_KEY_LABELS: Record<string, string> = {
+  gatewayMode: '统一网关模式',
+  gatewayUrl: '统一网关地址',
+  gatewayXmlStyle: 'XML 报文风格',
+  gatewayConnectTimeoutS: '网关连接超时 (秒)',
+  gatewayAppId: '网关 AppId',
+  hasGatewayAppId: '网关 AppId 状态',
+  gatewayAppIdMasked: '网关 AppId（脱敏）',
+  gatewayAccessToken: '网关 AccessToken',
+  hasGatewayAccessToken: '网关 Token 状态',
+  gatewayAccessTokenMasked: '网关 Token（脱敏）',
+  llmModel: '推理模型名称',
+  llmBaseUrl: '推理服务地址',
+  llmApiKey: '模型 API Key',
+  hasLlmApiKey: '模型密钥状态',
+  llmApiKeyMasked: '模型密钥（脱敏）',
+  llmTemperature: '采样温度',
+  llmMaxTokens: '最大输出 Token',
+  llmTimeoutS: '模型请求超时 (秒)',
+  llmHttpRetries: '模型 HTTP 重试次数',
+  llmParallelToolCalls: '并行工具调用',
+  llmStrictTools: '工具 Schema 严格模式',
+  llmToolChoiceRequired: '强制工具调用选择',
+  agentOutputMode: '结构化输出模式',
+  agentNativeStrict: '原生输出严格校验',
+  agentOutputRetries: '输出退回重试上限',
+  agentToolRetries: '工具调用重试上限',
+  agentRequestLimit: '单次请求轮数上限',
+  agentToolCallsLimit: '工具调用总次数上限',
+  agentRunTimeoutS: '单次核查总超时 (秒)',
+  agentMaxConcurrentRuns: '最大并发运行配额',
+  agentPreviewRows: '工具结果预览行数',
+}
+
+function formatKeyLabel(k: string): string {
+  return RUNTIME_KEY_LABELS[k] || k
+}
+
+function ensureDefaultRuntimeRev() {
+  const list = store.runtimeRevisions
+  if (!list.length) {
+    selectedRuntimeRevKey.value = ''
+    return
+  }
+  if (!selectedRuntimeRevKey.value || !list.some(r => r.rev === selectedRuntimeRevKey.value)) {
+    const nonOnline = list.find(r => !r.online)
+    selectedRuntimeRevKey.value = (nonOnline || list[0]).rev
+  }
+}
+
+watch(
+  () => store.runtimeRevisions,
+  () => ensureDefaultRuntimeRev(),
+  { deep: true, immediate: true },
+)
+
+const selectedRuntimeRev = computed<RuntimeConfigRevision | null>(() => {
+  if (!selectedRuntimeRevKey.value) return null
+  return store.runtimeRevisions.find(r => r.rev === selectedRuntimeRevKey.value) || null
+})
+
+const COMPARE_CONFIG_KEYS: Array<keyof RuntimeConfig> = [
+  'gatewayMode',
+  'gatewayUrl',
+  'gatewayXmlStyle',
+  'gatewayConnectTimeoutS',
+  'gatewayAppIdMasked',
+  'gatewayAccessTokenMasked',
+  'llmModel',
+  'llmBaseUrl',
+  'llmApiKeyMasked',
+  'llmTemperature',
+  'llmMaxTokens',
+  'agentOutputMode',
+  'agentNativeStrict',
+  'llmTimeoutS',
+  'llmHttpRetries',
+  'agentRunTimeoutS',
+  'agentMaxConcurrentRuns',
+  'agentRequestLimit',
+  'agentToolCallsLimit',
+  'agentOutputRetries',
+  'agentToolRetries',
+  'agentPreviewRows',
+  'llmParallelToolCalls',
+  'llmStrictTools',
+  'llmToolChoiceRequired',
+]
+
+function formatCfgValue(cfg: RuntimeConfig, key: keyof RuntimeConfig): string {
+  if (key === 'llmApiKeyMasked') {
+    return cfg.hasLlmApiKey ? cfg.llmApiKeyMasked || '已配置' : '未配置'
+  }
+  if (key === 'gatewayAppIdMasked') {
+    return cfg.hasGatewayAppId ? cfg.gatewayAppIdMasked || '已配置' : '未配置'
+  }
+  if (key === 'gatewayAccessTokenMasked') {
+    return cfg.hasGatewayAccessToken ? cfg.gatewayAccessTokenMasked || '已配置' : '未配置'
+  }
+  const val = cfg[key]
+  if (val === null || val === undefined || val === '') return '默认 / 未限'
+  if (typeof val === 'boolean') return val ? '开启 (true)' : '关闭 (false)'
+  return String(val)
+}
+
+const runtimeCompareRows = computed(() => {
+  const current = effectiveRuntimeConfig.value
+  const target = selectedRuntimeRev.value?.config
+  if (!current || !target) return []
+  const secretChangedSet = new Set(selectedRuntimeRev.value?.changedKeys || [])
+  return COMPARE_CONFIG_KEYS.map(key => {
+    const curVal = formatCfgValue(current, key)
+    const tarVal = formatCfgValue(target, key)
+    const secretKeyMap =
+      (key === 'llmApiKeyMasked' && secretChangedSet.has('llmApiKey')) ||
+      (key === 'gatewayAppIdMasked' && secretChangedSet.has('gatewayAppId')) ||
+      (key === 'gatewayAccessTokenMasked' && secretChangedSet.has('gatewayAccessToken'))
+    return {
+      key,
+      label: formatKeyLabel(key),
+      currentVal: curVal,
+      targetVal: tarVal,
+      changed: curVal !== tarVal || secretKeyMap,
+    }
+  })
+})
+
+const runtimeChangedCount = computed(() => runtimeCompareRows.value.filter(r => r.changed).length)
+
+const displayedRuntimeCompareRows = computed(() =>
+  runtimeShowDiffOnly.value
+    ? runtimeCompareRows.value.filter(r => r.changed)
+    : runtimeCompareRows.value,
+)
+
+function handleLoadSnapshotToForm(revItem: RuntimeConfigRevision) {
+  populateRuntimeForm(revItem.config, `基于历史快照 ${revItem.rev} 微调`)
+  isEditingRuntime.value = true
+  activeSubView.value = 'workspace'
+  store.showToast(`已将 ${revItem.rev} 的非敏感参数载入编辑表单，确认后点击保存即可热更新`, 'info')
+}
+
+function handleRollbackRuntime(rev: string) {
+  if (!rev) return
+  ElMessageBox.prompt(
+    `确认将网关与大模型运行配置热回滚至历史快照 ${rev} 吗？回滚后服务端无需重启即可立即切换连接池与模型实例。请填写回退说明（必填）：`,
+    `热回滚运行配置 · ${rev}`,
+    {
+      confirmButtonText: '确认热回滚生效',
+      cancelButtonText: '取消',
+      type: 'warning',
+      inputPlaceholder: '例如：新模型地址响应超时，回退至稳定配置快照',
+      inputValidator: val => (val && val.trim().length > 0 ? true : '请填写配置回退说明'),
+    },
+  )
+    .then(async ({ value }) => {
+      await store.rollbackRuntimeConfig(rev, value.trim())
+    })
+    .catch(() => {})
+}
+
+onMounted(async () => {
+  await store.loadSettings()
+  ensureDefaultPromptRev()
+  ensureDefaultRuntimeRev()
+  if (activeSubView.value === 'prompt-rollback' && selectedPromptRev.value) {
+    void fetchPromptRevisionText(selectedPromptRev.value)
+  }
+})
 </script>
 
 <template>
-  <div class="settings-grid" :class="{ 'is-fullscreen-focus': store.isFocusFullscreen }">
-    <!-- 左栏：全局系统提示词编排工作区 -->
-    <div class="card card-fill settings-prompt-card">
-      <div class="card-header settings-prompt-header">
-        <div class="card-title" style="flex-wrap: wrap; gap: 7px">
-          <span>全局系统提示词工作区</span>
-          <StatusTag :status="store.sysPromptStatus" />
-          <span v-if="store.sysPromptState?.onlineRev" class="chip-tag mono">
-            生产基线 {{ store.sysPromptState.onlineRev }}
-          </span>
-          <span v-if="isDirty" class="settings-dirty-badge">
-            ● 未保存修改
-          </span>
-        </div>
-
-        <div class="settings-toolbar-btns">
-          <button
-            type="button"
-            class="btn btn-sm btn-fullscreen-toggle"
-            :class="{ 'is-active': store.isFocusFullscreen }"
-            :title="
-              store.isFocusFullscreen
-                ? '退出全屏专注并恢复双栏（按 Esc 可退出）'
-                : '全屏专注编辑系统提示词（自动收起右侧参数栏，按 Esc 可退出）'
-            "
-            @click="store.toggleFocusFullscreen()"
-          >
-            <Minimize2 v-if="store.isFocusFullscreen" :size="13" />
-            <Maximize2 v-else :size="13" />
-            <span>{{ store.isFocusFullscreen ? '退出全屏' : '全屏专注' }}</span>
-          </button>
-          <button type="button" class="btn btn-sm" title="撤销上一步修改 (Ctrl+Z / Cmd+Z)" @click="handleUndo">
-            ↶ 撤销
-          </button>
-          <button type="button" class="btn btn-sm" title="重做 (Ctrl+Y / Cmd+Shift+Z)" @click="handleRedo">
-            ↷ 重做
-          </button>
-          <button
-            type="button"
-            class="btn btn-sm"
-            title="用当前线上版本内容替换编辑器内容"
-            :disabled="!onlineText"
-            @click="handleResetOnline"
-          >
-            ↺ 载入线上版
-          </button>
-          <button
-            type="button"
-            class="btn btn-sm"
-            title="放弃已保存的草稿，恢复为线上内容"
-            :disabled="!hasDraft"
-            @click="handleDiscardDraft"
-          >
-            放弃草稿
-          </button>
-          <button
-            type="button"
-            class="btn btn-sm"
-            :title="`保存系统提示词草稿 (${store.saveShortcutHint})`"
-            @click="handleSaveDraft"
-          >
-            保存草稿
-            <kbd class="btn-kbd">{{ store.saveShortcutHint }}</kbd>
-          </button>
-          <button type="button" class="btn btn-sm btn-primary" @click="handlePublish">发布上线</button>
-        </div>
+  <div class="page-fill settings-page">
+    <!-- 顶部子视图导航条（全屏专注编辑提示词时自动隐藏） -->
+    <div v-show="!store.isFocusFullscreen" class="settings-top-nav">
+      <div class="settings-seg-group" role="tablist" aria-label="引擎与系统设置子视图">
+        <button
+          type="button"
+          role="tab"
+          class="settings-seg-btn"
+          :class="{ active: activeSubView === 'workspace' }"
+          :aria-selected="activeSubView === 'workspace'"
+          @click="switchSubView('workspace')"
+        >
+          <SlidersHorizontal :size="13" />
+          <span>提示词与运行配置</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          class="settings-seg-btn"
+          :class="{ active: activeSubView === 'prompt-rollback' }"
+          :aria-selected="activeSubView === 'prompt-rollback'"
+          @click="openPromptRollbackView()"
+        >
+          <History :size="13" />
+          <span>系统提示词版本回滚</span>
+          <span class="seg-badge mono">{{ store.sysPromptRevisions.length }}</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          class="settings-seg-btn"
+          :class="{ active: activeSubView === 'runtime-rollback' }"
+          :aria-selected="activeSubView === 'runtime-rollback'"
+          @click="switchSubView('runtime-rollback')"
+        >
+          <RotateCcw :size="13" />
+          <span>引擎与网关配置回滚</span>
+          <span class="seg-badge mono">{{ store.runtimeRevisions.length }}</span>
+        </button>
       </div>
 
-      <div class="settings-prompt-subbar">
-        <span>约束全平台智能体的证据摘录纪律、防幻觉边界与结构化交卷规程（Markdown 格式）</span>
-        <span class="mono">{{ promptLineCount }} 行 · {{ store.sysPromptText.length }} 字符</span>
-      </div>
-
-      <div class="settings-editor-wrap">
-        <CodeMirrorEditor
-          ref="sysPromptEditorRef"
-          v-model="store.sysPromptText"
-          lang="markdown"
-          fill
-          @save="handleSaveDraft"
-        />
+      <div class="settings-top-meta">
+        <span class="meta-pill">
+          <span class="meta-dot ok"></span>
+          <span>提示词基线</span>
+          <strong class="mono">{{ onlinePromptRev || '未发布' }}</strong>
+        </span>
+        <span class="meta-pill">
+          <span class="meta-dot primary"></span>
+          <span>运行配置快照</span>
+          <strong class="mono">{{ runtimeActiveRev }}</strong>
+          <span class="meta-sub">热更新免重启</span>
+        </span>
       </div>
     </div>
 
-    <!-- 右栏：API 统一网关参数/大模型配置面板 + 系统提示词历史基线（全屏专注态自动收起，退出恢复双栏） -->
-    <div v-show="!store.isFocusFullscreen" class="settings-right-col">
-      <!-- 上半区：大模型推理引擎与 API 统一网关参数配置（只读） -->
-      <div class="card settings-spec-card">
-        <div class="card-header" style="padding: 9px 14px">
-          <div class="card-title">
-            <span>API 统一网关参数与大模型运行配置</span>
-            <span class="chip-tag">环境变量只读</span>
+    <!-- ==================== 子视图 1：提示词编排工作区 + 热更新网关/模型运行参数（双栏布局） ==================== -->
+    <div
+      v-if="activeSubView === 'workspace'"
+      class="settings-grid"
+      :class="{ 'is-fullscreen-focus': store.isFocusFullscreen }"
+    >
+      <!-- 左栏：全局系统提示词编排工作区 -->
+      <div class="card card-fill settings-prompt-card">
+        <div class="card-header settings-prompt-header">
+          <div class="card-title" style="flex-wrap: wrap; gap: 7px">
+            <span>全局系统提示词工作区</span>
+            <StatusTag :status="store.sysPromptStatus" />
+            <span v-if="onlinePromptRev" class="chip-tag mono">
+              生产基线 {{ onlinePromptRev }}
+            </span>
+            <span v-if="isDirty" class="settings-dirty-badge">
+              未保存修改
+            </span>
+          </div>
+
+          <div class="settings-toolbar-btns">
+            <button
+              type="button"
+              class="btn btn-sm btn-fullscreen-toggle"
+              :class="{ 'is-active': store.isFocusFullscreen }"
+              :title="
+                store.isFocusFullscreen
+                  ? '退出全屏专注并恢复双栏（按 Esc 可退出）'
+                  : '全屏专注编辑系统提示词（自动收起右侧参数栏，按 Esc 可退出）'
+              "
+              @click="store.toggleFocusFullscreen()"
+            >
+              <Minimize2 v-if="store.isFocusFullscreen" :size="13" />
+              <Maximize2 v-else :size="13" />
+              <span>{{ store.isFocusFullscreen ? '退出全屏' : '全屏专注' }}</span>
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm"
+              title="打开系统提示词独立版本对比与回滚页面"
+              @click="openPromptRollbackView()"
+            >
+              <History :size="13" />
+              <span>历史与回滚</span>
+            </button>
+            <button type="button" class="btn btn-sm" title="撤销上一步修改 (Ctrl+Z / Cmd+Z)" @click="handleUndo">
+              ↶ 撤销
+            </button>
+            <button type="button" class="btn btn-sm" title="重做 (Ctrl+Y / Cmd+Shift+Z)" @click="handleRedo">
+              ↷ 重做
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm"
+              title="用当前线上版本内容替换编辑器内容"
+              :disabled="!onlineText"
+              @click="handleResetOnline"
+            >
+              ↺ 载入线上版
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm"
+              title="放弃已保存的草稿，恢复为线上内容"
+              :disabled="!hasDraft"
+              @click="handleDiscardDraft"
+            >
+              放弃草稿
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm"
+              :title="`保存系统提示词草稿 (${store.saveShortcutHint})`"
+              @click="handleSaveDraft"
+            >
+              保存草稿
+              <kbd class="btn-kbd">{{ store.saveShortcutHint }}</kbd>
+            </button>
+            <button type="button" class="btn btn-sm btn-primary" @click="handlePublish">
+              发布上线
+            </button>
           </div>
         </div>
 
-        <div class="settings-spec-scroll">
-          <template v-if="store.modelInfo">
-            <div class="spec-section-title">API 统一网关参数（XML / JSON 双协议）</div>
-            <div class="spec-kv-grid">
-              <div
-                v-for="item in gatewaySpecRows"
-                :key="item.label"
-                class="spec-kv-cell"
-              >
-                <span class="spec-kv-label">{{ item.label }}</span>
-                <span class="spec-kv-val mono">{{ item.value }}</span>
-              </div>
-            </div>
+        <div class="settings-prompt-subbar">
+          <span>约束全平台智能体的证据摘录纪律、防幻觉边界与结构化交卷规程（Markdown 格式）</span>
+          <span class="mono">{{ promptLineCount }} 行 · {{ store.sysPromptText.length }} 字符</span>
+        </div>
 
-            <div class="spec-section-title" style="margin-top: 10px">大模型推理与并发治理配额</div>
-            <div class="spec-kv-grid">
-              <div
-                v-for="item in engineSpecRows"
-                :key="item.label"
-                class="spec-kv-cell"
-                :class="{ 'is-full': item.full }"
-              >
-                <span class="spec-kv-label">{{ item.label }}</span>
-                <span class="spec-kv-val mono">{{ item.value }}</span>
-              </div>
-            </div>
-
-            <div class="spec-env-hint">
-              参数由服务端启动环境变量统一注入与管控，变更后重启后端服务生效。
-            </div>
-          </template>
-
-          <div
-            v-else
-            style="padding: 22px 12px; text-align: center; color: var(--text-secondary); font-size: 12px"
-          >
-            暂未获取到引擎与网关运行参数
-          </div>
+        <div class="settings-editor-wrap">
+          <CodeMirrorEditor
+            ref="sysPromptEditorRef"
+            v-model="store.sysPromptText"
+            lang="markdown"
+            fill
+            @save="handleSaveDraft"
+          />
         </div>
       </div>
 
-      <!-- 下半区：系统提示词历史版本时间线 -->
-      <div class="card card-fill">
-        <div class="card-header">
-          <div class="card-title">
-            <span>系统提示词历史基线</span>
-            <span class="chip-tag mono">{{ store.sysPromptRevisions.length }}</span>
+      <!-- 右栏：API 统一网关与大模型热更新配置 + 系统提示词历史基线 -->
+      <div v-show="!store.isFocusFullscreen" class="settings-right-col">
+        <!-- 上半区：支持在线编辑、持久化与免重启热更新的网关/模型运行参数面板 -->
+        <div class="card settings-spec-card" :class="{ 'is-editing-card': isEditingRuntime }">
+          <div class="card-header settings-spec-header">
+            <div class="card-title" style="flex-wrap: wrap; gap: 6px">
+              <span>API 统一网关与大模型运行配置</span>
+              <span class="chip-tag mono live-snap-chip">
+                生效快照 {{ runtimeActiveRev }} · 热更新免重启
+              </span>
+            </div>
+
+            <div class="spec-head-actions">
+              <template v-if="!isEditingRuntime">
+                <button
+                  type="button"
+                  class="btn btn-sm"
+                  title="查看配置修订历史并回滚"
+                  @click="switchSubView('runtime-rollback')"
+                >
+                  <RotateCcw :size="12" />
+                  <span>历史回滚</span>
+                </button>
+                <button type="button" class="btn btn-sm btn-primary" @click="startEditRuntime">
+                  <Edit3 :size="12" />
+                  <span>编辑参数</span>
+                </button>
+              </template>
+              <template v-else>
+                <button
+                  type="button"
+                  class="btn btn-sm"
+                  :disabled="syncingEnv || savingRuntime"
+                  title="重新从启动环境变量同步默认参数"
+                  @click="handleSyncFromEnv"
+                >
+                  <RefreshCw :size="12" />
+                  <span>同步环境变量</span>
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-sm"
+                  :disabled="savingRuntime"
+                  @click="cancelEditRuntime"
+                >
+                  <X :size="12" />
+                  <span>取消</span>
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-sm btn-primary"
+                  :disabled="savingRuntime"
+                  @click="handleSaveRuntimeConfig"
+                >
+                  <Check :size="12" />
+                  <span>{{ savingRuntime ? '热更新中…' : '保存热更新' }}</span>
+                </button>
+              </template>
+            </div>
+          </div>
+
+          <!-- 态 A：清晰紧凑参数总览 -->
+          <div v-if="!isEditingRuntime" class="settings-spec-scroll">
+            <template v-if="effectiveRuntimeConfig">
+              <div class="spec-section-title">API 统一网关参数（XML / JSON 双协议）</div>
+              <div class="spec-kv-grid">
+                <div
+                  v-for="item in gatewaySpecRows"
+                  :key="item.label"
+                  class="spec-kv-cell"
+                  :class="{ 'is-full': item.full }"
+                >
+                  <span class="spec-kv-label">{{ item.label }}</span>
+                  <span class="spec-kv-val mono">{{ item.value }}</span>
+                </div>
+              </div>
+
+              <div class="spec-section-title" style="margin-top: 10px">大模型推理与并发治理配额</div>
+              <div class="spec-kv-grid">
+                <div
+                  v-for="item in engineSpecRows"
+                  :key="item.label"
+                  class="spec-kv-cell"
+                  :class="{ 'is-full': item.full }"
+                >
+                  <span class="spec-kv-label">{{ item.label }}</span>
+                  <span class="spec-kv-val mono">{{ item.value }}</span>
+                </div>
+              </div>
+
+              <div class="spec-env-hint">
+                <span>
+                  最近更新：<span class="mono">{{ store.runtimeState?.updatedAt || '启动初始化' }}</span>
+                  <template v-if="store.runtimeState?.operator">
+                    · 操作人 <strong>{{ store.runtimeState.operator }}</strong>
+                  </template>
+                </span>
+                <span class="hint-sep">·</span>
+                <span>修改保存后自动持久化落盘，并立即热重载网关与模型实例</span>
+              </div>
+            </template>
+
+            <div v-else class="empty-inline-msg">
+              暂未获取到引擎与网关运行参数
+            </div>
+          </div>
+
+          <!-- 态 B：在线编辑表单（密钥掩码保护，留空不覆盖） -->
+          <div v-else class="settings-spec-scroll runtime-form-scroll">
+            <div class="spec-section-title">1. API 统一网关连接与鉴权（保存后热切换连接池）</div>
+            <div class="rt-form-grid">
+              <label class="rt-field">
+                <span class="rt-label">网关接入模式</span>
+                <select v-model="runtimeForm.gatewayMode" class="select mono">
+                  <option value="mock">mock（本地样例报文）</option>
+                  <option value="live">live（真实统一网关）</option>
+                </select>
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">XML 报文封装风格</span>
+                <select v-model="runtimeForm.gatewayXmlStyle" class="select mono">
+                  <option value="java">java（标准网关报文头）</option>
+                  <option value="clean">clean（精简 XML 报文）</option>
+                </select>
+              </label>
+
+              <label class="rt-field is-full">
+                <span class="rt-label">
+                  统一网关地址 (gatewayUrl)
+                  <span v-if="runtimeForm.gatewayMode === 'live'" class="req-star">*</span>
+                </span>
+                <input
+                  v-model="runtimeForm.gatewayUrl"
+                  class="input mono"
+                  placeholder="https://gateway.example.com/unified-api"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">网关连接超时 (秒)</span>
+                <input
+                  v-model.number="runtimeForm.gatewayConnectTimeoutS"
+                  type="number"
+                  min="0.5"
+                  step="0.5"
+                  class="input mono"
+                />
+              </label>
+
+              <div class="rt-field">
+                <div class="rt-label-row">
+                  <span class="rt-label">网关 AppId</span>
+                  <label v-if="effectiveRuntimeConfig?.hasGatewayAppId" class="clear-chk">
+                    <input v-model="runtimeForm.clearGatewayAppId" type="checkbox" />
+                    <span>清空已配</span>
+                  </label>
+                </div>
+                <input
+                  v-model="runtimeForm.gatewayAppIdInput"
+                  type="password"
+                  autocomplete="new-password"
+                  class="input mono"
+                  :disabled="runtimeForm.clearGatewayAppId"
+                  :placeholder="
+                    effectiveRuntimeConfig?.hasGatewayAppId
+                      ? `已配置 ${effectiveRuntimeConfig.gatewayAppIdMasked}（留空保持不变）`
+                      : '未配置（输入后持久化保存）'
+                  "
+                />
+              </div>
+
+              <div class="rt-field is-full">
+                <div class="rt-label-row">
+                  <span class="rt-label">网关 AccessToken 密钥</span>
+                  <label v-if="effectiveRuntimeConfig?.hasGatewayAccessToken" class="clear-chk">
+                    <input v-model="runtimeForm.clearGatewayAccessToken" type="checkbox" />
+                    <span>清空已配</span>
+                  </label>
+                </div>
+                <input
+                  v-model="runtimeForm.gatewayAccessTokenInput"
+                  type="password"
+                  autocomplete="new-password"
+                  class="input mono"
+                  :disabled="runtimeForm.clearGatewayAccessToken"
+                  :placeholder="
+                    effectiveRuntimeConfig?.hasGatewayAccessToken
+                      ? `已配置 ${effectiveRuntimeConfig.gatewayAccessTokenMasked}（留空保持不变）`
+                      : '未配置（输入后加密落盘，前端不回显明文）'
+                  "
+                />
+              </div>
+            </div>
+
+            <div class="spec-section-title" style="margin-top: 12px">
+              2. 大模型推理服务与智能体运行配额（保存后热重载 Runner）
+            </div>
+            <div class="rt-form-grid">
+              <label class="rt-field">
+                <span class="rt-label">推理模型名称 (llmModel) <span class="req-star">*</span></span>
+                <input v-model="runtimeForm.llmModel" class="input mono" placeholder="gpt-4o-mini / qwen-plus" />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">结构化输出模式</span>
+                <select v-model="runtimeForm.agentOutputMode" class="select mono">
+                  <option value="tool">tool（工具函数结构化交卷）</option>
+                  <option value="native">native（原生 JSON Schema）</option>
+                  <option value="json_object">json_object（JSON 对象模式）</option>
+                  <option value="prompted">prompted（提示词引导解析）</option>
+                </select>
+              </label>
+
+              <label class="rt-field is-full">
+                <span class="rt-label">推理服务地址 (llmBaseUrl) <span class="req-star">*</span></span>
+                <input
+                  v-model="runtimeForm.llmBaseUrl"
+                  class="input mono"
+                  placeholder="https://api.openai.com/v1"
+                />
+              </label>
+
+              <div class="rt-field is-full">
+                <div class="rt-label-row">
+                  <span class="rt-label">模型 API Key 密钥</span>
+                  <label v-if="effectiveRuntimeConfig?.hasLlmApiKey" class="clear-chk">
+                    <input v-model="runtimeForm.clearLlmApiKey" type="checkbox" />
+                    <span>清空已配</span>
+                  </label>
+                </div>
+                <input
+                  v-model="runtimeForm.llmApiKeyInput"
+                  type="password"
+                  autocomplete="new-password"
+                  class="input mono"
+                  :disabled="runtimeForm.clearLlmApiKey"
+                  :placeholder="
+                    effectiveRuntimeConfig?.hasLlmApiKey
+                      ? `已配置 ${effectiveRuntimeConfig.llmApiKeyMasked}（留空保持不变）`
+                      : '未配置（输入新密钥后安全落盘）'
+                  "
+                />
+              </div>
+
+              <label class="rt-field">
+                <span class="rt-label">采样温度 (0 ~ 2)</span>
+                <input
+                  v-model.number="runtimeForm.llmTemperature"
+                  type="number"
+                  min="0"
+                  max="2"
+                  step="0.05"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">最大输出 Token（留空不限）</span>
+                <input
+                  v-model="runtimeForm.llmMaxTokensStr"
+                  type="number"
+                  min="1"
+                  step="128"
+                  class="input mono"
+                  placeholder="留空不限"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">模型请求超时 (秒)</span>
+                <input
+                  v-model.number="runtimeForm.llmTimeoutS"
+                  type="number"
+                  min="1"
+                  step="5"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">单次核查总超时 (秒)</span>
+                <input
+                  v-model.number="runtimeForm.agentRunTimeoutS"
+                  type="number"
+                  min="5"
+                  step="5"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">最大并发运行路数</span>
+                <input
+                  v-model.number="runtimeForm.agentMaxConcurrentRuns"
+                  type="number"
+                  min="1"
+                  max="128"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">模型 HTTP 重试次数</span>
+                <input
+                  v-model.number="runtimeForm.llmHttpRetries"
+                  type="number"
+                  min="0"
+                  max="10"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">请求轮数上限 / 工具次数上限</span>
+                <div class="dual-num-row">
+                  <input
+                    v-model.number="runtimeForm.agentRequestLimit"
+                    type="number"
+                    min="1"
+                    max="200"
+                    class="input mono"
+                    title="单次请求轮数上限 (1~200)"
+                  />
+                  <input
+                    v-model.number="runtimeForm.agentToolCallsLimit"
+                    type="number"
+                    min="1"
+                    max="500"
+                    class="input mono"
+                    title="工具调用次数上限 (1~500)"
+                  />
+                </div>
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">校验退回重试 / 工具重试</span>
+                <div class="dual-num-row">
+                  <input
+                    v-model.number="runtimeForm.agentOutputRetries"
+                    type="number"
+                    min="0"
+                    max="10"
+                    class="input mono"
+                    title="证据核验退回重试上限"
+                  />
+                  <input
+                    v-model.number="runtimeForm.agentToolRetries"
+                    type="number"
+                    min="0"
+                    max="10"
+                    class="input mono"
+                    title="工具报错重试上限"
+                  />
+                </div>
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">工具预览行数上限 (1 ~ 200)</span>
+                <input
+                  v-model.number="runtimeForm.agentPreviewRows"
+                  type="number"
+                  min="1"
+                  max="200"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field rt-chk-inline">
+                <span class="rt-label">原生输出 Schema 严格校验</span>
+                <label class="inline-switch-lbl">
+                  <input v-model="runtimeForm.agentNativeStrict" type="checkbox" />
+                  <span>启用 agentNativeStrict</span>
+                </label>
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">并行工具调用 (parallelToolCalls)</span>
+                <select v-model="runtimeForm.llmParallelToolCalls" class="select mono">
+                  <option value="null">跟随模型默认</option>
+                  <option value="true">开启 (true)</option>
+                  <option value="false">关闭 (false)</option>
+                </select>
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">严格工具定义 (strictTools)</span>
+                <select v-model="runtimeForm.llmStrictTools" class="select mono">
+                  <option value="null">跟随模型默认</option>
+                  <option value="true">开启 (true)</option>
+                  <option value="false">关闭 (false)</option>
+                </select>
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">强制工具选择 (toolChoiceRequired)</span>
+                <select v-model="runtimeForm.llmToolChoiceRequired" class="select mono">
+                  <option value="null">跟随模型默认</option>
+                  <option value="true">支持强制调用 (true)</option>
+                  <option value="false">不支持强制调用 (false)</option>
+                </select>
+              </label>
+
+              <label class="rt-field is-full">
+                <span class="rt-label">变更备注（记入 cN 审计台账，选填）</span>
+                <input
+                  v-model="runtimeForm.note"
+                  class="input"
+                  placeholder="例如：切换生产统一网关地址并调高并发配额"
+                />
+              </label>
+            </div>
           </div>
         </div>
 
-        <div class="card-scroll settings-rev-list">
-          <div
-            v-if="store.sysPromptRevisions.length === 0"
-            style="padding: 28px 12px; text-align: center; color: var(--text-secondary); font-size: 12px"
-          >
-            暂无历史发布版本
+        <!-- 下半区：系统提示词历史版本时间线（快捷入口） -->
+        <div v-show="!isEditingRuntime" class="card card-fill">
+          <div class="card-header">
+            <div class="card-title">
+              <span>系统提示词历史基线</span>
+              <span class="chip-tag mono">{{ store.sysPromptRevisions.length }}</span>
+            </div>
+            <button type="button" class="btn-link" @click="openPromptRollbackView()">
+              进入版本对比与回滚 →
+            </button>
           </div>
 
-          <div
+          <div class="card-scroll settings-rev-list">
+            <div v-if="store.sysPromptRevisions.length === 0" class="empty-inline-msg">
+              暂无历史发布版本
+            </div>
+
+            <div
+              v-for="rev in store.sysPromptRevisions"
+              :key="rev.rev"
+              class="settings-rev-item"
+              :class="{ 'is-online': rev.online }"
+            >
+              <div class="settings-rev-head">
+                <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap">
+                  <span class="settings-rev-badge mono" :class="{ online: rev.online }">
+                    {{ rev.rev }}
+                  </span>
+                  <span v-if="rev.online" class="settings-online-tag">当前线上基线</span>
+                  <span v-else-if="rev.type" class="chip-tag">{{ rev.type }}</span>
+                </div>
+                <span class="mono" style="font-size: 11px; color: var(--text-secondary)">
+                  {{ rev.time }}<template v-if="rev.operator"> · {{ rev.operator }}</template>
+                </span>
+              </div>
+
+              <div class="settings-rev-body">
+                <div class="settings-rev-note">{{ rev.note || rev.summary || '（无发布说明）' }}</div>
+                <div class="rev-item-actions">
+                  <button class="btn-link" @click="openPromptRollbackView(rev.rev)">
+                    对比差异
+                  </button>
+                  <template v-if="!rev.online">
+                    <button class="btn-link" @click="handleRollbackToDraft(rev.rev)">
+                      恢复至草稿
+                    </button>
+                    <button class="btn-link" @click="handleDirectRollbackPublish(rev.rev)">
+                      直接回退上线
+                    </button>
+                  </template>
+                  <span v-else class="mono online-state-txt">生效中</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== 子视图 2：系统提示词专属版本历史、Diff 与双模回滚（Requirement #3） ==================== -->
+    <div v-else-if="activeSubView === 'prompt-rollback'" class="rollback-split-grid">
+      <!-- 左侧：完整修订时间线 -->
+      <aside class="card card-fill rollback-sidebar-card">
+        <div class="card-header">
+          <div class="card-title">
+            <span>系统提示词版本时间线</span>
+            <span class="chip-tag mono">{{ store.sysPromptRevisions.length }}</span>
+          </div>
+          <button type="button" class="btn btn-sm" @click="switchSubView('workspace')">
+            ← 返回编辑器
+          </button>
+        </div>
+
+        <div class="rollback-live-banner">
+          <div>
+            <span class="muted-lbl">当前线上基线：</span>
+            <strong class="mono" style="color: var(--primary)">{{ onlinePromptRev || '未发布' }}</strong>
+          </div>
+          <StatusTag :status="store.sysPromptStatus" />
+        </div>
+
+        <div class="card-scroll rollback-timeline-list">
+          <div v-if="store.sysPromptRevisions.length === 0" class="empty-inline-msg">
+            暂无系统提示词历史发布记录
+          </div>
+
+          <button
             v-for="rev in store.sysPromptRevisions"
             :key="rev.rev"
-            class="settings-rev-item"
-            :class="{ 'is-online': rev.online }"
+            type="button"
+            class="timeline-select-item"
+            :class="{
+              active: selectedPromptRev === rev.rev,
+              'is-live': rev.online,
+            }"
+            @click="selectedPromptRev = rev.rev"
           >
-            <div class="settings-rev-head">
-              <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap">
+            <div class="ts-item-top">
+              <div style="display: flex; align-items: center; gap: 6px">
                 <span class="settings-rev-badge mono" :class="{ online: rev.online }">
                   {{ rev.rev }}
                 </span>
                 <span v-if="rev.online" class="settings-online-tag">当前线上基线</span>
                 <span v-else-if="rev.type" class="chip-tag">{{ rev.type }}</span>
               </div>
-              <span class="mono" style="font-size: 11px; color: var(--text-secondary)">
-                {{ rev.time }}<template v-if="rev.operator"> · {{ rev.operator }}</template>
+              <span class="mono ts-time">{{ rev.time }}</span>
+            </div>
+            <div class="ts-note">{{ rev.note || rev.summary || '常规提示词版本发布' }}</div>
+            <div class="ts-meta mono">操作人：{{ rev.operator || '—' }}</div>
+          </button>
+        </div>
+      </aside>
+
+      <!-- 右侧：所选历史版本 Diff 对比 / 原文预览 + 双回滚动作 -->
+      <section class="card card-fill rollback-main-card">
+        <template v-if="selectedPromptRev">
+          <div class="card-header rollback-main-header">
+            <div class="rb-head-left">
+              <span class="rb-target-title">
+                历史快照 <strong class="mono">{{ selectedPromptRev }}</strong>
+              </span>
+              <span v-if="selectedPromptRevMeta?.online" class="settings-online-tag">
+                当前线上生效基线
+              </span>
+              <span v-else-if="selectedPromptRevMeta?.type" class="chip-tag">
+                {{ selectedPromptRevMeta.type }}
+              </span>
+              <span v-if="selectedPromptRevMeta" class="rb-meta-sub mono">
+                {{ selectedPromptRevMeta.time }} · {{ selectedPromptRevMeta.operator || '—' }}
               </span>
             </div>
 
-            <div class="settings-rev-body">
-              <div class="settings-rev-note">{{ rev.note || rev.summary || '（无发布说明）' }}</div>
-              <div style="display: flex; justify-content: flex-end">
-                <span v-if="rev.online" class="mono" style="font-size: 11px; color: var(--primary); font-weight: 600">
-                  生效中
-                </span>
-                <button v-else class="btn-link" @click="handleRollback(rev.rev)">
-                  恢复至草稿
+            <div class="rb-head-actions">
+              <div class="settings-seg-group compact">
+                <button
+                  type="button"
+                  class="settings-seg-btn"
+                  :class="{ active: promptInspectMode === 'diff' }"
+                  @click="promptInspectMode = 'diff'"
+                >
+                  差异对比 (Diff)
                 </button>
+                <button
+                  type="button"
+                  class="settings-seg-btn"
+                  :class="{ active: promptInspectMode === 'preview' }"
+                  @click="promptInspectMode = 'preview'"
+                >
+                  完整原文预览
+                </button>
+              </div>
+
+              <button
+                type="button"
+                class="btn btn-sm"
+                :disabled="!selectedPromptRevText"
+                @click="store.copyText(selectedPromptRevText, `已复制 ${selectedPromptRev} 系统提示词全文`)"
+              >
+                <Copy :size="12" />
+                <span>复制全文</span>
+              </button>
+
+              <button
+                type="button"
+                class="btn btn-sm"
+                @click="handleRollbackToDraft(selectedPromptRev)"
+              >
+                恢复至草稿
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm btn-primary"
+                :disabled="Boolean(selectedPromptRevMeta?.online)"
+                :title="selectedPromptRevMeta?.online ? '该版本已是当前线上生效基线' : '填写回退原因并直接发布上线'"
+                @click="handleDirectRollbackPublish(selectedPromptRev)"
+              >
+                直接回退上线
+              </button>
+            </div>
+          </div>
+
+          <!-- 对比控制副栏 -->
+          <div class="rollback-subbar">
+            <template v-if="promptInspectMode === 'diff'">
+              <div class="rb-compare-left">
+                <span>对比基准：</span>
+                <select v-model="promptCompareBase" class="select select-xs mono">
+                  <option value="online">
+                    当前线上版本 ({{ onlinePromptRev || 'online' }})
+                  </option>
+                  <option value="working">
+                    当前工作区草稿 ({{ isDirty ? '含未保存修改' : hasDraft ? '已存草稿' : '与线上一致' }})
+                  </option>
+                </select>
+                <span class="muted-arrow">→</span>
+                <span class="chip-tag mono">目标版本 {{ selectedPromptRev }}</span>
+              </div>
+
+              <div class="rb-diff-stats mono">
+                <span class="diff-stat-add">+{{ promptDiffStats.added }} 新增行</span>
+                <span class="diff-stat-del">-{{ promptDiffStats.removed }} 删除行</span>
+              </div>
+            </template>
+            <template v-else>
+              <span>
+                只读预览 <strong class="mono">{{ selectedPromptRev }}</strong> 快照全文
+                <template v-if="selectedPromptRevMeta?.note">
+                  · 说明：{{ selectedPromptRevMeta.note }}
+                </template>
+              </span>
+              <span class="mono">{{ selectedPromptRevText.length }} 字符</span>
+            </template>
+          </div>
+
+          <!-- 主体内容滚动区 -->
+          <div v-if="promptVersionLoading" class="card-scroll empty-inline-msg">
+            正在加载版本 {{ selectedPromptRev }} 的历史系统提示词快照…
+          </div>
+          <div v-else-if="promptVersionError" class="card-scroll empty-inline-msg" style="color: var(--danger)">
+            加载历史快照失败：{{ promptVersionError }}
+          </div>
+          <div v-else-if="promptInspectMode === 'preview'" class="settings-editor-wrap">
+            <CodeMirrorEditor
+              :model-value="selectedPromptRevText"
+              lang="markdown"
+              readonly
+              fill
+            />
+          </div>
+          <div v-else class="card-scroll diff-scroll-area">
+            <div v-if="promptDiffStats.identical" class="diff-identical-card">
+              所选历史版本 <strong class="mono">{{ selectedPromptRev }}</strong> 与{{
+                promptCompareBase === 'online' ? `当前线上版本 (${onlinePromptRev})` : '当前工作区内容'
+              }}完全一致，无任何行级差异。
+            </div>
+            <div v-else class="code-editor prompt-diff-box mono">
+              <div
+                v-for="(row, idx) in promptDiffRows"
+                :key="idx"
+                class="code-line"
+                :class="{
+                  'diff-line-add': row.kind === 'add',
+                  'diff-line-del': row.kind === 'del',
+                }"
+              >
+                <div class="code-gutter">{{ row.baseNo ?? '' }}</div>
+                <div class="code-gutter">{{ row.targetNo ?? '' }}</div>
+                <div class="code-content" style="padding-left: 8px">
+                  {{ row.kind === 'add' ? '+ ' : row.kind === 'del' ? '- ' : '  ' }}{{ row.text }}
+                </div>
               </div>
             </div>
           </div>
+        </template>
+
+        <div v-else class="card-scroll empty-inline-msg">
+          请从左侧选择一个系统提示词历史版本进行对比或回退
         </div>
-      </div>
+      </section>
+    </div>
+
+    <!-- ==================== 子视图 3：引擎与网关运行配置历史快照及热回滚（Requirement #5） ==================== -->
+    <div v-else class="rollback-split-grid">
+      <aside class="card card-fill rollback-sidebar-card">
+        <div class="card-header">
+          <div class="card-title">
+            <span>配置快照修订台账</span>
+            <span class="chip-tag mono">{{ store.runtimeRevisions.length }}</span>
+          </div>
+          <button
+            type="button"
+            class="btn btn-sm"
+            :disabled="syncingEnv"
+            title="从启动环境变量重新同步默认配置"
+            @click="handleSyncFromEnv"
+          >
+            <RefreshCw :size="12" />
+            <span>同步环境变量</span>
+          </button>
+        </div>
+
+        <div class="rollback-live-banner">
+          <div>
+            <span class="muted-lbl">当前生效快照：</span>
+            <strong class="mono" style="color: var(--primary)">{{ runtimeActiveRev }}</strong>
+          </div>
+          <span class="chip-tag live-snap-chip">热更新在线</span>
+        </div>
+
+        <div class="card-scroll rollback-timeline-list">
+          <div v-if="store.runtimeRevisions.length === 0" class="empty-inline-msg">
+            暂无运行配置变更记录
+          </div>
+
+          <button
+            v-for="item in store.runtimeRevisions"
+            :key="item.rev"
+            type="button"
+            class="timeline-select-item"
+            :class="{
+              active: selectedRuntimeRevKey === item.rev,
+              'is-live': item.online,
+            }"
+            @click="selectedRuntimeRevKey = item.rev"
+          >
+            <div class="ts-item-top">
+              <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap">
+                <span class="settings-rev-badge mono" :class="{ online: item.online }">
+                  {{ item.rev }}
+                </span>
+                <span v-if="item.online" class="settings-online-tag">当前生效</span>
+                <span v-else class="chip-tag">{{ item.type || '配置更新' }}</span>
+              </div>
+              <span class="mono ts-time">{{ item.time }}</span>
+            </div>
+
+            <div class="ts-note">{{ item.note || item.summary || '运行参数更新' }}</div>
+
+            <div v-if="item.changedKeys && item.changedKeys.length > 0" class="changed-keys-wrap">
+              <span
+                v-for="ck in item.changedKeys.slice(0, 4)"
+                :key="ck"
+                class="changed-key-pill mono"
+              >
+                {{ ck }}
+              </span>
+              <span v-if="item.changedKeys.length > 4" class="changed-key-more mono">
+                +{{ item.changedKeys.length - 4 }}
+              </span>
+            </div>
+
+            <div class="ts-meta mono">操作人：{{ item.operator || '—' }}</div>
+          </button>
+        </div>
+      </aside>
+
+      <section class="card card-fill rollback-main-card">
+        <template v-if="selectedRuntimeRev">
+          <div class="card-header rollback-main-header">
+            <div class="rb-head-left">
+              <span class="rb-target-title">
+                配置快照 <strong class="mono">{{ selectedRuntimeRev.rev }}</strong>
+              </span>
+              <span v-if="selectedRuntimeRev.online" class="settings-online-tag">
+                当前生效快照
+              </span>
+              <span v-else class="chip-tag">{{ selectedRuntimeRev.type || '历史快照' }}</span>
+              <span class="rb-meta-sub mono">
+                {{ selectedRuntimeRev.time }} · {{ selectedRuntimeRev.operator || '—' }}
+              </span>
+            </div>
+
+            <div class="rb-head-actions">
+              <label class="inline-switch-lbl" style="margin-right: 4px">
+                <input v-model="runtimeShowDiffOnly" type="checkbox" />
+                <span>仅看差异项 ({{ runtimeChangedCount }})</span>
+              </label>
+
+              <button
+                type="button"
+                class="btn btn-sm"
+                @click="handleLoadSnapshotToForm(selectedRuntimeRev)"
+              >
+                载入表单微调
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm btn-primary"
+                :disabled="selectedRuntimeRev.online"
+                :title="selectedRuntimeRev.online ? '该快照已是当前生效版本' : '回滚并立即热重载生效'"
+                @click="handleRollbackRuntime(selectedRuntimeRev.rev)"
+              >
+                热回滚至此版本
+              </button>
+            </div>
+          </div>
+
+          <div class="rollback-subbar">
+            <span>
+              {{ selectedRuntimeRev.note || selectedRuntimeRev.summary || '快照参数明细对比' }}
+            </span>
+            <span class="mono">
+              与当前生效 ({{ runtimeActiveRev }}) 共 {{ runtimeChangedCount }} 项差异
+            </span>
+          </div>
+
+          <div class="table-scroll card-scroll" style="padding: 0">
+            <table class="data-table rt-compare-table">
+              <thead>
+                <tr>
+                  <th style="width: 210px">参数名称</th>
+                  <th style="width: 185px">配置键 (Key)</th>
+                  <th>当前生效值 ({{ runtimeActiveRev }})</th>
+                  <th>快照 {{ selectedRuntimeRev.rev }} 值</th>
+                  <th style="width: 84px; text-align: center">状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-if="displayedRuntimeCompareRows.length === 0">
+                  <td colspan="5" class="empty-inline-msg" style="padding: 28px">
+                    当前生效配置与快照 {{ selectedRuntimeRev.rev }} 无差异项
+                  </td>
+                </tr>
+                <tr
+                  v-for="row in displayedRuntimeCompareRows"
+                  :key="row.key"
+                  :class="{ 'is-diff-row': row.changed }"
+                >
+                  <td style="font-weight: 500">{{ row.label }}</td>
+                  <td class="mono" style="color: var(--text-secondary)">{{ row.key }}</td>
+                  <td class="mono">{{ row.currentVal }}</td>
+                  <td class="mono" :style="row.changed ? 'font-weight: 600; color: var(--primary)' : ''">
+                    {{ row.targetVal }}
+                  </td>
+                  <td style="text-align: center">
+                    <span v-if="row.changed" class="rt-diff-pill">有变更</span>
+                    <span v-else class="muted-lbl">一致</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
+
+        <div v-else class="card-scroll empty-inline-msg">
+          请从左侧选择一个运行配置历史快照进行查看或热回滚
+        </div>
+      </section>
     </div>
   </div>
 </template>
 
 <style scoped>
+.settings-page {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 10px;
+  overflow: hidden;
+}
+
+.settings-page .btn,
+.settings-page .btn-link {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ==================== 顶部子视图导航条 ==================== */
+.settings-top-nav {
+  flex-shrink: 0;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 7px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.settings-seg-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 6px;
+  background: var(--bg-muted);
+  border: 1px solid var(--border-light);
+}
+
+.settings-seg-group.compact {
+  padding: 2px;
+}
+
+.settings-seg-btn {
+  appearance: none;
+  height: 27px;
+  padding: 0 11px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-regular);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  transition: background-color 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.settings-seg-group.compact .settings-seg-btn {
+  height: 24px;
+  padding: 0 9px;
+  font-size: 11.5px;
+}
+
+.settings-seg-btn:hover:not(.active) {
+  color: var(--primary);
+  background: var(--bg-hover);
+}
+
+.settings-seg-btn.active {
+  background: var(--bg-elevated);
+  border-color: var(--border-color);
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.seg-badge {
+  font-size: 11px;
+  padding: 0 5px;
+  line-height: 16px;
+  border-radius: 3px;
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+}
+
+.settings-seg-btn.active .seg-badge {
+  background: var(--primary-bg);
+  color: var(--primary);
+}
+
+.settings-top-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.meta-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  font-size: 11.5px;
+  color: var(--text-regular);
+}
+
+.meta-pill strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.meta-sub {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.meta-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.meta-dot.ok {
+  background: var(--success);
+}
+
+.meta-dot.primary {
+  background: var(--primary);
+}
+
+/* ==================== 子视图 1：经典双栏工作台 ==================== */
 .settings-grid {
   flex: 1;
   min-height: 0;
@@ -356,17 +2041,8 @@ function handleRollback(rev: string) {
   grid-template-columns: minmax(0, 1fr);
 }
 
-.settings-grid .btn,
-.settings-grid .btn-link {
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.settings-prompt-card {
-  border-top: var(--kpi-top-line, 1px solid var(--border-color));
-}
-
-.settings-prompt-header {
+.settings-prompt-header,
+.settings-spec-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -375,20 +2051,35 @@ function handleRollback(rev: string) {
 }
 
 .settings-dirty-badge {
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 600;
   padding: 1px 8px;
-  border-radius: 3px;
-  background: rgba(200, 105, 6, 0.14);
-  border: 1px solid rgba(200, 105, 6, 0.34);
+  border-radius: 999px;
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
   color: var(--warning);
 }
 
-.settings-toolbar-btns {
+.settings-toolbar-btns,
+.spec-head-actions {
   display: flex;
+  align-items: center;
   gap: 6px;
   flex-wrap: wrap;
   flex-shrink: 0;
+}
+
+.btn-fullscreen-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.btn-fullscreen-toggle.is-active {
+  color: var(--primary);
+  border-color: var(--primary-border);
+  background: var(--primary-bg);
+  font-weight: 600;
 }
 
 .settings-prompt-subbar {
@@ -424,12 +2115,23 @@ function handleRollback(rev: string) {
 
 .settings-spec-card {
   flex: 0 1 auto;
-  max-height: 54%;
+  max-height: 58%;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border-top: var(--kpi-top-line, 1px solid var(--border-color));
   overflow: hidden;
+}
+
+.settings-spec-card.is-editing-card {
+  flex: 1 1 auto;
+  max-height: 100%;
+}
+
+.live-snap-chip {
+  background: var(--primary-bg);
+  border-color: var(--primary-border);
+  color: var(--primary);
+  font-weight: 600;
 }
 
 .settings-spec-scroll {
@@ -441,12 +2143,11 @@ function handleRollback(rev: string) {
 
 .spec-section-title {
   font-size: 11.5px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--text-secondary);
   padding-bottom: 5px;
-  margin-bottom: 6px;
+  margin-bottom: 7px;
   border-bottom: 1px solid var(--border-light);
-  letter-spacing: 0.02em;
 }
 
 .spec-kv-grid {
@@ -458,7 +2159,7 @@ function handleRollback(rev: string) {
 .spec-kv-cell {
   background: var(--bg-subtle);
   border: 1px solid var(--border-light);
-  border-radius: 4px;
+  border-radius: 5px;
   padding: 6px 9px;
   display: flex;
   flex-direction: column;
@@ -483,12 +2184,76 @@ function handleRollback(rev: string) {
 }
 
 .spec-env-hint {
-  margin-top: 8px;
+  margin-top: 9px;
   font-size: 11px;
   color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
-/* 历史版本列表 */
+.hint-sep {
+  color: var(--border-strong);
+}
+
+/* 在线热更新编辑表单 */
+.rt-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 10px;
+}
+
+.rt-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.rt-field.is-full {
+  grid-column: 1 / -1;
+}
+
+.rt-field.rt-chk-inline {
+  justify-content: flex-end;
+}
+
+.rt-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.rt-label {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-regular);
+}
+
+.req-star {
+  color: var(--danger);
+}
+
+.clear-chk,
+.inline-switch-lbl {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.dual-num-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+/* 紧凑历史版本列表 */
 .settings-rev-list {
   display: flex;
   flex-direction: column;
@@ -506,7 +2271,7 @@ function handleRollback(rev: string) {
 
 .settings-rev-item.is-online {
   border-color: var(--primary-border);
-  border-left: 3.5px solid var(--primary);
+  border-left-color: var(--primary);
 }
 
 .settings-rev-head {
@@ -527,7 +2292,7 @@ function handleRollback(rev: string) {
 
 .settings-rev-badge {
   padding: 1px 7px;
-  border-radius: 3px;
+  border-radius: 4px;
   font-size: 11.5px;
   font-weight: 700;
   background: var(--bg-surface);
@@ -544,9 +2309,10 @@ function handleRollback(rev: string) {
 .settings-online-tag {
   font-size: 11px;
   font-weight: 600;
-  padding: 1px 6px;
-  border-radius: 3px;
-  background: rgba(7, 136, 85, 0.14);
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
   color: var(--success);
 }
 
@@ -554,12 +2320,257 @@ function handleRollback(rev: string) {
   padding: 8px 10px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
   font-size: 12px;
   color: var(--text-regular);
 }
 
 .settings-rev-note {
   line-height: 1.45;
+}
+
+.rev-item-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.online-state-txt {
+  font-size: 11px;
+  color: var(--primary);
+  font-weight: 600;
+}
+
+/* ==================== 子视图 2 & 3：独立主从版本对比与回滚视图 ==================== */
+.rollback-split-grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(290px, 350px) minmax(0, 1fr);
+  gap: 10px;
+  overflow: hidden;
+}
+
+.rollback-sidebar-card,
+.rollback-main-card {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.rollback-live-banner {
+  flex-shrink: 0;
+  padding: 7px 12px;
+  background: var(--bg-subtle);
+  border-bottom: 1px solid var(--border-light);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.muted-lbl {
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
+
+.rollback-timeline-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px;
+}
+
+.timeline-select-item {
+  appearance: none;
+  width: 100%;
+  text-align: left;
+  padding: 9px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  transition: border-color 0.12s, background-color 0.12s;
+}
+
+.timeline-select-item:hover:not(.active) {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+
+.timeline-select-item.active {
+  border-color: var(--primary);
+  background: var(--primary-bg);
+}
+
+.ts-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ts-time {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.ts-note {
+  font-size: 12px;
+  color: var(--text-regular);
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.ts-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.changed-keys-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.changed-key-pill {
+  font-size: 10.5px;
+  padding: 0 5px;
+  line-height: 17px;
+  border-radius: 3px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  color: var(--text-regular);
+}
+
+.changed-key-more {
+  font-size: 10.5px;
+  color: var(--text-secondary);
+}
+
+.rollback-main-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.rb-head-left,
+.rb-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.rb-target-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.rb-meta-sub {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.rollback-subbar {
+  flex-shrink: 0;
+  padding: 6px 14px;
+  background: var(--bg-subtle);
+  border-bottom: 1px solid var(--border-light);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.rb-compare-left {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.select-xs {
+  height: 25px;
+  padding: 0 8px;
+  font-size: 11.5px;
+}
+
+.muted-arrow {
+  color: var(--text-placeholder);
+}
+
+.rb-diff-stats {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11.5px;
+}
+
+.diff-stat-add {
+  color: var(--diff-add-text);
+  font-weight: 600;
+}
+
+.diff-stat-del {
+  color: var(--diff-del-text);
+  font-weight: 600;
+}
+
+.diff-scroll-area {
+  padding: 12px;
+}
+
+.diff-identical-card {
+  padding: 28px 16px;
+  text-align: center;
+  color: var(--text-secondary);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  font-size: 12.5px;
+}
+
+.prompt-diff-box {
+  padding: 6px 0;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+}
+
+.rt-compare-table tr.is-diff-row td {
+  background: var(--primary-bg);
+}
+
+.rt-diff-pill {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  color: var(--warning);
+}
+
+.empty-inline-msg {
+  padding: 26px 12px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 12px;
 }
 </style>

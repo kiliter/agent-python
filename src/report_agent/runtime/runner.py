@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Literal
 
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, SecretStr, TypeAdapter, ValidationError
 from pydantic_ai import (Agent, ModelRetry, NativeOutput, PromptedOutput, RunContext, TextPart, ToolOutput,
                          UnexpectedModelBehavior, UsageLimitExceeded, UsageLimits)
 from pydantic_ai.exceptions import AgentRunError, ModelAPIError
@@ -31,6 +31,7 @@ from ..store.runs import RunStore, new_run_id
 from ..store.service import ResourceService
 from .deps import RunDeps
 from .evidence import EvidenceChecker, FieldIssue, format_issues, locate_quote_in_document, scalar_to_str
+from .model_factory import build_model, build_model_settings
 from .output_model import build_report_model, report_to_dict
 from .prompt import USER_PROMPT, build_task_instructions
 from .text_tools import safe_regex_fullmatch
@@ -137,6 +138,44 @@ def _extract_candidate_report(active_run: Any, field_names: set[str]) -> dict[st
     return None
 
 
+def _cascade_degraded_fields(
+    report: dict[str, dict[str, Any]],
+    failed: set[str],
+    issues: list[FieldIssue],
+) -> None:
+    """将证据中引用了已降级字段（type=field）的下游衍生字段级联降级，直到不动点。"""
+    if not failed:
+        return
+    while True:
+        newly_failed: list[tuple[str, list[str]]] = []
+        for fname, ans in report.items():
+            if fname in failed or not isinstance(ans, dict) or ans.get("status") != "found":
+                continue
+            raw_ev = ans.get("evidence")
+            if not isinstance(raw_ev, list):
+                continue
+            bad_refs: list[str] = []
+            for e in raw_ev:
+                if isinstance(e, dict) and e.get("type") == "field":
+                    ref_name = str(e.get("name") or "")
+                    if ref_name in failed and ref_name not in bad_refs:
+                        bad_refs.append(ref_name)
+            if bad_refs:
+                newly_failed.append((fname, bad_refs))
+        if not newly_failed:
+            break
+        for fname, bad_refs in newly_failed:
+            msg = f"引用的前置字段（{'、'.join(bad_refs)}）校验未通过已降级，衍生结论同步降级"
+            issues.append(FieldIssue(fname, msg))
+            failed.add(fname)
+            report[fname] = {
+                "status": "not_found",
+                "value": None,
+                "evidence": [],
+                "reasoning": f"证据校验未通过：{msg}",
+            }
+
+
 def _salvage_partial_report(candidate: dict[str, Any], report_model: type[BaseModel],
                             deps: RunDeps) -> dict[str, dict[str, Any]]:
     """当模型交卷因缺字段或个别字段格式错误耗尽重试时，保留合法且通过证据核验的字段，其余字段安全降级。"""
@@ -186,6 +225,8 @@ def _salvage_partial_report(candidate: dict[str, Any], report_model: type[BaseMo
                 "reasoning": "证据校验未通过：" + "；".join(i.message for i in ev_issues if i.field == name),
             }
 
+    _cascade_degraded_fields(salvaged, failed, issues)
+
     issue_dicts = [i.to_dict() for i in issues]
     if issue_dicts:
         deps.workspace.validation_rounds.append(issue_dicts)
@@ -212,6 +253,22 @@ class AgentRunner:
         self._sem = asyncio.Semaphore(settings.agent_max_concurrent_runs)
         self._tools = build_tools(settings.agent_tool_retries)
 
+    def reload_config(self, settings: Settings, *, rebuild_model: bool = True) -> None:
+        """运行期热重载模型、参数、工具重试与并发信号量，立即对后续运行生效。"""
+        prev_concurrency = self.settings.agent_max_concurrent_runs
+        self.settings = settings
+        self.model_settings = build_model_settings(settings)
+        if rebuild_model:
+            model_input = (
+                settings
+                if settings.llm_api_key.get_secret_value()
+                else settings.model_copy(update={"llm_api_key": SecretStr("EMPTY")})
+            )
+            self.model = build_model(model_input)
+        self._tools = build_tools(settings.agent_tool_retries)
+        if settings.agent_max_concurrent_runs != prev_concurrency:
+            self._sem = asyncio.Semaphore(settings.agent_max_concurrent_runs)
+
     # ------------------------------------------------------------------ 快照
     def _capture(self, target: str) -> tuple[str, ResourceSet]:
         if target == "draft":
@@ -219,24 +276,36 @@ class AgentRunner:
             return f"{live}+草稿", self.service.overlay()
         return self.releases.live_snapshot()
 
-    def _build_agent(self, report_model: type[BaseModel]) -> Agent[RunDeps, Any]:
-        mode = self.settings.agent_output_mode
+    def _build_agent(
+        self,
+        report_model: type[BaseModel],
+        *,
+        settings: Settings | None = None,
+        model: Any = None,
+        model_settings: dict[str, Any] | None = None,
+        tools: list[Any] | None = None,
+    ) -> Agent[RunDeps, Any]:
+        rt_settings = settings or self.settings
+        rt_model = self.model if model is None else model
+        rt_model_settings = self.model_settings if model_settings is None else model_settings
+        rt_tools = self._tools if tools is None else tools
+        mode = rt_settings.agent_output_mode
         if mode == "native":
             output: Any = NativeOutput(report_model, name="submit_report",
-                                       strict=self.settings.agent_native_strict)
+                                       strict=rt_settings.agent_native_strict)
         elif mode in ("json_object", "prompted"):
             output = PromptedOutput(report_model, name="submit_report")
         else:
             output = ToolOutput(report_model, name="submit_report",
                                 description="提交全部字段的结论与证据。所有字段都有结论后调用一次。")
         agent: Agent[RunDeps, Any] = Agent(
-            self.model,
+            rt_model,
             deps_type=RunDeps,
             output_type=output,
             instructions=[lambda ctx: ctx.deps.resources.system_prompt, lambda ctx: build_task_instructions(ctx.deps)],
-            tools=self._tools,
-            retries={"tools": self.settings.agent_tool_retries, "output": self.settings.agent_output_retries},
-            model_settings=self.model_settings,
+            tools=rt_tools,
+            retries={"tools": rt_settings.agent_tool_retries, "output": rt_settings.agent_output_retries},
+            model_settings=rt_model_settings,
         )
 
         @agent.output_validator
@@ -249,16 +318,19 @@ class AgentRunner:
             if not issues:
                 deps.events.emit("report_accepted", attempt=attempt)
                 return out
-            issue_dicts = [i.to_dict() for i in issues]
-            deps.workspace.validation_rounds.append(issue_dicts)
             if ctx.retry >= ctx.max_retries:
-                # 重试用完：不通过的字段按“找不到”处理，其余字段照常使用
+                # 重试用完：不通过的字段及引用它们的下游衍生字段按“找不到”处理，其余字段照常使用
                 failed = {i.field for i in issues}
                 for name in failed:
                     report[name] = {"status": "not_found", "value": None, "evidence": [],
                                     "reasoning": "证据校验未通过：" + "；".join(i.message for i in issues if i.field == name)}
+                _cascade_degraded_fields(report, failed, issues)
+                issue_dicts = [i.to_dict() for i in issues]
+                deps.workspace.validation_rounds.append(issue_dicts)
                 deps.events.emit("report_degraded", attempt=attempt, issues=issue_dicts, fields=sorted(failed))
                 return type(out).model_validate(report)
+            issue_dicts = [i.to_dict() for i in issues]
+            deps.workspace.validation_rounds.append(issue_dicts)
             deps.events.emit("report_rejected", attempt=attempt, issues=issue_dicts)
             raise ModelRetry(format_issues(issues))
 
@@ -280,17 +352,28 @@ class AgentRunner:
         if errors:
             raise InputValidationError(errors)
 
+        rt_settings = self.settings
+        rt_model = self.model
+        rt_model_settings = self.model_settings
+        rt_tools = self._tools
+        rt_sem = self._sem
         events = EventSink(listener)
         deps = RunDeps(
             run_id=run_id, rev=rev, resources=rs, template=tpl, inputs=inputs, document=req.document or "",
             allowed_skills=[s for s in tpl.definition.skills if s in rs.skills],
             allowed_apis=rs.allowed_apis(tpl), workspace=Workspace(), events=events, gateway=self.gateway,
-            settings=self.settings,
+            settings=rt_settings,
         )
         events.emit("run_started", runId=run_id, templateId=tpl.id, templateName=tpl.name, rev=rev,
                     skills=deps.allowed_skills, apis=deps.allowed_apis)
         report_model = build_report_model(tpl)
-        agent = self._build_agent(report_model)
+        agent = self._build_agent(
+            report_model,
+            settings=rt_settings,
+            model=rt_model,
+            model_settings=rt_model_settings,
+            tools=rt_tools,
+        )
         report: dict[str, dict[str, Any]] | None = None
         error: str | None = None
         usage: dict[str, Any] = {}
@@ -299,12 +382,12 @@ class AgentRunner:
         active_run = None
         t0 = time.monotonic()
         try:
-            async with self._sem:
-                async with asyncio.timeout(self.settings.agent_run_timeout_s):
+            async with rt_sem:
+                async with asyncio.timeout(rt_settings.agent_run_timeout_s):
                     async with agent.iter(
                         USER_PROMPT, deps=deps,
-                        usage_limits=UsageLimits(request_limit=self.settings.agent_request_limit,
-                                                 tool_calls_limit=self.settings.agent_tool_calls_limit),
+                        usage_limits=UsageLimits(request_limit=rt_settings.agent_request_limit,
+                                                 tool_calls_limit=rt_settings.agent_tool_calls_limit),
                     ) as run:
                         active_run = run
                         async for node in run:
@@ -319,7 +402,7 @@ class AgentRunner:
             if result is not None:
                 report = report_to_dict(result.output)
         except TimeoutError:
-            error = f"运行超时（超过 {self.settings.agent_run_timeout_s:.0f} 秒）"
+            error = f"运行超时（超过 {rt_settings.agent_run_timeout_s:.0f} 秒）"
         except UsageLimitExceeded as exc:
             error = f"超过运行上限：{exc}"
         except UnexpectedModelBehavior as exc:
@@ -354,7 +437,8 @@ class AgentRunner:
             events.emit("run_failed", error=error)
             log.warning("运行失败 runId=%s template=%s：%s", run_id, tpl.id, error)
 
-        outcome = self._finish(run_id, started_at, rev, req, deps, report, error, usage, t0)
+        model_name = getattr(rt_model, "model_name", None) or rt_settings.llm_model
+        outcome = self._finish(run_id, started_at, rev, req, deps, report, error, usage, t0, model_name=model_name)
         detail = {**outcome, "messages": messages}
         self.runs.submit(self._summary(outcome), detail)
         return outcome
@@ -362,7 +446,7 @@ class AgentRunner:
     # ------------------------------------------------------------------ 结果整理
     def _finish(self, run_id: str, started_at: datetime, rev: str, req: RunRequest, deps: RunDeps,
                 report: dict[str, dict[str, Any]] | None, error: str | None, usage: dict[str, Any],
-                t0: float) -> dict[str, Any]:
+                t0: float, *, model_name: str | None = None) -> dict[str, Any]:
         tpl = deps.template
         ws = deps.workspace
         retried = {i["field"] for rnd in ws.validation_rounds for i in rnd if isinstance(i, dict) and "field" in i}
@@ -430,7 +514,7 @@ class AgentRunner:
                            "ok": c.ok} for c in ws.tool_calls.values()],
             "validationRounds": ws.validation_rounds,
             "events": [e.to_dict() for e in deps.events.events],
-            "model": getattr(self.model, "model_name", None) or self.settings.llm_model,
+            "model": model_name or getattr(self.model, "model_name", None) or self.settings.llm_model,
             "extra": req.extra,
         }
 

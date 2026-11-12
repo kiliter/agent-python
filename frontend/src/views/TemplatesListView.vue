@@ -685,8 +685,9 @@ async function handleRefresh() {
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-top: var(--kpi-top-line, 1px solid var(--border-color));
-  border-radius: 6px;
-  padding: 11px 14px;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: 12px 16px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -703,7 +704,7 @@ async function handleRefresh() {
 
 .kpi-label {
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--text-secondary);
   white-space: nowrap;
   overflow: hidden;
@@ -733,17 +734,17 @@ async function handleRefresh() {
 }
 
 .kpi-dot-sep {
-  color: var(--border-strong);
-  font-weight: 600;
+  color: var(--border-color);
+  font-weight: 500;
 }
 
 .kpi-inline-stat {
-  font-size: 11.5px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 500;
   color: var(--primary);
   background: var(--primary-bg);
   border: 1px solid var(--primary-border);
-  border-radius: 3px;
+  border-radius: 4px;
   padding: 0 6px;
   line-height: 18px;
   white-space: nowrap;
@@ -751,29 +752,30 @@ async function handleRefresh() {
 
 .kpi-badge {
   font-size: 11px;
-  font-weight: 600;
-  padding: 0 6px;
+  font-weight: 500;
+  padding: 0 7px;
   line-height: 18px;
-  border-radius: 3px;
+  border-radius: 999px;
   border: 1px solid var(--border-color);
   white-space: nowrap;
 }
 
 .kpi-badge.is-ok {
   color: var(--success);
-  background: var(--bg-subtle);
-  border-color: var(--success);
+  background: var(--success-bg);
+  border-color: var(--success-border);
 }
 
 .kpi-badge.is-warn {
   color: var(--warning);
-  background: var(--bg-subtle);
-  border-color: var(--warning);
+  background: var(--warning-bg);
+  border-color: var(--warning-border);
 }
 
 .kpi-badge.is-neutral {
   color: var(--text-secondary);
-  background: var(--bg-muted);
+  background: var(--bg-subtle);
+  border-color: var(--border-color);
 }
 
 .kpi-sub {
@@ -798,11 +800,13 @@ async function handleRefresh() {
   min-height: 0;
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
   overflow: hidden;
 }
 
 .ledger-toolbar {
-  padding: 9px 14px;
+  padding: 10px 16px;
   border-bottom: 1px solid var(--border-light, var(--border-color));
   display: flex;
   align-items: center;
@@ -829,8 +833,8 @@ async function handleRefresh() {
 .seg-filter-group {
   display: inline-flex;
   align-items: center;
-  padding: 3px;
-  border-radius: 5px;
+  padding: 2px;
+  border-radius: 6px;
   background: var(--bg-muted);
   border: 1px solid var(--border-light, var(--border-color));
   gap: 2px;
@@ -843,7 +847,7 @@ async function handleRefresh() {
   border: 1px solid transparent;
   border-radius: 4px;
   background: transparent;
-  color: var(--text-regular);
+  color: var(--text-secondary);
   font-family: inherit;
   font-size: 12px;
   font-weight: 500;
@@ -851,26 +855,26 @@ async function handleRefresh() {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  transition: background-color 0.12s, color 0.12s, border-color 0.12s;
+  transition: background-color 0.12s, color 0.12s, border-color 0.12s, box-shadow 0.12s;
 }
 
 .seg-filter-btn:hover:not(.active) {
-  color: var(--primary);
-  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .seg-filter-btn.active {
-  background: var(--bg-surface);
+  background: var(--bg-elevated);
   border-color: var(--border-color);
   color: var(--primary);
   font-weight: 600;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
 }
 
 .seg-count {
   font-size: 11px;
   padding: 0 5px;
   line-height: 16px;
-  border-radius: 3px;
+  border-radius: 4px;
   background: var(--bg-subtle);
   color: var(--text-secondary);
 }
@@ -903,9 +907,9 @@ async function handleRefresh() {
 
 .ledger-table thead th {
   font-weight: 600;
-  color: var(--text-regular);
+  color: var(--text-secondary);
   background: var(--bg-subtle);
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-light);
 }
 
 .ledger-row {
@@ -914,19 +918,26 @@ async function handleRefresh() {
 
 .tpl-id-pill {
   display: inline-block;
-  padding: 2px 8px;
-  border-radius: 3px;
-  font-size: 12px;
-  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 4px;
+  font-size: 11.5px;
+  font-weight: 500;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  color: var(--text-regular);
+  transition: border-color 0.12s, color 0.12s, background-color 0.12s;
+}
+
+.ledger-row:hover .tpl-id-pill:not(.is-muted) {
+  border-color: var(--primary-border);
   background: var(--primary-bg);
-  border: 1px solid var(--primary-border);
   color: var(--primary);
 }
 
 .tpl-id-pill.is-muted {
   background: var(--bg-subtle);
-  border-color: var(--border-color);
-  color: var(--text-secondary);
+  border-color: var(--border-light);
+  color: var(--text-placeholder);
 }
 
 .tpl-name-primary {
@@ -985,7 +996,7 @@ async function handleRefresh() {
 
 .accuracy-bar-track {
   width: 60px;
-  height: 5px;
+  height: 4px;
   border-radius: 99px;
   background: var(--bg-muted);
   overflow: hidden;

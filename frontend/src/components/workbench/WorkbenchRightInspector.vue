@@ -11,6 +11,7 @@ import YAML from 'yaml'
 import { usePlatformStore } from '@/stores/platform'
 import { platformApi, errorMessage } from '@/api/platformApi'
 import { resolveEvidenceInspectorTab } from '@/utils/reportSegments'
+import { sanitizeHtml } from '@/utils/sanitizeHtml'
 import type {
   EvidenceType,
   FieldType,
@@ -354,7 +355,7 @@ function handleDeleteInput() {
 const loadedSkillDetail = ref<SkillDetail | null>(null)
 const loadingSkill = ref(false)
 const skillLoadError = ref('')
-let skillFetchToken = 0
+let fetchSkillReqSeq = 0
 
 const activeSkillId = computed(() => {
   if (store.ideSelectedSkillId && store.templateSkills.includes(store.ideSelectedSkillId)) {
@@ -369,32 +370,35 @@ const activeSkillSummaryItem = computed<SkillItem | null>(() => {
 })
 
 async function fetchSelectedSkillDetail(skillId: string) {
-  const reqId = ++skillFetchToken
+  const reqSeq = ++fetchSkillReqSeq
   if (!skillId) {
     loadedSkillDetail.value = null
     skillLoadError.value = ''
     loadingSkill.value = false
     return
   }
+  if (loadedSkillDetail.value && loadedSkillDetail.value.item.id !== skillId) {
+    loadedSkillDetail.value = null
+  }
   loadingSkill.value = true
   skillLoadError.value = ''
   try {
     const detail = await platformApi.getSkill(skillId)
-    if (reqId !== skillFetchToken) return
+    if (reqSeq !== fetchSkillReqSeq) return
     loadedSkillDetail.value = detail
   } catch (err) {
-    if (reqId !== skillFetchToken) return
+    if (reqSeq !== fetchSkillReqSeq) return
     loadedSkillDetail.value = null
     skillLoadError.value = errorMessage(err)
   } finally {
-    if (reqId === skillFetchToken) {
+    if (reqSeq === fetchSkillReqSeq) {
       loadingSkill.value = false
     }
   }
 }
 
 watch(
-  () => [activeSkillId.value, store.ideLeftSection] as const,
+  () => [activeSkillId.value, store.ideLeftSection, store.onlineBaselineSeq] as const,
   ([skillId, sec]) => {
     if (sec === 'skills' || skillId) {
       void fetchSelectedSkillDetail(skillId)
@@ -416,7 +420,7 @@ const skillMarkdownHtml = computed(() => {
     }
     markdownBody = fmMatch[2] || ''
   }
-  return marked.parse(markdownBody, { async: false }) as string
+  return sanitizeHtml(marked.parse(markdownBody, { async: false }) as string)
 })
 
 function handleUnbindSkill(skillId: string) {
@@ -645,7 +649,7 @@ const resolvedRevisionRecord = computed<Revision | null>(() => {
 const diffComparisonTargetRev = computed(() => {
   const key = selectedRevisionKey.value
   if (key === 'working' || key === 'online') {
-    if (hasOnline.value) return tpl.value.onlineRev
+    if (hasOnline.value) return 'online'
     return store.templateRevisions[0]?.rev || ''
   }
   return key
@@ -659,7 +663,7 @@ function handleOpenDiffInStage() {
   }
   store.ideDiffTargetRev = targetRev
   store.historyVerA = 'draft'
-  store.historyVerB = targetRev
+  store.historyVerB = targetRev === 'online' ? tpl.value.onlineRev : targetRev
   store.ideCenterMode = 'diff'
 }
 
@@ -1559,7 +1563,7 @@ function handleExpandDebugPanel() {
 }
 
 .seg-btn.active {
-  background: var(--bg-surface);
+  background: var(--bg-elevated);
   color: var(--primary);
   font-weight: 600;
   border-color: var(--border-color);

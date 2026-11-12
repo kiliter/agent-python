@@ -38,7 +38,6 @@ def build_model(settings: Settings) -> OpenAIChatModel:
     if settings.llm_strict_tools is not None:
         overrides["openai_supports_strict_tool_definition"] = settings.llm_strict_tools
     if settings.llm_tool_choice_required is not None:
-        overrides["openai_supports_tool_choice_required"] = settings.llm_tool_choice_required
         overrides["supports_forced_tool_choice"] = settings.llm_tool_choice_required
     if overrides:
         model = OpenAIChatModel(settings.llm_model, provider=provider, profile={**dict(model.profile), **overrides})

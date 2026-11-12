@@ -37,6 +37,9 @@ def hash_password(password: str) -> str:
     return f"pbkdf2_sha256${_ITERATIONS}${base64.b64encode(salt).decode()}${base64.b64encode(digest).decode()}"
 
 
+DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
+
+
 def verify_password(password: str, encoded: str) -> bool:
     if not isinstance(password, str) or not isinstance(encoded, str) or not encoded:
         return False
@@ -168,11 +171,12 @@ class TokenService:
 
 
 class LoginGuard:
-    """登录失败限流：同一用户名连续失败 5 次锁定 5 分钟。"""
+    """登录失败限流：同一用户名连续失败 5 次锁定 5 分钟（带容量上限与抗用户名喷洒驱逐）。"""
 
-    def __init__(self, max_failures: int = 5, lock_s: int = 300) -> None:
+    def __init__(self, max_failures: int = 5, lock_s: int = 300, max_entries: int = 4096) -> None:
         self.max_failures = max_failures
         self.lock_s = lock_s
+        self.max_entries = max(16, int(max_entries))
         self._fails: dict[str, tuple[int, float]] = {}
         self._lock = threading.Lock()
 
@@ -189,11 +193,19 @@ class LoginGuard:
     def fail(self, username: str) -> None:
         now = time.time()
         with self._lock:
-            if len(self._fails) > 1024:
-                self._fails = {k: v for k, v in self._fails.items() if v[1] > now}
-            count, until = self._fails.get(username, (0, 0.0))
+            count, until = self._fails.pop(username, (0, 0.0))
             if until <= now:
                 count = 0
+            if len(self._fails) >= self.max_entries:
+                self._fails = {k: v for k, v in self._fails.items() if v[1] > now}
+            if len(self._fails) >= self.max_entries:
+                # 优先淘汰尚未触发锁定的低频噪声条目，保护已被锁定的暴力破解目标不被冲刷解锁
+                need = len(self._fails) - self.max_entries + 1
+                unlocked_keys = [k for k, v in self._fails.items() if v[0] < self.max_failures][:need]
+                for k in unlocked_keys:
+                    self._fails.pop(k, None)
+                while len(self._fails) >= self.max_entries:
+                    self._fails.pop(next(iter(self._fails)))
             self._fails[username] = (count + 1, now + self.lock_s)
 
     def success(self, username: str) -> None:

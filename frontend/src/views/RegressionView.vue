@@ -466,7 +466,7 @@ async function handleExecuteRegression() {
 }
 
 .reg-toolbar {
-  padding: 9px 14px;
+  padding: 10px 16px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -484,7 +484,7 @@ async function handleExecuteRegression() {
 .reg-seg-group {
   display: inline-flex;
   padding: 2px;
-  border-radius: 5px;
+  border-radius: 6px;
   background: var(--bg-muted);
   border: 1px solid var(--border-light);
   gap: 2px;
@@ -494,10 +494,10 @@ async function handleExecuteRegression() {
   appearance: none;
   height: 26px;
   padding: 0 10px;
-  border: none;
+  border: 1px solid transparent;
   border-radius: 4px;
   background: transparent;
-  color: var(--text-regular);
+  color: var(--text-secondary);
   font-family: inherit;
   font-size: 12px;
   font-weight: 500;
@@ -506,17 +506,19 @@ async function handleExecuteRegression() {
   align-items: center;
   gap: 5px;
   white-space: nowrap;
+  transition: background-color 0.12s, color 0.12s, border-color 0.12s, box-shadow 0.12s;
 }
 
-.reg-seg-btn:hover {
-  color: var(--primary);
+.reg-seg-btn:hover:not(.active) {
+  color: var(--text-primary);
 }
 
 .reg-seg-btn.active {
-  background: var(--bg-surface);
+  background: var(--bg-elevated);
+  border-color: var(--border-color);
   color: var(--primary);
   font-weight: 600;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
 }
 
 /* 4 联指标卡 + 精密线性进度条 */
@@ -531,8 +533,9 @@ async function handleExecuteRegression() {
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-top: var(--kpi-top-line, 1px solid var(--border-color));
-  border-radius: 6px;
-  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: 12px 16px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -568,7 +571,7 @@ async function handleExecuteRegression() {
 
 .reg-kpi-rate {
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
   color: var(--primary);
 }
 
@@ -597,7 +600,7 @@ async function handleExecuteRegression() {
 
 .reg-linear-track {
   width: 100%;
-  height: 5px;
+  height: 4px;
   border-radius: 99px;
   background: var(--bg-muted);
   overflow: hidden;
@@ -634,11 +637,11 @@ async function handleExecuteRegression() {
 .reg-field-pill {
   display: inline-block;
   padding: 1px 7px;
-  border-radius: 3px;
+  border-radius: 4px;
   font-size: 11.5px;
-  font-weight: 600;
-  background: rgba(200, 105, 6, 0.12);
-  border: 1px solid rgba(200, 105, 6, 0.34);
+  font-weight: 500;
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
   color: var(--warning);
 }
 
@@ -651,13 +654,13 @@ async function handleExecuteRegression() {
 }
 
 .reg-val-box.val-a {
-  background: rgba(7, 136, 85, 0.1);
+  background: var(--success-bg);
   border-left: 2px solid var(--success);
   color: var(--text-primary);
 }
 
 .reg-val-box.val-b {
-  background: rgba(220, 38, 38, 0.09);
+  background: var(--danger-bg);
   border-left: 2px solid var(--danger);
   color: var(--text-primary);
 }

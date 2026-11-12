@@ -185,5 +185,6 @@ class Publisher:
 
     def audit(self, action: str, operator: str, detail: dict[str, Any]) -> None:
         """追加审计日志。"""
-        append_line(self.layout.audit, json.dumps(
-            {"time": now_iso(), "action": action, "operator": operator, **detail}, ensure_ascii=False))
+        with self.lock:
+            append_line(self.layout.audit, json.dumps(
+                {"time": now_iso(), "action": action, "operator": operator, **detail}, ensure_ascii=False))

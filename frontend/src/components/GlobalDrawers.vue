@@ -519,20 +519,20 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .g-drawer-mask {
-  background-color: rgba(8, 13, 23, 0.48);
+  background-color: var(--bg-backdrop, rgba(15, 23, 42, 0.38));
   background-image: none;
 }
 
 .g-drawer-panel {
   background-color: var(--bg-surface);
   background-image: none;
-  border-left: 1px solid var(--border-strong);
+  border-left: 1px solid var(--border-color);
   color: var(--text-primary);
 }
 
 .g-drawer-head {
-  background-color: var(--bg-subtle);
-  border-bottom: 1px solid var(--border-color);
+  background-color: var(--bg-surface);
+  border-bottom: 1px solid var(--border-light);
 }
 
 .g-drawer-body {
@@ -542,7 +542,7 @@ onBeforeUnmount(() => {
 
 .g-drawer-foot {
   background-color: var(--bg-subtle);
-  border-top: 1px solid var(--border-color);
+  border-top: 1px solid var(--border-light);
 }
 
 .g-field-label {
@@ -555,9 +555,9 @@ onBeforeUnmount(() => {
 
 .g-usage-card {
   background-color: var(--bg-subtle);
-  border: 1px solid var(--border-color);
-  border-left: 3px solid var(--primary);
-  border-radius: 4px;
+  border: 1px solid var(--border-light);
+  border-left: 2.5px solid var(--primary);
+  border-radius: 6px;
   padding: 10px 12px;
   font-size: 12px;
   color: var(--text-regular);
@@ -566,18 +566,18 @@ onBeforeUnmount(() => {
 .g-ver-card {
   background-color: var(--bg-surface);
   border: 1px solid var(--border-color);
-  border-radius: 5px;
+  border-radius: 6px;
   overflow: hidden;
 }
 
 .g-ver-card.ver-a {
-  border-color: rgba(7, 136, 85, 0.36);
-  border-top: 2.5px solid var(--success);
+  border-color: var(--success-border);
+  border-top: 2px solid var(--success);
 }
 
 .g-ver-card.ver-b {
-  border-color: rgba(220, 38, 38, 0.36);
-  border-top: 2.5px solid var(--danger);
+  border-color: var(--danger-border);
+  border-top: 2px solid var(--danger);
 }
 
 .g-ver-head {
@@ -588,12 +588,12 @@ onBeforeUnmount(() => {
 }
 
 .g-ver-card.ver-a .g-ver-head {
-  background-color: rgba(7, 136, 85, 0.12);
+  background-color: var(--success-bg);
   color: var(--success);
 }
 
 .g-ver-card.ver-b .g-ver-head {
-  background-color: rgba(220, 38, 38, 0.11);
+  background-color: var(--danger-bg);
   color: var(--danger);
 }
 

@@ -17,7 +17,7 @@ from ..store.layout import SAFE_ID_RE, ref_from_tree_path
 from ..store.releases import ReleaseNotFound
 from ..store.runs import _percentile
 from ..store.service import SP_REF, api_ref, skill_ref, tpl_ref
-from .auth import COOKIE_NAME, User, require_report_key, require_user, verify_password
+from .auth import COOKIE_NAME, DUMMY_PASSWORD_HASH, User, require_report_key, require_user, verify_password
 from .common import bad_request, container, not_found, operator, sse_run
 from .dto import release_dto, run_record
 from .run_views import detail_view, report_view
@@ -56,7 +56,10 @@ def login(request: Request, response: Response, body: LoginBody) -> dict[str, An
         raise bad_request("用户名和密码不能为空")
     guard.check(username)
     rec = users.get(username)
-    if not rec or not verify_password(body.password, rec.get("passwordHash") or ""):
+    raw_hash = rec.get("passwordHash") if rec else None
+    has_valid_hash = isinstance(raw_hash, str) and bool(raw_hash)
+    pw_ok = verify_password(body.password, raw_hash if has_valid_hash else DUMMY_PASSWORD_HASH)
+    if not rec or not has_valid_hash or not pw_ok:
         guard.fail(username)
         raise HTTPException(401, detail={"code": "INVALID_CREDENTIALS", "message": "用户名或密码错误"})
     guard.success(username)

@@ -464,6 +464,8 @@ export interface SystemPromptState {
   onlineRev: string | null
   baseRev: string | null
   draft: DraftMeta | null
+  version?: string
+  versionText?: string
 }
 
 export interface ModelInfo {
@@ -481,4 +483,92 @@ export interface ModelInfo {
   maxConcurrentRuns: number
   gatewayMode: string
   gatewayXmlStyle: string
+  activeRev?: string
+  gatewayUrl?: string
+  gatewayConnectTimeoutS?: number
+  maxTokens?: number | null
+}
+
+export interface RuntimeConfig {
+  llmBaseUrl: string
+  hasLlmApiKey: boolean
+  llmApiKeyMasked: string
+  llmModel: string
+  llmTemperature: number
+  llmMaxTokens: number | null
+  llmTimeoutS: number
+  llmHttpRetries: number
+  llmParallelToolCalls: boolean | null
+  llmStrictTools: boolean | null
+  llmToolChoiceRequired: boolean | null
+  agentOutputMode: string
+  agentNativeStrict: boolean
+  agentOutputRetries: number
+  agentToolRetries: number
+  agentRequestLimit: number
+  agentToolCallsLimit: number
+  agentRunTimeoutS: number
+  agentMaxConcurrentRuns: number
+  agentPreviewRows: number
+  gatewayMode: string
+  gatewayUrl: string
+  hasGatewayAppId: boolean
+  gatewayAppIdMasked: string
+  hasGatewayAccessToken: boolean
+  gatewayAccessTokenMasked: string
+  gatewayXmlStyle: string
+  gatewayConnectTimeoutS: number
+}
+
+export interface RuntimeConfigUpdatePayload {
+  llmBaseUrl?: string
+  llmApiKey?: string | null
+  clearLlmApiKey?: boolean
+  llmModel?: string
+  llmTemperature?: number
+  llmMaxTokens?: number | null
+  llmTimeoutS?: number
+  llmHttpRetries?: number
+  llmParallelToolCalls?: boolean | null
+  llmStrictTools?: boolean | null
+  llmToolChoiceRequired?: boolean | null
+  agentOutputMode?: string
+  agentNativeStrict?: boolean
+  agentOutputRetries?: number
+  agentToolRetries?: number
+  agentRequestLimit?: number
+  agentToolCallsLimit?: number
+  agentRunTimeoutS?: number
+  agentMaxConcurrentRuns?: number
+  agentPreviewRows?: number
+  gatewayMode?: string
+  gatewayUrl?: string
+  gatewayAppId?: string | null
+  clearGatewayAppId?: boolean
+  gatewayAccessToken?: string | null
+  clearGatewayAccessToken?: boolean
+  gatewayXmlStyle?: string
+  gatewayConnectTimeoutS?: number
+  note?: string
+}
+
+export interface RuntimeConfigState {
+  activeRev: string
+  updatedAt: string
+  operator: string
+  source: string
+  note: string
+  config: RuntimeConfig
+}
+
+export interface RuntimeConfigRevision {
+  rev: string
+  time: string
+  operator: string
+  type: string
+  summary: string
+  note: string
+  online: boolean
+  changedKeys: string[]
+  config: RuntimeConfig
 }

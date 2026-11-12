@@ -4,7 +4,7 @@
   #Created By AiCoding(codex)
 -->
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { FileText, Table2, Activity, FileInput, Maximize2, Minimize2 } from 'lucide-vue-next'
 import { usePlatformStore } from '@/stores/platform'
@@ -78,7 +78,7 @@ const avgDurationDisplay = computed(() => {
 
 const avgRoundsDisplay = computed(() => {
   const nums = store.runs
-    .map(r => Number(r.rounds))
+    .map(r => Number.parseFloat(String(r.rounds ?? '').replace(/[^\d.]/g, '')))
     .filter(n => Number.isFinite(n) && n > 0)
   if (!nums.length) return '—'
   const sum = nums.reduce((a, b) => a + b, 0)
@@ -177,9 +177,11 @@ function backToRunsList() {
 
 /** 当前运行记录对应模板版本的正文源码（用于报告预览精确映射同值不同 Key） */
 const runBodyText = ref('')
+let runBodyReqSeq = 0
 watch(
   () => [detail.value?.runId, detail.value?.record.templateId, detail.value?.rev] as const,
   async ([runId, tplId, rev], prev) => {
+    const seq = ++runBodyReqSeq
     if (runId && runId !== prev?.[0]) {
       store.runDetailTab = 'report'
     }
@@ -189,8 +191,10 @@ watch(
     const version = rev && !rev.includes('草稿') && rev !== '—' ? rev : 'working'
     try {
       const tpl = await platformApi.getTemplate(tplId, version)
+      if (seq !== runBodyReqSeq) return
       runBodyText.value = tpl.bodyText || ''
     } catch {
+      if (seq !== runBodyReqSeq) return
       runBodyText.value = ''
     }
   },
@@ -212,36 +216,94 @@ function onSelectRunReportField(fieldName: string, field?: TemplateField) {
   store.runDetailTab = 'fields'
 }
 
-/** 按时间范围向后端查询运行记录；未选时间时直接刷新默认列表 */
-async function queryRuns() {
-  if (!dateFrom.value && !dateTo.value) {
-    await store.refreshRuns()
+let queryRunsReqSeq = 0
+let filterDebounceTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearFilterDebounceTimer() {
+  if (filterDebounceTimer !== null) {
+    clearTimeout(filterDebounceTimer)
+    filterDebounceTimer = null
+  }
+}
+
+onBeforeUnmount(() => {
+  clearFilterDebounceTimer()
+})
+
+function scheduleDebouncedQuery() {
+  clearFilterDebounceTimer()
+  filterDebounceTimer = setTimeout(() => {
+    filterDebounceTimer = null
+    void queryRuns()
+  }, 280)
+}
+
+function onDateFilterChange() {
+  if (dateFrom.value && dateTo.value && dateFrom.value > dateTo.value) {
     return
   }
+  void queryRuns()
+}
+
+/** 按全部筛选条件向后端查询运行记录（避免服务端 500 条上限截断历史匹配记录） */
+async function queryRuns() {
+  clearFilterDebounceTimer()
+  const seq = ++queryRunsReqSeq
+  const parsedTplId =
+    store.runTemplateFilter && store.runTemplateFilter !== 'ALL'
+      ? Number.parseInt(store.runTemplateFilter, 10)
+      : Number.NaN
+  const templateId = Number.isFinite(parsedTplId) && parsedTplId > 0 ? parsedTplId : undefined
+  const status =
+    store.runStatusFilter && store.runStatusFilter !== 'ALL' ? store.runStatusFilter : undefined
+  const mobile = store.runMobileSearch.trim() || undefined
+  const q = store.runBatchSearch.trim() || undefined
+
   querying.value = true
   try {
-    store.runs = await platformApi.fetchRuns({
+    const list = await platformApi.fetchRuns({
       dateFrom: dateFrom.value || undefined,
       dateTo: dateTo.value || undefined,
+      mobile,
+      templateId,
+      status,
+      q,
       limit: 500,
     })
+    if (seq !== queryRunsReqSeq) return
+    store.runs = list
   } catch (err) {
+    if (seq !== queryRunsReqSeq) return
     store.showError(err, '查询运行记录失败')
   } finally {
-    querying.value = false
+    if (seq === queryRunsReqSeq) {
+      querying.value = false
+    }
   }
 }
 
 /** 清空全部筛选条件并重新加载默认列表 */
 function resetRunFilters() {
+  clearFilterDebounceTimer()
   store.runMobileSearch = ''
   store.runTemplateFilter = 'ALL'
   store.runStatusFilter = 'ALL'
   store.runBatchSearch = ''
   dateFrom.value = ''
   dateTo.value = ''
-  void store.refreshRuns()
+  void queryRuns()
 }
+
+onMounted(() => {
+  if (
+    store.runMobileSearch.trim() ||
+    store.runTemplateFilter !== 'ALL' ||
+    store.runStatusFilter !== 'ALL' ||
+    store.runBatchSearch.trim()
+  ) {
+    void queryRuns()
+  }
+})
 
 /** 将当前运行转为回归用例 */
 async function convertToCase() {
@@ -404,29 +466,62 @@ async function convertToCase() {
       <div class="ops-filter-toolbar">
         <div class="ops-filter-controls">
           <span class="ops-filter-label">时间范围</span>
-          <input v-model="dateFrom" type="date" class="input mono" style="width: 134px" title="开始日期" />
+          <input
+            v-model="dateFrom"
+            type="date"
+            class="input mono"
+            style="width: 134px"
+            title="开始日期"
+            @change="onDateFilterChange"
+          />
           <span style="font-size: 12px; color: var(--text-secondary)">至</span>
-          <input v-model="dateTo" type="date" class="input mono" style="width: 134px" title="结束日期" />
+          <input
+            v-model="dateTo"
+            type="date"
+            class="input mono"
+            style="width: 134px"
+            title="结束日期"
+            @change="onDateFilterChange"
+          />
           <input
             v-model="store.runMobileSearch"
             class="input mono"
             style="width: 138px"
             placeholder="手机号 / 流水号"
+            @input="scheduleDebouncedQuery"
+            @keyup.enter="queryRuns"
           />
-          <select v-model="store.runTemplateFilter" class="select" style="width: 170px">
+          <select
+            v-model="store.runTemplateFilter"
+            class="select"
+            style="width: 170px"
+            @change="queryRuns"
+          >
             <option value="ALL">全部核查模板</option>
             <option v-for="t in store.templates" :key="t.id" :value="String(t.id)">
               {{ t.id }} {{ t.name }}
             </option>
           </select>
-          <select v-model="store.runStatusFilter" class="select" style="width: 112px">
+          <select
+            v-model="store.runStatusFilter"
+            class="select"
+            style="width: 112px"
+            @change="queryRuns"
+          >
             <option value="ALL">全部状态</option>
             <option value="SUCCESS">核查成功</option>
             <option value="PARTIAL">部分失败</option>
             <option value="FAILED">运行失败</option>
           </select>
-          <input v-model="store.runBatchSearch" class="input mono" style="width: 112px" placeholder="回归批次号" />
-          <button class="btn btn-primary" :disabled="querying" @click="queryRuns">
+          <input
+            v-model="store.runBatchSearch"
+            class="input mono"
+            style="width: 112px"
+            placeholder="回归批次号"
+            @input="scheduleDebouncedQuery"
+            @keyup.enter="queryRuns"
+          />
+          <button class="btn btn-primary" :aria-busy="querying" @click="queryRuns">
             {{ querying ? '查询中…' : '查询流水' }}
           </button>
           <button class="btn" @click="resetRunFilters">重置</button>
@@ -829,8 +924,9 @@ async function convertToCase() {
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-top: var(--kpi-top-line, 1px solid var(--border-color));
-  border-radius: 6px;
-  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: 12px 16px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -881,7 +977,7 @@ async function convertToCase() {
 
 .ops-kpi-rate {
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
   color: var(--primary);
 }
 
@@ -891,7 +987,7 @@ async function convertToCase() {
 
 .ops-linear-track {
   width: 100%;
-  height: 5px;
+  height: 4px;
   border-radius: 99px;
   background: var(--bg-muted);
   overflow: hidden;
@@ -913,18 +1009,18 @@ async function convertToCase() {
 
 /* 筛选工具栏 */
 .ops-filter-toolbar {
-  padding: 8px 14px;
+  padding: 10px 16px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 10px;
 }
 
 .ops-filter-controls {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   flex-wrap: wrap;
 }
 
@@ -944,8 +1040,13 @@ async function convertToCase() {
 }
 
 .ops-run-id {
-  color: var(--primary);
+  color: var(--text-primary);
   font-weight: 600;
+  transition: color 0.12s;
+}
+
+.ops-table-row:hover .ops-run-id {
+  color: var(--primary);
 }
 
 .ops-ratio-cell {
@@ -956,7 +1057,7 @@ async function convertToCase() {
 
 .ops-mini-bar {
   width: 48px;
-  height: 5px;
+  height: 4px;
   border-radius: 99px;
   background: var(--bg-muted);
   overflow: hidden;
@@ -972,8 +1073,9 @@ async function convertToCase() {
 .ops-detail-head-card {
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
-  border-radius: 6px;
-  padding: 10px 16px 0;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: 12px 16px 0;
   flex-shrink: 0;
 }
 
@@ -989,7 +1091,7 @@ async function convertToCase() {
 .ops-detail-title-group {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   flex-wrap: wrap;
 }
 
@@ -1018,13 +1120,13 @@ async function convertToCase() {
 }
 
 .ops-run-id-badge {
-  font-size: 14px;
+  font-size: 14.5px;
   font-weight: 700;
   color: var(--text-primary);
-  padding: 2px 8px;
-  border-radius: 4px;
-  background: var(--primary-bg);
-  border: 1px solid var(--primary-border);
+  padding: 0 2px;
+  border-radius: 0;
+  background: transparent;
+  border: none;
 }
 
 .ops-tabs-row {
@@ -1039,7 +1141,7 @@ async function convertToCase() {
   border: none;
   background: transparent;
   padding: 9px 2px 10px;
-  color: var(--text-regular);
+  color: var(--text-secondary);
   font-family: inherit;
   font-size: 13px;
   font-weight: 500;
@@ -1052,12 +1154,12 @@ async function convertToCase() {
 }
 
 .ops-tab-btn:hover {
-  color: var(--primary);
+  color: var(--text-primary);
 }
 
 .ops-tab-btn.active {
   color: var(--primary);
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .ops-tab-btn.active::after {
@@ -1068,14 +1170,15 @@ async function convertToCase() {
   bottom: -1px;
   height: 2px;
   background: var(--primary);
+  border-radius: 2px 2px 0 0;
 }
 
 .ops-tab-badge {
   font-size: 11px;
   padding: 0 6px;
   line-height: 17px;
-  border-radius: 3px;
-  background: var(--bg-muted);
+  border-radius: 4px;
+  background: var(--bg-subtle);
   color: var(--text-secondary);
   border: 1px solid var(--border-light);
 }
@@ -1091,8 +1194,8 @@ async function convertToCase() {
   flex: 1;
   min-height: 0;
   position: relative;
-  background: var(--bg-muted);
-  padding: 14px 18px 18px;
+  background: var(--bg-subtle);
+  padding: 16px 20px 20px;
   overflow: auto;
   display: flex;
   flex-direction: column;
@@ -1107,15 +1210,16 @@ async function convertToCase() {
   pointer-events: none;
 }
 
-/* 顶部 3px solid var(--primary) 正式政企核查报告单 */
+/* 顶部 2px solid var(--primary) 正式政企核查报告单 */
 .official-audit-sheet {
   position: relative;
   z-index: 2;
   background: var(--bg-surface);
-  border: 1px solid var(--border-strong);
-  border-top: 3px solid var(--primary);
-  border-radius: 5px;
-  padding: 18px 24px 24px;
+  border: 1px solid var(--border-color);
+  border-top: 2px solid var(--primary);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: 20px 26px 26px;
   color: var(--text-primary);
   max-width: 1060px;
   width: 100%;

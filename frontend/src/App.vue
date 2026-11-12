@@ -577,8 +577,8 @@ function handleUserMenuCommand(cmd: string) {
             @click="store.navigate('releases')"
           >
             <span class="live-dot"></span>
-            <span class="mono" style="font-weight: 600">{{ liveVersionText }}</span>
-            <ArrowUpRight :size="12" style="opacity: 0.78" />
+            <span class="mono" style="font-weight: 500">{{ liveVersionText }}</span>
+            <ArrowUpRight :size="12" style="opacity: 0.55; color: var(--text-secondary)" />
           </button>
         </div>
 

@@ -473,28 +473,27 @@ function foldKey(...parts: Array<string | number | undefined>): string {
   background-color: var(--bg-surface);
   background-image: none;
   border: 1px solid var(--border-color);
-  border-left: 3px solid var(--primary);
-  border-radius: 5px;
+  border-radius: 8px;
   overflow: hidden;
 }
 
 .tl-node-card.tl-outcome-pass {
-  border-color: rgba(7, 136, 85, 0.36);
-  border-left: 3.5px solid var(--success);
+  border-color: var(--success-border);
+  border-left: 2.5px solid var(--success);
 }
 
 .tl-node-card.tl-outcome-warn {
-  border-color: rgba(200, 105, 6, 0.38);
-  border-left: 3.5px solid var(--warning);
+  border-color: var(--warning-border);
+  border-left: 2.5px solid var(--warning);
 }
 
 .tl-node-card.tl-outcome-err {
-  border-color: rgba(220, 38, 38, 0.38);
-  border-left: 3.5px solid var(--danger);
+  border-color: var(--danger-border);
+  border-left: 2.5px solid var(--danger);
 }
 
 .tl-node-head {
-  padding: 7px 12px;
+  padding: 8px 12px;
   background-color: var(--bg-subtle);
   border-bottom: 1px solid var(--border-light);
   display: flex;
@@ -508,29 +507,29 @@ function foldKey(...parts: Array<string | number | undefined>): string {
   align-items: center;
   gap: 5px;
   padding: 1px 8px;
-  border-radius: 3px;
+  border-radius: 4px;
   font-size: 11.5px;
-  font-weight: 600;
-  background-color: var(--primary-bg);
-  border: 1px solid var(--primary-border);
-  color: var(--primary);
+  font-weight: 500;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
 }
 
 .tl-round-pill.pass {
-  background-color: rgba(7, 136, 85, 0.14);
-  border-color: rgba(7, 136, 85, 0.36);
+  background-color: var(--success-bg);
+  border-color: var(--success-border);
   color: var(--success);
 }
 
 .tl-round-pill.warn {
-  background-color: rgba(200, 105, 6, 0.15);
-  border-color: rgba(200, 105, 6, 0.38);
+  background-color: var(--warning-bg);
+  border-color: var(--warning-border);
   color: var(--warning);
 }
 
 .tl-round-pill.err {
-  background-color: rgba(220, 38, 38, 0.14);
-  border-color: rgba(220, 38, 38, 0.38);
+  background-color: var(--danger-bg);
+  border-color: var(--danger-border);
   color: var(--danger);
 }
 
@@ -572,43 +571,44 @@ function foldKey(...parts: Array<string | number | undefined>): string {
   font-size: 11.5px;
   line-height: 1.55;
   white-space: pre-wrap;
-  padding: 6px 9px;
-  border-radius: 4px;
+  padding: 6px 10px;
+  border-radius: 6px;
   background-color: var(--bg-subtle);
-  border-left: 2px solid var(--border-strong);
+  border-left: 2px solid var(--border-color);
 }
 
 .tl-tool-box {
   padding: 7px 10px;
-  border-radius: 4px;
+  border-radius: 6px;
   background-color: var(--bg-subtle);
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border-light);
 }
 
 .tl-tool-box.is-failed {
-  background-color: rgba(220, 38, 38, 0.09);
-  border-color: rgba(220, 38, 38, 0.34);
+  background-color: var(--danger-bg);
+  border-color: var(--danger-border);
 }
 
 .tl-tool-tag {
   font-size: 10.5px;
-  font-weight: 600;
+  font-weight: 500;
   padding: 1px 6px;
-  border-radius: 3px;
+  border-radius: 4px;
   background-color: var(--bg-surface);
-  border: 1px solid var(--border-strong);
-  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  color: var(--text-regular);
 }
 
 .tl-tool-tag.err {
   color: var(--danger);
-  border-color: rgba(220, 38, 38, 0.4);
+  border-color: var(--danger-border);
+  background-color: var(--danger-bg);
 }
 
 .tl-issues-box {
   background-color: var(--bg-subtle);
-  border: 1px solid rgba(220, 38, 38, 0.34);
-  border-radius: 4px;
+  border: 1px solid var(--danger-border);
+  border-radius: 6px;
   padding: 7px 10px;
   font-size: 11.5px;
   display: flex;
@@ -617,7 +617,7 @@ function foldKey(...parts: Array<string | number | undefined>): string {
 }
 
 .tl-issues-box.warn {
-  border-color: rgba(200, 105, 6, 0.36);
+  border-color: var(--warning-border);
 }
 
 /* 运行中指示条 */
