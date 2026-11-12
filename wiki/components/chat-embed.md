@@ -12,16 +12,24 @@ sources:
   - src/report_agent/api/routes_chat.py
   - frontend/embed.html
   - frontend/src/embed/ChatEmbedApp.vue
+  - frontend/src/embed/chatApi.ts
+  - frontend/src/embed/stageToast.ts
+  - frontend/src/embed/components/AskParamsCard.vue
   - frontend/src/embed/components/RunCard.vue
+  - frontend/src/embed/components/ReportInlineCard.vue
+  - frontend/src/embed/components/RawEventsTimeline.vue
   - frontend/src/embed/components/PreviewDialog.vue
   - frontend/src/embed/components/TemplateStructureDialog.vue
   - frontend/src/embed/components/SwitchTemplateDialog.vue
+  - frontend/src/embed/components/StageConfirmDialog.vue
+  - frontend/src/embed/components/VersionSelect.vue
+  - frontend/src/utils/sse.ts
   - frontend/src/stores/workspaceTabs.ts
   - frontend/src/components/WorkspaceTabsBar.vue
   - frontend/src/components/ChatIframeTabPane.vue
   - frontend/src/views/ChatSimView.vue
   - frontend/src/components/ChatSimTemplatePicker.vue
-updated: 2026-11-12
+updated: 2026-11-13
 ---
 
 # 嵌入式聊天选模板窗口组件剖析
@@ -64,10 +72,10 @@ flowchart LR
 
 ## 3. 会话存储、入参指纹演进与中断自愈（`chat/store.py` + `chat/service.py`）
 
-- **确定性会话主键与二级分片（`ChatStore`）**：`session_id_for(user_id, order_id)` 对 `f"{user_id.strip()}\x00{order_id.strip()}"` 计算 SHA-256 前 32 位十六进制串（`SESSION_ID_RE` 严格校验防路径穿越），落盘于 `DATA_DIR/chats/<sid[:2]>/<sid>.json`；写操作走 `fsutil.write_json` 原子替换，读操作维护容量 256 的 `OrderedDict` LRU 内存缓存并返回 `copy.deepcopy` 副本，防止调用方原地修改污染缓存；每个 `sessionId` 分配独立 `asyncio.Lock` 串行化会话状态变更，过期会话由 `ChatStore.cleanup(keep_days)` 随 `main._cleanup_loop`（复用 `RUNS_KEEP_DAYS`）自动清理。
-- **上层入参更新与来源合并（`ChatService.open_session`）**：同一 `(userId, orderId)` 再次打开时恢复原会话，并比对 `inputs_fingerprint(inputs, document)`：
+- **确定性会话主键、二级分片与并发安全异步 I/O（`ChatStore`）**：`session_id_for(user_id, order_id)` 对 `f"{user_id.strip()}\x00{order_id.strip()}"` 计算 SHA-256 前 32 位十六进制串（`SESSION_ID_RE` 严格校验防路径穿越），落盘于 `DATA_DIR/chats/<sid[:2]>/<sid>.json`；写操作走 `fsutil.write_json` 原子替换，读操作维护容量 256 的 `OrderedDict` LRU 内存缓存并通过 64 分片会话文件锁（严格保持 `_stripe_lock -> _cache_guard` 锁序）与操作序号守卫串行化冷盘读取、落盘（`aget`/`asave` 卸载至工作线程）、只读 `has_run_id` 预筛（不污染 LRU）及过期清理 `ChatStore.cleanup(keep_days)`，消除 `cleanup()` 与活跃读写的已删会话复活竞态；应用层每个 `sessionId` 再经独立 `asyncio.Lock` 串行化会话状态变更。
+- **草稿态防降级劫持与入参指纹演进（`ChatService.open_session`）**：同一 `(userId, orderId)` 再次打开时恢复原会话——若存量会话处于 `target="draft"`，仅持 `X-API-Key` 的 `ChatCaller(kind="key")` 即便传入 `target="online"` 也会被统一拦截返回 HTTP 403 `DRAFT_FORBIDDEN`；通过权限校验后比对 `inputs_fingerprint(inputs, document)`（自动忽略空白字符串键值以避免上层空串与省略键产生伪变更）：
   - 指纹不变：`inputsChanged=False`，无损恢复历史消息、推荐列表与确认状态；
-  - 指纹变化：`inputsVersion += 1`、`inputsChanged=True`；入参合并遵循**「上层本次非空键值覆盖同名键并标为『上层』；上层此前传过但本次置空/移除的『上层』键同步移除；用户此前在对话或表单中补充过（`inputSources[k] == '用户补充'`）且上层本次未提供非空值的键予以保留」**；同时将所有历史 `run` 卡片标记 `stale=True`（「旧入参」角标），并追加一条 `kind="divider"` 系统分隔消息。
+  - 指纹变化：`inputsVersion += 1`、`inputsChanged=True`；入参合并遵循**「上层本次非空键值覆盖同名键并标为『上层』；上层此前传过但本次置空/移除的『上层』键同步移除；用户此前在对话或表单中补充过（`inputSources[k] == '用户补充'`）且上层本次未提供非空值的键予以保留」**（在 `start_run` 补参时亦支持传入空串清空此前误填的「用户补充」可选参数，同时保护「上层」入参不被空串冲掉）；同时将所有历史 `run` 卡片标记 `stale=True`（「旧入参」角标），并追加一条 `kind="divider"` 系统分隔消息。
 - **进程重启中断恢复**：在 `open_session`、`get_session_view` 或 `stream_events` 读取会话时，若发现某张 `run` 卡片持久化状态仍为 `RUNNING` 但不在当前进程 `ChatRunManager` 活跃任务中，自动将其修正为 `INTERRUPTED`（附错误说明）并写回磁盘，避免前端永久卡死在运行态。
 
 ## 4. 聊天路由智能体与 `output_validator` 自愈（`chat/agent.py`）
@@ -97,8 +105,8 @@ flowchart LR
 ## 6. 后台运行通道、双视图进度流（脱敏步骤 + 原样记录）与断点续接（`chat/manager.py` + `chat/steps.py`）
 
 - **单会话并发互斥**：`ChatService.start_run` 与 `ChatRunManager.start` 共同保证同一 `sessionId` 同时最多只有 1 个活跃运行，重复触发返回 HTTP 409 `RUN_IN_PROGRESS`；预先分配 `run_id = new_run_id()` 注入 `RunRequest(entry="聊天窗口", operator=f"chat:{userId}", run_id=run_id)`，使前端拿到 `RUNNING` 卡片即可立即订阅事件流，且运行记录在工作台「运行记录」视图中清晰标识入口为 `聊天窗口`。
-- **双视图事件缓存与推送**：
-  - **精简脱敏步骤（`StepMapper`）**：过滤内部的 `model_request` / `model_text` 推理原文，将其余 `ProcessEvent` 转换为连续递增 `seq = 1, 2, ...` 的中文步骤 `RunStep{seq, atMs, icon, text, ok}`（掩码引号字面量与长数字串，不在精简视图中展示原始报文）；
+- **双视图事件缓存与全链路异常脱敏**：
+  - **精简脱敏步骤（`StepMapper` + `sanitize_error_text`）**：过滤内部的 `model_request` / `model_text` 推理原文，将其余 `ProcessEvent` 转换为连续递增 `seq = 1, 2, ...` 的中文步骤 `RunStep{seq, atMs, icon, text, ok}`；同时通过 `sanitize_error_text` 统一掩码 POSIX/Windows 本地路径、`Bearer`/`sk-` 等凭证、单双引号字面量与长数字/证件号（`send_message` 对 `TimeoutError` 单独返回友好超时提示，SSE 流 `_sse_chat_stream` 在中途抛 `ChatError` 或内部异常时可靠输出脱敏后的 `event: error` 帧）；
   - **原样运行记录（`_RunChannel.raw_events`）**：事件监听器 `_on_event` 将每条 `ProcessEvent.to_dict()` 追加至通道 `raw_events` 并触发 `_schedule_notify` 广播（即便 `StepMapper.feed` 返回 `None` 如 `model_request` / `model_text`，也能实时唤醒订阅了 `includeRaw=1` 的客户端），支持前端在运行卡片内一键切换「精简步骤 ↔ 原样记录」。
 - **SSE 实时流与双级重放（`GET /runs/{runId}/events` + `GET /runs/{runId}/raw`）**：
   - `GET /runs/{runId}/events` 支持 `?after=N`（与 `Last-Event-ID` 请求头取较大值）及可选 `?includeRaw=1&rawAfter=M`：默认 `includeRaw=False` 仅推送带 `id: <seq>` 的 `step` 帧与 `final` 帧；开启 `includeRaw` 后额外推送无 `id` 的 `raw` 帧（避免污染浏览器 `EventSource` 的步骤 `Last-Event-ID` 游标），空闲每 15s 发送 `: keep-alive`；
@@ -113,11 +121,11 @@ flowchart LR
   - `FAILED` / `RUNNING` / `CANCELLED` / `INTERRUPTED` 状态调用 `confirm` 一律返回 HTTP 400 `NOT_CONFIRMABLE`；
   - `PARTIAL` 状态（存在 `missingShown` 可见未找到字段）未显式传 `acknowledgePartial=true` 时返回 HTTP 409 `PARTIAL_NEEDS_ACK` 并附带 `missingShown` 清单，前端弹窗二次确认后携带 `acknowledgePartial=true` 方可通过；
   - 精确标记 `edited = (markdown != versions[-1].markdown)` 与 `rewritten = (versions[-1].kind == "rewrite")`。
-- **幂等与审计留痕**：对同一 `runId` 相同 `markdown` 重复调用 `confirm` 保持幂等（不重复刷屏 `confirmed` 系统消息），每次有效确认均记录会话内 `confirmRecords` 并通过 `audit("chat-confirm", ...)` 写入 `DATA_DIR/audit.jsonl`。
+- **幂等与审计留痕**：仅当目标运行卡片当前已处于 `card["confirmed"] == True` 且 `markdown` 与最近一次确认快照一致时才按幂等跳过落盘（若用户在确认 `v1` 后经 AI `rewrite` 生成 `v2` 复位了 `card["confirmed"]`，再切回 `v1` 确认仍会准确重算 `edited`/`rewritten` 并记录审计）；每次有效确认均记录会话内 `confirmRecords` 并通过 `audit("chat-confirm", ...)` 写入 `DATA_DIR/audit.jsonl`。
 - **模板下线兼容**：当某模板在工作台被下线后，`get_session_view` 动态标记历史卡片 `templateOffline=True`——**允许用户继续预览和确认已生成的历史报告，但拦截新发起或重跑该模板（返回 HTTP 404 `TEMPLATE_UNAVAILABLE`）**。
-- **ChatGPT Web 风格纯亮色单栏界面与页内全屏弹窗（`ChatEmbedApp.vue`）**：
-  - **纯亮色单栏等比缩放舞台**：页面固定为清爽明亮的纯亮色（`color-scheme: light`），默认启用桌面宽屏基准 `BASE_WIDTH = 1280`、`MIN_STAGE_HEIGHT = 640` 的等比缩放舞台（动态计算 `stageW = Math.max(BASE_WIDTH, vw / s)` 与 `stageH = vh / s` 100% 铺满视口而无灰边；所有弹窗、确认框与轻提示挂载于 `.embed-stage` 内同屏缩放），52px 毛玻璃顶栏提供「工单入参」浮层、「等比缩放 ↔ 自适应」切换与「浏览全部模板」入口。
-  - **居中对话流 + 内联卡片 + 三大页内全屏弹窗**：中央 `max-width: 840px` 消息流内联承载 `RecommendCard.vue`（推荐卡片）、`AskParamsCard.vue`（双列补参卡片）与 `RunCard.vue`（可折叠「精简步骤 ↔ 原样运行记录」+ 内联报告正文卡片），底部配备 24px 大圆角悬浮输入舱（`ChatInput.vue`）；同时提供 `PreviewDialog.vue`（渲染预览 / 源码编辑 / 左右分栏对比）、`TemplateStructureDialog.vue`（模板样例 / Jinja2 原稿 / 入参与核查字段清单）与 `SwitchTemplateDialog.vue`（双列检索全部模板）三大居中详情弹窗，全部内置一键「⤢ 页内全屏 / ⤡ 退出全屏」切换。
+- **ChatGPT Web 风格纯亮色单栏界面、独立轻量分包与页内全屏弹窗（`ChatEmbedApp.vue`）**：
+  - **纯亮色单栏等比缩放舞台与零重型依赖分包**：页面固定为清爽明亮的纯亮色（`color-scheme: light`），默认启用桌面宽屏基准 `BASE_WIDTH = 1280`、`MIN_STAGE_HEIGHT = 640` 的等比缩放舞台（动态计算 `stageW = Math.max(BASE_WIDTH, vw / s)` 与 `stageH = vh / s` 100% 铺满视口而无灰边）；`embed.html` 构建彻底剥离 `ElementPlus` 与 `CodeMirror` 重型依赖（首屏体积缩减约 80%），以挂载于 `.embed-stage` 内同屏缩放的 `VersionSelect.vue`、`StageConfirmDialog.vue` 与零依赖 `stageToast.ts` 提供原生丝滑交互，并复用 `src/utils/sse.ts#readSseStream` 保证流提前结束或 `AbortController.abort()` 时可靠执行 `reader.cancel()`。
+  - **居中对话流 + 内联卡片 + 三大页内全屏弹窗**：中央 `max-width: 840px` 消息流内联承载 `RecommendCard.vue`（推荐卡片）、`AskParamsCard.vue`（双列补参卡片）与 `RunCard.vue`（可折叠「精简步骤 ↔ 原样运行记录」+ 内联报告正文卡片），底部配备 24px 大圆角悬浮输入舱（`ChatInput.vue`）；同时提供 `PreviewDialog.vue`（渲染预览 / 源码编辑 / 左右分栏对比）、`TemplateStructureDialog.vue`（按 `${sessionId}:${inputsVersion}:${templateId}` 隔离预览缓存，`draft` 模式每次拉取最新模板样例 / Jinja2 原稿 / 入参与核查字段清单）与 `SwitchTemplateDialog.vue`（双列检索全部模板）三大居中详情弹窗，全部内置一键「⤢ 页内全屏 / ⤡ 退出全屏」切换。
 
 ## 相关页面
 

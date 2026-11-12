@@ -3,10 +3,11 @@ title: 确定性平台工具设计
 type: concept
 tags: [architecture, tools, primitives, query-result, date, regex]
 sources:
+  - src/report_agent/domain/template.py
   - src/report_agent/runtime/tools.py
   - src/report_agent/runtime/text_tools.py
   - src/report_agent/runtime/evidence.py
-updated: 2026-11-12
+updated: 2026-11-13
 ---
 
 # 确定性平台工具设计
@@ -55,8 +56,8 @@ updated: 2026-11-12
   - `before`：若列值中出现 `before` 子串，只截取第一次出现之前的前缀参与比较（如 `business-sms` 中 `before="编号"` 只比对短信头部）；
   - `prefixLen`：截取列值前 `prefixLen` 个字符再比较（`op="between"` 且列文本长度不足 `prefixLen` 时安全判为不命中，常用于对 14 位 `payDatetime` 取 `prefixLen=8` 做日期区间过滤）。
 - **`anyOf`（OR 条件组）**：行必须同时满足 `where` 中全部条件（AND），且满足 `anyOf` 中至少一个条件（OR），一步完成 `renewal-reminder-sms` 中“匹配业务名称 **或** 匹配任一活动编号”的复合筛选。
-- **全量列名自检（含 0 行结果）**：合并契约声明列 `res.columns` 与实际记录键集构造 `all_cols`，只要已知列集合非空（哪怕当前记录数为 `0`），统一校验 `where`、`anyOf`、`orderBy` 与投影 `columns` 中的列名，遇到未知列立即走 `_fail_or_retry` 提示可用列。
-- **`resultIds`（跨批次合并查询）**：支持一次传入多个成功接口调用结果（如 `resultIds=["r1", "r2"]`），合并过滤并统一按 `orderBy` 稳定排序，输出每行同时携带各自原始的 `resultId` 与 `row`（任一 `rid` 不存在或 `ok=False` 时拒绝合并返回 `ok=False`）。
+- **全量列名与严格参数自检（含 0 行结果）**：`Condition` 与 `OrderBy` 均配置 `extra="forbid"` 拦截未知参数（如误传 `direction`）并拒绝布尔 `limit=True`；合并契约声明列 `res.columns` 与实际记录键集构造 `all_cols`，只要已知列集合非空（哪怕当前记录数为 `0`），统一校验 `where`、`anyOf`、`orderBy` 与投影 `columns` 中的列名，遇到未知列立即走 `_fail_or_retry` 提示可用列。
+- **`resultIds`（跨批次合并查询）**：单结果 `resultId` 与多结果 `resultIds` 共用统一的列校验、条件预归一化与排序管线（`_validate_query_columns` / `_filter_and_sort_records`）；支持一次传入多个成功接口调用结果（如 `resultIds=["r1", "r2"]`），合并过滤并统一按 `orderBy` 稳定排序，输出每行同时携带各自原始的 `resultId` 与 `row`（任一 `rid` 不存在或 `ok=False` 时拒绝合并返回 `ok=False`）。
 
 ### 3.2 严格日期扫描替代脆弱手写正则（`extract_dates` + `date_shift`）
 

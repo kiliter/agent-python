@@ -3,12 +3,14 @@ title: 单智能体请求处理管道
 type: concept
 tags: [architecture, pipeline, runner, status, partial-salvage]
 sources:
+  - src/report_agent/domain/template.py
   - src/report_agent/runtime/runner.py
   - src/report_agent/runtime/output_model.py
   - src/report_agent/runtime/render.py
   - src/report_agent/runtime/workspace.py
+  - src/report_agent/api/common.py
   - src/report_agent/api/routes_system.py
-updated: 2026-11-12
+updated: 2026-11-13
 ---
 
 # 单智能体请求处理管道
@@ -66,21 +68,21 @@ sequenceDiagram
 
 ### 第 2 步：入参清洗校验与工作区创建
 
-- 先对传入的 `req.inputs` 统一执行 `.strip()` 去除首尾空白（防止尾随空格透传给网关报错），再由 `validate_inputs(tpl, inputs)` 按 `template.yaml` 中 `inputs` 定义的 `required` 与 `pattern` 正则整串校验，不合法时立即抛出 `InputValidationError`（HTTP 400 `INVALID_INPUT`），不消耗任何模型 Token。
-- 创建请求级隔离的 `Workspace` 与 `EventSink`（`src/report_agent/runtime/workspace.py`），负责将单据按行编号（`L001`、`L002`…）、惰性缓存 `DocumentIndex` 定位索引、记录网关调用的完整报文与幂等去重缓存（`r1`、`r2`…）、记录每次工具调用的输入输出（`t1`、`t2`…），并按序号发出过程事件。
+- 先对传入的 `req.inputs` 统一执行 `.strip()` 去除首尾空白（防止尾随空格透传给网关报错），再由 `validate_inputs(tpl, inputs)` 按 `template.yaml` 中 `inputs` 定义的 `required` 与 `pattern`（调用 `domain/template.py#safe_regex_fullmatch` 执行带防 ReDoS 语法树检查的整串匹配）做快速校验，不合法时立即抛出 `InputValidationError`（HTTP 400 `INVALID_INPUT`），不消耗任何模型 Token。
+- 创建请求级隔离的 `Workspace` 与 `EventSink`（`src/report_agent/runtime/workspace.py`），负责将单据按行编号（`L001`、`L002`…）、惰性缓存 `DocumentIndex` 定位索引、记录网关调用的完整报文与幂等去重缓存（`r1`、`r2`…）、记录每次工具调用的输入输出（`t1`、`t2`…），并按序号发出过程事件（同事件循环内 `queue_listener` 直接入队，免除跨线程唤醒开销）。
 
 ### 第 3 步：动态构建与缓存交卷模型（`submit_report`）
 
-`src/report_agent/runtime/output_model.py#build_report_model` 根据当前模板的 `fields` 动态生成 Pydantic 模型，配置 `extra="forbid"`（对应 OpenAI Structured Outputs `additionalProperties: false`，并将字段描述内聚于 `$defs` 类文档以避免 `$ref` 外层产生冗余 `anyOf` 包裹）：
+`src/report_agent/runtime/output_model.py#build_report_model` 根据当前模板的 `fields` 动态生成 Pydantic 模型（草稿存在重复字段名时自动保序容错去重），配置 `extra="forbid"`（对应 OpenAI Structured Outputs `additionalProperties: false`，并将字段描述内聚于 `$defs` 类文档以避免 `$ref` 外层产生冗余 `anyOf` 包裹）：
 
 - **标量字段**（`string` / `enum` / `date`）：`value` 类型为 `str | None`（枚举字段生成 `Literal[...]` 约束可选值）；
 - **列表字段**（`list`）：先根据 `columns` 动态生成行模型 `{字段名}Row`（每列 `str` 或枚举 `Literal[...]`），再将字段 `value` 声明为 `list[RowModel] | None`；
 - 每个字段均固定包含四个属性：`status`（`"found"` | `"not_found"`）、`value`、`evidence`（`list[Evidence]`）与 `reasoning`（`str`）；
 - **线上模型与 Agent 版本缓存**：当 `target == "online"` 且使用默认模型/工具时，`AgentRunner` 按 `(rev, tpl.id, bundle.seq)` 有界缓存编译好的 `(report_model, agent)`，消除每请求重复构建动态 Pydantic Schema 的 CPU 开销。
 
-关于交卷输出通道（`AGENT_OUTPUT_MODE`，见 `runner.py#_build_output_type`）：
-- 默认 `tool`：通过 `ToolOutput(report_model, name="submit_report", strict=settings.llm_strict_tools)` 注册交卷工具，兼容 DeepSeek、通义千问、vLLM 等各类 OpenAI 兼容服务端；
-- 可选 `native` / `json_object` / `prompted`：分别对应 `NativeOutput(report_model, strict=settings.agent_native_strict)`、JSON 对象模式与提示词提取模式。
+关于交卷输出通道（`AGENT_OUTPUT_MODE`，见 `runner.py#AgentRunner._build_agent`）：
+- 默认 `tool`：通过 `ToolOutput(report_model, name="submit_report")` 注册交卷工具，兼容 DeepSeek、通义千问、vLLM 等各类 OpenAI 兼容服务端；
+- 可选 `native` / `json_object` / `prompted`：分别对应 `NativeOutput(report_model, strict=settings.agent_native_strict)` 与 `PromptedOutput(report_model, name="submit_report")`。
 
 ### 第 4 步：提示词注入与渐进式 Skill 披露
 
@@ -89,7 +91,7 @@ sequenceDiagram
 
 ### 第 5 步：ReAct 工具循环与并发限额保护
 
-- 平台级动态并发限流器 `_DynamicLimiter(settings.agent_max_concurrent_runs)` 限制全局并发运行数（默认 `8`），配合不可变 `_RuntimeBundle` 实现运行期配置原子热重载而不会因重建信号量突破在途并发上限。
+- 平台级动态并发限流器 `_DynamicLimiter(settings.agent_max_concurrent_runs)` 限制全局并发运行数（默认 `8`，自动清理已取消或已关闭事件循环的失效等待协程），配合不可变 `_RuntimeBundle` 实现运行期配置原子热重载而不会因重建信号量突破在途并发上限。
 - Pydantic AI `UsageLimits` 强制约束单次运行的 `agent_request_limit`（默认 25 轮模型请求）与 `agent_tool_calls_limit`（默认 120 次工具调用，默认开启 `llm_parallel_tool_calls=True`），外层包裹 `asyncio.timeout(settings.agent_run_timeout_s)`（默认 600s）超时保护。
 
 ### 第 6 步：证据核验、精确重填与级联部分挽救
@@ -99,9 +101,9 @@ sequenceDiagram
 1. `EvidenceChecker.check(report)` 逐字段核验状态、类型、格式与证据链（详见 [强证据核验机制](evidence-system.md)）。
 2. 若存在违规项且未超过 `AGENT_OUTPUT_RETRIES`（默认 3 次），发出 `report_rejected` 事件，并抛出 `ModelRetry`——仅把违规字段名称及具体原因拼成反馈消息发回给模型，模型无需重跑已成功的网关查询，只需修正交卷参数。
 3. 若达重试上限或外层捕获到 `UnexpectedModelBehavior`：
-   - 验证器内达到重试上限（`ctx.retry >= settings.agent_output_retries`）时直接原位降级违规字段；外层异常时由 `_salvage_partial_report()` 从消息历史最后一次 `submit_report` 调用或文本载荷中挽救合法草稿；
-   - 将所有未通过 `EvidenceChecker` 的字段强制改写为 `status="not_found", value=None, evidence=[]`，标记 `degraded_fields`；
-   - `_cascade_degraded_fields()` 扫描其余 `status="found"` 的字段：只要某字段的 `evidence` 引用了已被平台降级的前置字段，或引用了模型自报 `not_found` 的前置字段且自身缺乏其它真实有效支撑源，则将该下游字段一并递归降级为 `not_found`，并发出 `report_degraded` 事件。
+   - 验证器内达到重试上限（`ctx.retry >= ctx.max_retries`）时直接调用 `_degrade_failed_fields()` 原位降级违规字段；外层异常时由 `_salvage_partial_report()` 从消息历史最后一次 `submit_report` 调用或文本载荷（`_extract_json_dict` 支持跳过前置文字定位代码块 JSON）中挽救合法草稿（标量字段严格拒收 `list`/`dict` 容器值）；
+   - 将所有未通过 `EvidenceChecker` 的字段强制改写为 `status="not_found", value=None, evidence=[]`（收尾阶段同步清空所有 `not_found` 字段上的未核验残留 `evidence`），标记 `degraded_fields`；
+   - `_cascade_degraded_fields()` 扫描其余 `status="found"` 的字段：只要某字段的 `evidence` 含自引用、引用了已被平台降级的前置字段，或引用了模型自报 `not_found` 的前置字段且自身缺乏其它真实有效支撑源（`has_supporting_real_source`），则将该下游字段一并递归降级为 `not_found`，并发出 `report_degraded` 事件。
 
 ### 第 7 步：Jinja2 渲染与三级运行状态判定
 

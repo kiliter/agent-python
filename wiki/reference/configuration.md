@@ -4,9 +4,10 @@ type: reference
 tags: [reference, configuration, env, settings, hot-reload]
 sources:
   - src/report_agent/config.py
+  - src/report_agent/store/fsutil.py
   - src/report_agent/store/runtime_config.py
   - .env.example
-updated: 2026-11-12
+updated: 2026-11-13
 ---
 
 # 环境变量与运行期配置参考
@@ -83,7 +84,7 @@ updated: 2026-11-12
 ## 2. 配置生效优先级与安全持久化
 
 1. **优先级**：`DATA_DIR/config/runtime/current.json`（工作台在线热更新） > 进程环境变量 > `.env` > `Settings` 默认值。
-2. **原子 0600 落盘**：`RuntimeConfigStore` 通过 `_atomic_write_json_600` 先对临时文件描述符设 `0600` 权限再写入、`fsync`、`os.replace` 替换，杜绝任何微秒的明文密钥权限裸露窗口。
+2. **原子 0600 落盘与启动自愈**：`RuntimeConfigStore` 复用 `store/fsutil.py#write_json(..., mode=0o600)` 与 `append_jsonl(..., mode=0o600)`，在写入前先对临时文件描述符设 `0600` 权限再写入、`fsync`、`os.replace` 替换，杜绝任何微秒的明文密钥权限裸露窗口；若 `current.json` 意外缺失但 `index.jsonl` / `revisions/c*.json` 存在，启动阶段自动校验恢复最新修订快照。
 
 ## 相关页面
 

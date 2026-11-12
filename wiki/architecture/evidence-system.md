@@ -6,8 +6,9 @@ sources:
   - src/report_agent/runtime/evidence.py
   - src/report_agent/runtime/output_model.py
   - src/report_agent/runtime/runner.py
+  - src/report_agent/runtime/render.py
   - src/report_agent/domain/template.py
-updated: 2026-11-12
+updated: 2026-11-13
 ---
 
 # 强证据核验机制
@@ -26,7 +27,9 @@ updated: 2026-11-12
 | `document` | `quote` | `quote` 非空，且由绑定在工作区上的惰性索引 `DocumentIndex`（`locate_quote_in_document`）在单据原文中定位匹配（优先逐字匹配，其次空白折叠归一化匹配） |
 | `input` | `key` | `key` 必须存在于当前运行入参 `inputs` 中且去空白后非空（空字符串/全空白入参不能作为 `found` 证据） |
 | `tool` | `callId` | `callId` 必须存在于 `workspace.tool_calls` 且 `call.ok == True`；**严禁将 `load_skill` 作为任何字段的证据**（`load_skill` 仅用于阅读技能说明） |
-| `field` | `name` | `name` 必须是当前模板已定义的其他字段名（禁止自引用；全局 `EvidenceChecker.check` 通过 `_find_reachable_cycle` 执行有向图 DFS，拦截环上节点及 `C -> A <-> B` 指向环的环外节点；且通过不动点 `_compute_supported_found_fields` 禁止无真实有效数据源支撑地引用 `not_found` 前置字段） |
+| `field` | `name` | `name` 必须是当前模板已定义的其他字段名（禁止自引用；全局 `EvidenceChecker.check` 通过 `_find_reachable_cycle` 跨起点共享无环 `safe_nodes` 执行 $O(V+E)$ 有向图 DFS，且不对含自环节点标记无环，完整拦截环上节点及 `B -> A -> A` / `C -> A <-> B` 等指向环的环外节点；同时通过不动点 `_compute_supported_found_fields` 立即剔除含自引证据字段，禁止无真实有效数据源支撑地引用 `not_found` 前置字段） |
+
+此外，标量字段与列表单元格在 `EvidenceChecker._check_field`、`_salvage_partial_report` 与 `render.py#field_render` 中统一拒收 `list` / `dict` 容器类型（`scalar_to_str` 仅转换基础数值/布尔标量），杜绝把 Python 容器 `repr` 强转混入报告正文。
 
 ## 2. 三种字段证据等级（`FieldDef.evidence`）
 
@@ -73,9 +76,9 @@ updated: 2026-11-12
 ## 4. 失败字段挽救与依赖链级联降级
 
 1. **校验重试阶段**：在 `@agent.output_validator` 内，若 `ctx.retry < ctx.max_retries`（`AGENT_OUTPUT_RETRIES`，默认 3 次），发出 `report_rejected` 事件并通过 `ModelRetry(format_issues(issues))` 让模型修正违规字段。
-2. **重试耗尽降级与异常挽救（`_salvage_partial_report` + `_cascade_degraded_fields`）**：
-   - 将违规字段重置为 `status="not_found", value=None, evidence=[]`；
-   - `_cascade_degraded_fields` 循环扫描其余 `status="found"` 的字段：① 凡在 `evidence` 中引用了**因校验未通过被平台降级**的前置字段，一律递归降级；② 凡引用了模型自报 `not_found` 的前置字段且自身不具备其它有效真实支撑源（`_has_valid_non_degraded_support` 为 `False`）的悬空衍生字段，同样递归降级为 `not_found` 直至不动点，并发出 `report_degraded` 事件。
+2. **重试耗尽降级与异常挽救（`_degrade_failed_fields` + `_salvage_partial_report` + `_cascade_degraded_fields`）**：
+   - 将违规字段重置为 `status="not_found", value=None, evidence=[]`（收尾阶段同样清空所有 `not_found` 字段上未经核验的残留 `evidence`）；
+   - `_cascade_degraded_fields` 循环扫描其余 `status="found"` 的字段：① 凡含自引用（`name == fname`）或在 `evidence` 中引用了**因校验未通过被平台降级**的前置字段，一律递归降级；② 凡引用了模型自报 `not_found` 的前置字段且自身不具备其它有效真实支撑源（与核验器共用的 `has_supporting_real_source(..., self_field=fname)` 返回 `False`）的悬空衍生字段，同样递归降级为 `not_found` 直至不动点，并发出 `report_degraded` 事件。
 
 ## 相关页面
 

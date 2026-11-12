@@ -5,9 +5,10 @@ tags: [architecture, template, jinja2, pebble, tracked-value, tracked-list]
 sources:
   - src/report_agent/domain/template.py
   - src/report_agent/domain/jinja_env.py
+  - src/report_agent/domain/resources.py
   - src/report_agent/runtime/render.py
   - tools/java_migration/verify_render.py
-updated: 2026-11-12
+updated: 2026-11-13
 ---
 
 # 模板模型与渲染机制
@@ -29,8 +30,8 @@ updated: 2026-11-12
        - `placeholder`（默认）：保留字面占位符 `{{字段名}}`；
        - `empty`：渲染为空字符串 `""`（用于可选金额、靓号等级，或 `{% if 有设备押金 %}` 这类靠非空判断真值的条件字段）；
        - `value`：渲染为固定 `defaultValue`（如 `受理渠道` 默认 `其他`，`手机号类别` 默认 `非靓号`；注意 `whenMissing == "value"` 的字段即使未找到已有兜底值，不会计入 `missingShown`）。
-   - `inputs`（`list[InputDef]`）与关联 `skills`（`list[str]`）。
-2. **`body.md.j2`**：Jinja2 报告正文模板。
+   - `inputs`（`list[InputDef]`，其 `pattern` 在校验阶段由 `domain/template.py#safe_regex_compile` 基于显式栈语法树遍历拦截嵌套重复量词 ReDoS 并缓存编译结果）与关联 `skills`（`list[str]`）。
+2. **`body.md.j2`**：Jinja2 报告正文模板（编译期 `TemplateSyntaxError` 与 `TemplateAssertionError` 统一转为 `BodySyntaxError` / `BODY_SYNTAX` 诊断，避免语法错误触发 500）。
 
 ## 2. 对齐 Java Pebble 3.2.2 的三项兼容定制（`domain/jinja_env.py`）
 
@@ -49,7 +50,7 @@ updated: 2026-11-12
 ### 3.1 标量包装器 `TrackedValue(str)` + `_TrackedCodeGenerator` + 过滤器透传
 
 - **条件判断不记展示**：在 `{% if 受理渠道 == "热线" %}` 中做比较或布尔求值时不会经过 `finalize`，不记入 `used`；
-- **字符串拼接与过滤器不断链**：重写 `strip`/`replace`/`lower`/`+`，定制编译器 `_TrackedCodeGenerator`（拦截 Jinja2 `~` 拼接 `visit_Concat` 与 `+` 运算），并包装内置过滤器与 `_TrackedSandboxEnvironment.call_filter`（收集入参及 `list`/`tuple` 容器元素中 `TrackedValue` 的 `field_names` 与 `missing` 标记），确保 `{{ 字段A ~ 字段B }}` 或 `{{ [订购短信] | join(",") }}` 转换后仍保留关联字段名并在最终 `finalize` 输出时一并记入 `used`。
+- **字符串拼接、切分与过滤器不断链**：重写 `strip`/`replace`/`lower`/`split`/`rsplit`/`splitlines`/`removeprefix`/`removesuffix`/`+`，定制编译器 `_TrackedCodeGenerator`（拦截 Jinja2 `~` 拼接 `visit_Concat` 与 `+` 运算），并包装内置过滤器与 `_TrackedSandboxEnvironment.call_filter`（收集入参及 `list`/`tuple`/`Mapping` 容器元素中 `TrackedValue` 的 `field_names` 与 `missing` 标记），确保 `{{ 字段A ~ 字段B }}` 或 `{{ [订购短信] | join(",") }}` 转换后仍保留关联字段名并在最终 `finalize` 输出时一并记入 `used`（`render_body` 以位置参数传入 `context` 防止字段名为 `"self"` 时产生形参冲突，且支持嵌套 `make_environment(used=...)` 的 `_ACTIVE_USED` 独立隔离）。
 
 ### 3.2 列表包装器 `TrackedList(list)` + `_ACTIVE_USED` + 预编译模板缓存
 
