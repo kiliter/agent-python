@@ -20,6 +20,15 @@ import {
 import type { RawProcessEvent } from '../types'
 import { copyText } from '../markdown'
 import { stageToast } from '../stageToast'
+import {
+  describeToolEvent,
+  formatElapsedAt,
+  formatRoundBadge,
+  groupEventsByRound,
+  isEventFailed,
+  shouldShowRoundMainCard,
+  type ToolDisplayMeta,
+} from '@/utils/timelineFormat'
 
 const props = defineProps<{
   events: RawProcessEvent[]
@@ -42,96 +51,21 @@ function toggleFold(key: string) {
   expandedMap[key] = !expandedMap[key]
 }
 
-const TOOL_LABELS: Record<string, string> = {
-  load_skill: '加载规程',
-  call_api: '调用接口',
-  query_result: '结果筛选',
-  normalize_text: '文本清洗',
-  text_contains: '单据匹配',
-  date_range: '日期窗口',
-  format_date: '日期转换',
-  extract_dates: '提取日期',
-  date_shift: '日期偏移',
-  expand_period: '展开账期',
-  time_diff: '时间差计算',
-  regex_extract: '正则提取',
-}
+const groups = computed(() => groupEventsByRound(props.events))
 
-const OP_LABELS: Record<string, string> = {
-  equals: '等于',
-  contains: '包含',
-  notContains: '不包含',
-  normalizedContains: '清洗后包含',
-  normalizedNotContains: '清洗后不包含',
-  startsWith: '前缀为',
-  between: '介于',
-}
-
-const OUTCOME_TYPES = new Set(['report_rejected', 'report_accepted', 'report_degraded', 'run_failed'])
-
-interface RoundGroup {
-  round: number
-  atMs: number
-  items: RawProcessEvent[]
-  outcomes: RawProcessEvent[]
-}
-
-const sortedEvents = computed(() => [...props.events].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0)))
-
-const groups = computed<RoundGroup[]>(() => {
-  const map = new Map<number, RoundGroup>()
-  for (const e of sortedEvents.value) {
-    const round = e.round ?? 0
-    let g = map.get(round)
-    if (!g) {
-      g = { round, atMs: e.atMs ?? 0, items: [], outcomes: [] }
-      map.set(round, g)
+/** 预计算工具调用可读摘要，避免渲染期间重复解析 JSON */
+const toolMetaMap = computed<Map<number, ToolDisplayMeta>>(() => {
+  const map = new Map<number, ToolDisplayMeta>()
+  for (const e of props.events) {
+    if (e.type === 'tool') {
+      map.set(e.seq, describeToolEvent(e))
     }
-    if (OUTCOME_TYPES.has(e.type)) g.outcomes.push(e)
-    else if (e.type !== 'model_request') g.items.push(e)
   }
-  return [...map.values()]
+  return map
 })
 
-function showMainStep(g: RoundGroup): boolean {
-  return g.items.length > 0 || g.outcomes.length === 0
-}
-
-function formatAt(ms: number | undefined): string {
-  return `+${(Math.max(0, ms ?? 0) / 1000).toFixed(1)}s`
-}
-
-function roundLabel(g: RoundGroup): string {
-  if (g.round === 0 && g.items.some(e => e.type === 'run_started')) return '初始化 · 启动核查运行'
-  const labels: string[] = []
-  const push = (s: string) => {
-    if (!labels.includes(s)) labels.push(s)
-  }
-  for (const e of g.items) {
-    if (e.type === 'model_text') push('推理说明')
-    else if (e.type === 'tool') {
-      if (e.tool === 'load_skill') push('加载规程')
-      else if (e.tool === 'call_api') push('接口查询')
-      else if (e.tool === 'query_result') push('记录筛选')
-      else push('工具计算')
-    }
-  }
-  if (!labels.length) labels.push('请求大模型')
-  return `第 ${g.round} 轮 · ${labels.join('、')}`
-}
-
-function rec(v: unknown): Record<string, unknown> {
-  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
-}
-
-function str(v: unknown): string {
-  if (v === undefined || v === null) return ''
-  if (typeof v === 'string') return v
-  try {
-    return JSON.stringify(v)
-  } catch {
-    return String(v)
-  }
+function toolMeta(e: RawProcessEvent): ToolDisplayMeta {
+  return toolMetaMap.value.get(e.seq) ?? describeToolEvent(e)
 }
 
 function prettyJson(v: unknown): string {
@@ -139,75 +73,6 @@ function prettyJson(v: unknown): string {
     return JSON.stringify(v ?? null, null, 2)
   } catch {
     return String(v)
-  }
-}
-
-function isFailed(e: RawProcessEvent): boolean {
-  const r = rec(e.result)
-  return e.ok === false || r.ok === false || Boolean(r.error)
-}
-
-function toolLabel(name: string | undefined): string {
-  if (!name) return '平台工具'
-  return TOOL_LABELS[name] || '工具调用'
-}
-
-/** 生成工具单行可读摘要 */
-function toolSummary(e: RawProcessEvent): string {
-  const a = rec(e.args)
-  const r = rec(e.result)
-  if (isFailed(e) && r.error) {
-    return `${str(a.name || a.resultId || '')} 失败：${str(r.error)}`.trim()
-  }
-  switch (e.tool) {
-    case 'load_skill': {
-      const names = Array.isArray(a.names) ? a.names.map(str).join('、') : str(a.name)
-      const title = str(r.title) || (Array.isArray(r.titles) ? r.titles.map(str).join('、') : '')
-      return title ? `${names}（${title}）` : names
-    }
-    case 'call_api': {
-      const count = r.count !== undefined ? `${str(r.count)} 条` : '完成'
-      const cost = r.costMs !== undefined ? ` · ${str(r.costMs)}ms` : ''
-      const rid = r.resultId ? ` → ${str(r.resultId)}` : ''
-      return `${str(a.name)}${rid}（${count}${cost}）`
-    }
-    case 'query_result': {
-      const target = Array.isArray(a.resultIds) ? a.resultIds.map(str).join('+') : str(a.resultId)
-      const where = Array.isArray(a.where) ? a.where : []
-      const cond = where
-        .slice(0, 2)
-        .map(w => {
-          const c = rec(w)
-          return `${str(c.column)} ${OP_LABELS[str(c.op)] || str(c.op)} "${str(c.value)}"`
-        })
-        .join(' & ')
-      const more = where.length > 2 ? ` 等${where.length}项` : ''
-      return `${target}${cond ? ` [${cond}${more}]` : ''} → 命中 ${str(r.total ?? 0)} 条`
-    }
-    case 'date_range':
-      return `${str(a.time)} (${str(a.unit)}) → ${str(r.start)} ~ ${str(r.end)}`
-    case 'format_date':
-      return `${str(a.value ?? a.values)} → ${str(r.value ?? r.values)}`
-    case 'extract_dates':
-      return `提取 ${str(r.count ?? 0)} 个日期${r.min ? `（${str(r.min)}~${str(r.max)}）` : ''}`
-    case 'date_shift':
-      return `${str(a.date || a.time)} 偏移 ${str(a.days)} 天 → ${str(r.date || r.start)}`
-    case 'expand_period':
-      return `${str(a.period || a.text)} → ${Array.isArray(r.months) ? r.months.join('、') : str(r.startDate)}`
-    case 'time_diff':
-      return `相差 ${str(r.diffSeconds ?? r.absSeconds)} 秒`
-    case 'regex_extract':
-      return `匹配 ${str(r.count ?? 0)} 项${r.first ? `（首项：${str(r.first)}）` : ''}`
-    case 'text_contains':
-      return `查找 "${str(a.target)}" → ${r.contains ? '命中' : '未命中'}`
-    case 'normalize_text': {
-      const val = str(r.value)
-      return val.length > 36 ? `"${val.slice(0, 36)}…"` : `"${val}"`
-    }
-    default: {
-      const s = str(a)
-      return s.length > 48 ? `${s.slice(0, 48)}…` : s
-    }
   }
 }
 
@@ -221,13 +86,13 @@ async function onCopyJson(label: string, val: unknown) {
 <template>
   <div class="raw-tl">
     <!-- 按需加载态 -->
-    <div v-if="loading && !sortedEvents.length" class="raw-state">
+    <div v-if="loading && !props.events.length" class="raw-state">
       <Loader2 :size="15" class="spin primary-icon" />
       <span>正在加载原样运行记录…</span>
     </div>
 
     <!-- 错误重试态 -->
-    <div v-else-if="error && !sortedEvents.length" class="raw-state raw-err">
+    <div v-else-if="error && !props.events.length" class="raw-state raw-err">
       <AlertTriangle :size="15" />
       <span>{{ error }}</span>
       <button type="button" class="raw-retry-btn" @click="emit('retry')">
@@ -236,7 +101,7 @@ async function onCopyJson(label: string, val: unknown) {
     </div>
 
     <!-- 空状态兜底 -->
-    <div v-else-if="!sortedEvents.length && !running" class="raw-state">
+    <div v-else-if="!props.events.length && !running" class="raw-state">
       <span>暂无原样运行事件记录</span>
     </div>
 
@@ -244,10 +109,10 @@ async function onCopyJson(label: string, val: unknown) {
     <div v-else class="raw-groups">
       <template v-for="g in groups" :key="g.round">
         <!-- 本轮常规事件卡片 -->
-        <div v-if="showMainStep(g)" class="round-card">
+        <div v-if="shouldShowRoundMainCard(g)" class="round-card">
           <div class="round-head">
-            <span class="round-pill">{{ roundLabel(g) }}</span>
-            <span class="round-time mono">{{ formatAt(g.atMs) }}</span>
+            <span class="round-pill">{{ formatRoundBadge(g) }}</span>
+            <span class="round-time mono">{{ formatElapsedAt(g.atMs) }}</span>
           </div>
 
           <div class="round-body">
@@ -297,7 +162,7 @@ async function onCopyJson(label: string, val: unknown) {
               <div
                 v-else-if="e.type === 'tool'"
                 class="tool-card"
-                :class="{ failed: isFailed(e), open: expandedMap[`tool_${e.seq}`] }"
+                :class="{ failed: isEventFailed(e), open: expandedMap[`tool_${e.seq}`] }"
               >
                 <button
                   type="button"
@@ -308,12 +173,12 @@ async function onCopyJson(label: string, val: unknown) {
                     <ChevronDown v-if="expandedMap[`tool_${e.seq}`]" :size="12" />
                     <ChevronRight v-else :size="12" />
                   </span>
-                  <span class="tool-code mono" :class="{ err: isFailed(e) }">{{ e.tool }}</span>
-                  <span class="tool-cn">{{ toolLabel(e.tool) }}</span>
-                  <span class="tool-sum" :title="toolSummary(e)">{{ toolSummary(e) }}</span>
+                  <span class="tool-code mono" :class="{ err: isEventFailed(e) }">{{ e.tool }}</span>
+                  <span class="tool-cn">{{ toolMeta(e).badgeLabel }}</span>
+                  <span class="tool-sum" :title="toolMeta(e).compactSummary">{{ toolMeta(e).compactSummary }}</span>
                   <span v-if="e.callId" class="tool-callid mono">#{{ e.callId }}</span>
-                  <span class="tool-status" :class="isFailed(e) ? 'st-err' : 'st-ok'">
-                    {{ isFailed(e) ? '失败' : '成功' }}
+                  <span class="tool-status" :class="isEventFailed(e) ? 'st-err' : 'st-ok'">
+                    {{ isEventFailed(e) ? '失败' : '成功' }}
                   </span>
                 </button>
 
@@ -366,7 +231,7 @@ async function onCopyJson(label: string, val: unknown) {
             <span v-else class="round-pill pill-err">
               <XCircle :size="12" /> 第 {{ g.round }} 轮 · 运行终止失败
             </span>
-            <span class="round-time mono">{{ formatAt(o.atMs) }}</span>
+            <span class="round-time mono">{{ formatElapsedAt(o.atMs) }}</span>
           </div>
 
           <div class="round-body">

@@ -11,7 +11,6 @@
 <script setup lang="ts">
 import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { marked } from 'marked'
 import {
   ArrowUpRight,
   CheckCircle2,
@@ -35,6 +34,7 @@ import {
 } from 'lucide-vue-next'
 import { platformApi, errorMessage } from '@/api/platformApi'
 import { usePlatformStore } from '@/stores/platform'
+import { copyToClipboard } from '@/utils/clipboard'
 import {
   buildChatTabKey,
   useWorkspaceTabsStore,
@@ -43,7 +43,7 @@ import {
   type SimPostMessageLog,
 } from '@/stores/workspaceTabs'
 import type { TemplateInput } from '@/types/platform'
-import { sanitizeHtml } from '@/utils/sanitizeHtml'
+import { renderSafeMarkdown } from '@/utils/markdown'
 import ChatSimTemplatePicker, {
   type TemplatePrefillPayload,
 } from '@/components/ChatSimTemplatePicker.vue'
@@ -79,35 +79,14 @@ const rightLayout = ref<RightLayoutMode>('tabs')
 const reportViewKind = ref<ReportViewKind>('rendered')
 const collapsedLogIds = ref<Set<number>>(new Set())
 
-// ==================== 剪贴板与安全 Markdown 渲染辅助 ====================
-async function writeClipboard(text: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text)
-      return true
+watch(
+  () => tabsStore.simLogs.length,
+  len => {
+    if (len === 0 && collapsedLogIds.value.size > 0) {
+      collapsedLogIds.value = new Set()
     }
-  } catch {
-    /* 降级至选区复制 */
-  }
-  try {
-    const ta = document.createElement('textarea')
-    ta.value = text
-    ta.style.position = 'fixed'
-    ta.style.opacity = '0'
-    document.body.appendChild(ta)
-    ta.select()
-    const ok = document.execCommand('copy')
-    document.body.removeChild(ta)
-    return ok
-  } catch {
-    return false
-  }
-}
-
-function renderSafeMarkdown(md: string): string {
-  const html = marked.parse(md || '', { async: false, breaks: true, gfm: true }) as string
-  return sanitizeHtml(html)
-}
+  },
+)
 
 // ==================== 系统 API Key 自动带出与同步（仅存内存 tabsStore.simApiKey） ====================
 const systemKeyConfigured = ref<boolean | null>(null)
@@ -162,7 +141,7 @@ async function copySimApiKey() {
     ElMessage.warning('当前没有可复制的 API Key')
     return
   }
-  const ok = await writeClipboard(val)
+  const ok = await copyToClipboard(val)
   if (ok) {
     ElMessage.success('已复制 API Key')
   } else {
@@ -499,7 +478,7 @@ function formatLogJson(v: unknown): string {
 
 async function copyLogEntry(entry: SimPostMessageLog) {
   const raw = JSON.stringify(entry.data, null, 2)
-  const ok = await writeClipboard(raw)
+  const ok = await copyToClipboard(raw)
   if (ok) {
     ElMessage.success(`已复制 ${entry.type} 报文 JSON`)
   } else {
@@ -508,7 +487,7 @@ async function copyLogEntry(entry: SimPostMessageLog) {
 }
 
 async function copyConfirmedMarkdown(md: string) {
-  const ok = await writeClipboard(md)
+  const ok = await copyToClipboard(md)
   if (ok) {
     ElMessage.success('已复制回传报告 Markdown 正文')
   } else {
@@ -518,7 +497,7 @@ async function copyConfirmedMarkdown(md: string) {
 
 async function copyRunIdText(runId: string) {
   if (!runId || runId === '—') return
-  const ok = await writeClipboard(runId)
+  const ok = await copyToClipboard(runId)
   if (ok) {
     ElMessage.success(`已复制运行编号 ${runId}`)
   }

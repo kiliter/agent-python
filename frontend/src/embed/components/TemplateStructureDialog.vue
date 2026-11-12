@@ -23,7 +23,7 @@ import {
   RefreshCw,
   X,
 } from 'lucide-vue-next'
-import type { TemplatePreview, TemplatePreviewInput } from '../types'
+import type { ChatTarget, TemplatePreview, TemplatePreviewInput } from '../types'
 import { chatErrorText, fetchTemplatePreview, isAbortError } from '../chatApi'
 import { copyText, renderSafeMarkdown } from '../markdown'
 import { stageToast } from '../stageToast'
@@ -31,8 +31,10 @@ import { stageToast } from '../stageToast'
 const props = defineProps<{
   visible: boolean
   sessionId: string
+  inputsVersion?: number
+  target?: ChatTarget
   templateId: number | null
-  sessionInputs: Record<string, string>
+  sessionInputs?: Record<string, string>
   busy: boolean
   actionPending: boolean
 }>()
@@ -49,7 +51,7 @@ const loading = ref(false)
 const errorText = ref('')
 const preview = ref<TemplatePreview | null>(null)
 
-/** 会话级模板预览内存缓存（key = `${sessionId}:${templateId}`） */
+/** 会话级模板预览内存缓存（key = `${sessionId}:${inputsVersion}:${templateId}`，draft 模式不走旧缓存） */
 const previewCache = new Map<string, TemplatePreview>()
 let reqSeq = 0
 let fetchCtrl: AbortController | null = null
@@ -61,6 +63,10 @@ const FIELD_TYPE_LABEL: Record<string, string> = {
   list: '列表',
 }
 
+function makeCacheKey(sid: string, ver: number, tid: number): string {
+  return `${sid}:${ver}:${tid}`
+}
+
 function abortPending() {
   fetchCtrl?.abort()
   fetchCtrl = null
@@ -68,8 +74,9 @@ function abortPending() {
 
 async function loadPreview(force = false) {
   if (!props.sessionId || props.templateId === null) return
-  const cacheKey = `${props.sessionId}:${props.templateId}`
-  if (!force && previewCache.has(cacheKey)) {
+  const isDraft = props.target === 'draft'
+  const cacheKey = makeCacheKey(props.sessionId, props.inputsVersion ?? 0, props.templateId)
+  if (!force && !isDraft && previewCache.has(cacheKey)) {
     preview.value = previewCache.get(cacheKey)!
     errorText.value = ''
     loading.value = false
@@ -85,7 +92,9 @@ async function loadPreview(force = false) {
   try {
     const res = await fetchTemplatePreview(props.sessionId, props.templateId, ctrl.signal)
     if (seq !== reqSeq) return
-    previewCache.set(cacheKey, res)
+    if (!isDraft) {
+      previewCache.set(cacheKey, res)
+    }
     preview.value = res
   } catch (err) {
     if (isAbortError(err) || seq !== reqSeq) return
@@ -99,8 +108,8 @@ async function loadPreview(force = false) {
 }
 
 watch(
-  () => [props.visible, props.sessionId, props.templateId] as const,
-  ([vis, sid, tid], prev) => {
+  () => [props.visible, props.sessionId, props.inputsVersion ?? 0, props.target ?? 'online', props.templateId] as const,
+  ([vis, sid, ver, tgt, tid], prev) => {
     if (!vis) {
       isFullscreen.value = false
       abortPending()
@@ -112,9 +121,20 @@ watch(
       loading.value = false
       return
     }
-    if (!prev || prev[1] !== sid || prev[2] !== tid || !preview.value || preview.value.templateId !== tid) {
+    if (!prev || prev[1] !== sid || prev[4] !== tid) {
       subTab.value = 'sample'
-      preview.value = previewCache.get(`${sid}:${tid}`) || null
+    }
+    const justOpened = !prev || !prev[0]
+    const keyChanged = !prev || prev[1] !== sid || prev[2] !== ver || prev[3] !== tgt || prev[4] !== tid
+    if (tgt === 'draft') {
+      if (justOpened || keyChanged || !preview.value || preview.value.templateId !== tid) {
+        if (preview.value?.templateId !== tid) preview.value = null
+        void loadPreview(true)
+      }
+      return
+    }
+    if (keyChanged || !preview.value || preview.value.templateId !== tid) {
+      preview.value = previewCache.get(makeCacheKey(sid, ver, tid)) || null
       void loadPreview(false)
     }
   },
@@ -168,8 +188,9 @@ const sourceLines = computed(() => {
 })
 
 function effectiveInputVal(inp: TemplatePreviewInput): string {
-  const live = props.sessionInputs?.[inp.key]
-  if (typeof live === 'string' && live.trim()) return live.trim()
+  if (props.sessionInputs) {
+    return (props.sessionInputs[inp.key] ?? '').trim()
+  }
   return (inp.currentValue || '').trim()
 }
 
@@ -434,24 +455,17 @@ function onUse() {
       <footer class="ts-footer">
         <button type="button" class="btn-cancel" @click="emit('close')">关闭</button>
 
-        <el-tooltip
-          :teleported="false"
-          :disabled="!disableReason"
-          :content="disableReason"
-          placement="top-end"
-        >
-          <span class="inline-wrap">
-            <button
-              type="button"
-              class="btn-use-primary"
-              :disabled="useDisabled"
-              @click="onUse"
-            >
-              <Play :size="13" />
-              <span>使用此模板开始核查</span>
-            </button>
-          </span>
-        </el-tooltip>
+        <span class="inline-wrap" :title="disableReason || undefined">
+          <button
+            type="button"
+            class="btn-use-primary"
+            :disabled="useDisabled"
+            @click="onUse"
+          >
+            <Play :size="13" />
+            <span>使用此模板开始核查</span>
+          </button>
+        </span>
       </footer>
     </div>
   </div>

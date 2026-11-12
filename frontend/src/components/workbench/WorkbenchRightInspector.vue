@@ -6,12 +6,11 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
-import { marked } from 'marked'
 import YAML from 'yaml'
 import { usePlatformStore } from '@/stores/platform'
 import { platformApi, errorMessage } from '@/api/platformApi'
 import { resolveEvidenceInspectorTab } from '@/utils/reportSegments'
-import { sanitizeHtml } from '@/utils/sanitizeHtml'
+import { renderSafeMarkdown } from '@/utils/markdown'
 import { formatListColumns, parseListColumns } from '@/utils/listColumns'
 import type {
   EvidenceType,
@@ -439,7 +438,7 @@ const skillMarkdownHtml = computed(() => {
     }
     markdownBody = fmMatch[2] || ''
   }
-  return sanitizeHtml(marked.parse(markdownBody, { async: false }) as string)
+  return renderSafeMarkdown(markdownBody)
 })
 
 function handleUnbindSkill(skillId: string) {

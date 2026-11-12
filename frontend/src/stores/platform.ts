@@ -3,9 +3,11 @@
 // 模板工作台中的编辑（正文、字段、入参、Skill）先改本地状态，点“保存草稿”时整包提交。
 
 import { defineStore } from 'pinia'
-import { computed, ref, watch } from 'vue'
+import { computed, markRaw, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ApiError, errorMessage, platformApi, type DryRunPayload } from '@/api/platformApi'
+import { copyToClipboard } from '@/utils/clipboard'
+import { analyzeJinjaBody, renameJinjaBodyVariable } from '@/utils/jinjaBody'
 import type {
   ApiConnector,
   ApiEditMode,
@@ -47,7 +49,7 @@ export type IdeCenterMode = 'code' | 'preview' | 'split' | 'diff'
 export type IdeRightMode = 'inspector' | 'evidence'
 export type IdeDebugTab = 'inputs' | 'timeline' | 'fields'
 export type SettingsSubView = 'workspace' | 'prompt-rollback' | 'runtime-rollback'
-export type DrawerType = null | 'field-edit' | 'case-edit' | 'reg-diff-detail'
+export type DrawerType = null | 'reg-diff-detail'
 export type ModalType =
   | null
   | 'publish'
@@ -130,12 +132,6 @@ export const usePlatformStore = defineStore('platform', () => {
 
   // ======================================================================== 2. 抽屉与弹窗
   const activeDrawer = ref<DrawerType>(null)
-  /** -1 表示新增字段 */
-  const editingFieldIndex = ref<number>(0)
-  /** 新增字段时预填的名称（点击正文中未定义的 {{字段}} 时使用） */
-  const pendingFieldName = ref<string>('')
-  /** -1 表示新增用例 */
-  const editingCaseIndex = ref<number>(0)
   const editingRegDiffIndex = ref<number>(0)
 
   const activeModal = ref<ModalType>(null)
@@ -197,6 +193,8 @@ export const usePlatformStore = defineStore('platform', () => {
   const runTemplateFilter = ref<string>('ALL')
   const runStatusFilter = ref<string>('ALL')
   const runBatchSearch = ref<string>('')
+  const runDateFrom = ref<string>('')
+  const runDateTo = ref<string>('')
 
   // ======================================================================== 4. 登录与用户
   const loginError = ref<boolean>(false)
@@ -266,13 +264,29 @@ export const usePlatformStore = defineStore('platform', () => {
   const onlineBaselineSeq = ref<number>(0)
   let loadTemplateReqSeq = 0
   let debugRunReqSeq = 0
+  let debugRunsListReqSeq = 0
+  let templateRevsReqSeq = 0
+  let templateDiffReqSeq = 0
   let loadSkillReqSeq = 0
   let loadApiReqSeq = 0
+  let runsReqSeq = 0
   let runDetailReqSeq = 0
   let releaseDiffReqSeq = 0
+  let settingsReqSeq = 0
   let dryRunReqSeq = 0
   let dryRunAbortController: AbortController | null = null
   let isConfirmingDirtyLeave = false
+
+  /** 标记大体积只读运行明细节点为非响应式，避免深层 Proxy 遍历海量接口行与长单据文本 */
+  function stabilizeRunDetail(detail: RunDetail): RunDetail {
+    return {
+      ...detail,
+      events: (detail.events || []).map(ev => markRaw(ev)),
+      apiResults: (detail.apiResults || []).map(ar => markRaw(ar)),
+      documentLines: (detail.documentLines || []).map(dl => markRaw(dl)),
+      smsRecords: (detail.smsRecords || []).map(sr => markRaw(sr)),
+    }
+  }
 
   // ======================================================================== 6. 试运行与调试运行记录
   const dryRunPreset = ref<{ caseId: string; inputs: Record<string, string>; docText: string }>({
@@ -385,23 +399,9 @@ export const usePlatformStore = defineStore('platform', () => {
   }
 
   async function copyText(text: string, toastMsg = '已复制到剪贴板') {
-    try {
-      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-        await navigator.clipboard.writeText(text)
-      } else {
-        const ta = document.createElement('textarea')
-        ta.value = text
-        ta.style.position = 'fixed'
-        ta.style.opacity = '0'
-        document.body.appendChild(ta)
-        ta.select()
-        document.execCommand('copy')
-        document.body.removeChild(ta)
-      }
-      showToast(toastMsg, 'success')
-    } catch {
-      showToast('复制失败，请手动选择文本复制', 'warning')
-    }
+    const ok = await copyToClipboard(text)
+    if (ok) showToast(toastMsg, 'success')
+    else showToast('复制失败，请手动选择文本复制', 'warning')
   }
 
   function applyThemeToDOM() {
@@ -458,10 +458,15 @@ export const usePlatformStore = defineStore('platform', () => {
     abortActiveDryRun()
     loadTemplateReqSeq += 1
     debugRunReqSeq += 1
+    debugRunsListReqSeq += 1
+    templateRevsReqSeq += 1
+    templateDiffReqSeq += 1
     loadSkillReqSeq += 1
     loadApiReqSeq += 1
+    runsReqSeq += 1
     runDetailReqSeq += 1
     releaseDiffReqSeq += 1
+    settingsReqSeq += 1
 
     isFocusFullscreen.value = false
     ideDebugMaximized.value = false
@@ -519,6 +524,8 @@ export const usePlatformStore = defineStore('platform', () => {
     selectedRunId.value = ''
     runsSubView.value = 'list'
     runDetail.value = null
+    runDateFrom.value = ''
+    runDateTo.value = ''
     regressionDiffs.value = []
     regSelectedTemplates.value = []
 
@@ -596,7 +603,29 @@ export const usePlatformStore = defineStore('platform', () => {
   }
 
   async function refreshRuns() {
-    const list = await guard(() => platformApi.fetchRuns({ limit: 500 }), '加载运行记录失败')
+    const seq = ++runsReqSeq
+    const parsedTplId =
+      runTemplateFilter.value && runTemplateFilter.value !== 'ALL'
+        ? Number.parseInt(runTemplateFilter.value, 10)
+        : Number.NaN
+    const templateId = Number.isFinite(parsedTplId) && parsedTplId > 0 ? parsedTplId : undefined
+    const status = runStatusFilter.value && runStatusFilter.value !== 'ALL' ? runStatusFilter.value : undefined
+    const mobile = runMobileSearch.value.trim() || undefined
+    const q = runBatchSearch.value.trim() || undefined
+    const list = await guard(
+      () =>
+        platformApi.fetchRuns({
+          dateFrom: runDateFrom.value || undefined,
+          dateTo: runDateTo.value || undefined,
+          mobile,
+          templateId,
+          status,
+          q,
+          limit: 500,
+        }),
+      '加载运行记录失败',
+    )
+    if (seq !== runsReqSeq) return
     if (list) runs.value = list
   }
 
@@ -873,11 +902,14 @@ export const usePlatformStore = defineStore('platform', () => {
   /** 刷新指定模板最近的调试/试运行流水记录 */
   async function refreshTemplateDebugRuns(tplId?: number): Promise<void> {
     const targetId = tplId || currentTemplateId.value
+    const seq = ++debugRunsListReqSeq
     if (!targetId) {
       templateDebugRuns.value = []
       return
     }
     const list = await guard(() => platformApi.fetchRuns({ templateId: targetId, limit: 30 }), '加载调试运行记录失败')
+    if (seq !== debugRunsListReqSeq) return
+    if (currentTemplateId.value && currentTemplateId.value !== targetId) return
     if (list) templateDebugRuns.value = list
   }
 
@@ -892,14 +924,15 @@ export const usePlatformStore = defineStore('platform', () => {
     try {
       const detail = await guard(() => platformApi.getRun(runId), '加载调试运行详情失败')
       if (reqSeq !== debugRunReqSeq || !detail) return undefined
-      dryRunResult.value = detail
+      const stabilized = stabilizeRunDetail(detail)
+      dryRunResult.value = stabilized
       selectedDebugRunId.value = runId
-      dryRunEvents.value = detail.events || []
-      activeEvidenceKey.value = detail.fields.find(f => f.runStatus === 'found')?.name || ''
+      dryRunEvents.value = stabilized.events || []
+      activeEvidenceKey.value = stabilized.fields.find(f => f.runStatus === 'found')?.name || ''
       if (ideCenterMode.value === 'code' || ideCenterMode.value === 'diff') {
         ideCenterMode.value = 'preview'
       }
-      return detail
+      return stabilized
     } finally {
       if (reqSeq === debugRunReqSeq) {
         isLoadingDebugRun.value = false
@@ -973,10 +1006,14 @@ export const usePlatformStore = defineStore('platform', () => {
     onlineBaselineSeq.value += 1
   }
 
-  async function openTemplateWorkbench(tplId: number, tabKey: WorkbenchTabKey = 'body', skipLeaveGuard = false) {
-    if (!tplId) return
+  async function openTemplateWorkbench(
+    tplId: number,
+    tabKey: WorkbenchTabKey = 'body',
+    skipLeaveGuard = false,
+  ): Promise<boolean> {
+    if (!tplId) return false
     if (!skipLeaveGuard && !(await confirmBeforeLeave({ nav: 'workbench', tplId }))) {
-      return
+      return false
     }
     const switching = tplId !== currentTemplateId.value || !templateDetail.value
     if (switching) {
@@ -992,6 +1029,7 @@ export const usePlatformStore = defineStore('platform', () => {
       await Promise.all([refreshTemplates(), loadTemplateRevisions()])
       onlineBaselineSeq.value += 1
     }
+    return currentNav.value === 'workbench' && currentTemplateId.value === tplId
   }
 
   function handleBackFromWorkbench() {
@@ -1006,40 +1044,23 @@ export const usePlatformStore = defineStore('platform', () => {
     templateValidation.value = null
   }
 
-  /** 前端实时统计每个字段在正文中出现的次数（{{ }} / {{- -}} 输出和 {% %} / {%- -%} 条件都算，与后端算法一致） */
+  const bodyAnalysis = computed(() => analyzeJinjaBody(bodyText.value || ''))
+
+  /** 前端实时统计每个顶层字段在正文中出现的次数（跳过注释、字符串、过滤器、测试名、for 循环变量及 .attr） */
   function recomputeFieldBodyUsage() {
-    const raw = bodyText.value || ''
-    const counts: Record<string, number> = {}
-    const varRe = /\{\{-?([^{}\n]*?)-?\}\}/g
-    let vm: RegExpExecArray | null
-    while ((vm = varRe.exec(raw)) !== null) {
-      const name = vm[1].split('|')[0].trim()
-      if (name) counts[name] = (counts[name] || 0) + 1
-    }
-    const ctrlRe = /\{%-?([\s\S]*?)-?%\}/g
-    let cm: RegExpExecArray | null
-    while ((cm = ctrlRe.exec(raw)) !== null) {
-      const tokRe = /\b(if|elif|else|endif|and|or|not|in)\b|("[^"]*")|([\u4e00-\u9fa5A-Za-z0-9_]+)/g
-      let tm: RegExpExecArray | null
-      while ((tm = tokRe.exec(cm[1])) !== null) {
-        if (tm[3]) counts[tm[3]] = (counts[tm[3]] || 0) + 1
-      }
-    }
+    const counts = bodyAnalysis.value.usageCounts
     templateFields.value.forEach(f => {
       f.bodyUsageCount = counts[f.name] || 0
     })
   }
 
-  /** 正文中使用了、但字段列表里没有定义的名字（支持 {{- field -}} 空白控制语法） */
+  /** 正文中使用了、但字段列表里没有定义的顶层变量名（含输出块与控制块，跳过 for 局部循环变量与 .attr） */
   const undefinedBodyFields = computed(() => {
     const defined = new Set(templateFields.value.map(f => f.name))
     const names = new Set<string>()
-    const tagRe = /\{\{-?([^{}\n]*?)-?\}\}/g
-    let m: RegExpExecArray | null
-    while ((m = tagRe.exec(bodyText.value || '')) !== null) {
-      const expr = m[1].split('|')[0].trim()
-      if (expr && /^[A-Za-z_\u4e00-\u9fa5][A-Za-z0-9_\u4e00-\u9fa5]*$/.test(expr) && !defined.has(expr)) {
-        names.add(expr)
+    for (const occ of bodyAnalysis.value.fieldOccurrences) {
+      if (!defined.has(occ.name)) {
+        names.add(occ.name)
       }
     }
     return [...names]
@@ -1195,12 +1216,20 @@ export const usePlatformStore = defineStore('platform', () => {
   }
 
   async function loadTemplateRevisions() {
-    const revs = await guard(() => platformApi.fetchTemplateRevisions(currentTemplateId.value), '加载修订历史失败')
+    const targetId = currentTemplateId.value
+    if (!targetId) return
+    const seq = ++templateRevsReqSeq
+    const revs = await guard(() => platformApi.fetchTemplateRevisions(targetId), '加载修订历史失败')
+    if (seq !== templateRevsReqSeq || currentTemplateId.value !== targetId) return
     if (revs) templateRevisions.value = revs
   }
 
   async function loadTemplateDiff(a = historyVerA.value, b = historyVerB.value) {
-    const diff = await guard(() => platformApi.fetchTemplateDiff(currentTemplateId.value, a, b), '加载版本对比失败')
+    const targetId = currentTemplateId.value
+    if (!targetId) return undefined
+    const seq = ++templateDiffReqSeq
+    const diff = await guard(() => platformApi.fetchTemplateDiff(targetId, a, b), '加载版本对比失败')
+    if (seq !== templateDiffReqSeq || currentTemplateId.value !== targetId) return undefined
     templateDiff.value = diff || null
     return diff
   }
@@ -1216,18 +1245,9 @@ export const usePlatformStore = defineStore('platform', () => {
   }
 
   // ---------------- 字段（本地修改，保存草稿时提交）
-  function openFieldDrawer(idx: number) {
-    editingFieldIndex.value = idx
-    pendingFieldName.value = ''
-    activeDrawer.value = 'field-edit'
-  }
-
-  /** 点击正文中的 {{字段名}}：在 IDE 检查器中直接定位编辑或预填新建 */
+  /** 点击正文或校验提示中的字段名：在 IDE 右侧检查器中直接定位编辑或预填新建 */
   function jumpToFieldDrawer(fieldName: string) {
-    const idx = templateFields.value.findIndex(f => f.name === fieldName)
     currentNav.value = 'workbench'
-    editingFieldIndex.value = idx
-    pendingFieldName.value = idx < 0 ? fieldName : ''
     activeDrawer.value = null
     selectIdeFieldByName(fieldName)
   }
@@ -1240,7 +1260,7 @@ export const usePlatformStore = defineStore('platform', () => {
     }
   }
 
-  /** 新增或修改字段；originalName 为改名前的名字，改名时同步替换正文中的 {{ 旧名 }} / {{- 旧名 | filter -}} */
+  /** 新增或修改字段；originalName 为改名前的名字，改名时同步替换输出块与控制块中的顶层字段引用 */
   function upsertTemplateField(field: TemplateField, originalName?: string): boolean {
     const name = field.name.trim()
     if (!name) {
@@ -1267,9 +1287,7 @@ export const usePlatformStore = defineStore('platform', () => {
     }
     ideCreatingFieldDraft.value = ''
     if (originalName && originalName !== name) {
-      const escaped = originalName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      const varPattern = new RegExp(`\\{\\{(-?\\s*)${escaped}((?:\\s*\\|[^{}\\n]*?)?\\s*-?)\\}\\}`, 'g')
-      bodyText.value = bodyText.value.replace(varPattern, (_m, lead: string, tail: string) => `{{${lead}${name}${tail}}}`)
+      bodyText.value = renameJinjaBodyVariable(bodyText.value, originalName, name)
     }
     recomputeFieldBodyUsage()
     markCurrentTemplateDirty()
@@ -1494,11 +1512,6 @@ export const usePlatformStore = defineStore('platform', () => {
     if (cases) templateCases.value = cases
   }
 
-  function openCaseDrawer(idx: number) {
-    editingCaseIndex.value = idx
-    activeDrawer.value = 'case-edit'
-  }
-
   /** 保存用例（新建或修改） */
   async function saveTemplateCase(c: Partial<RegressionCase>, isNew: boolean) {
     const id = currentTemplateId.value
@@ -1566,7 +1579,8 @@ export const usePlatformStore = defineStore('platform', () => {
     if (!detail) return
     const tplId = detail.record.templateId || Number((run.template.match(/^(\d+)/) || [])[1])
     if (!tplId) return
-    await openTemplateWorkbench(tplId, 'dryrun')
+    const opened = await openTemplateWorkbench(tplId, 'dryrun')
+    if (!opened || currentNav.value !== 'workbench' || currentTemplateId.value !== tplId) return
     dryRunPreset.value = { caseId: 'manual', inputs: { ...detail.inputs }, docText: detail.documentText }
     showToast('已将该记录的入参与单据载入试运行')
   }
@@ -1596,23 +1610,24 @@ export const usePlatformStore = defineStore('platform', () => {
         payload,
         ev => {
           if (reqSeq === dryRunReqSeq && !controller.signal.aborted) {
-            dryRunEvents.value.push(ev)
+            dryRunEvents.value.push(markRaw(ev))
           }
         },
         controller.signal,
       )
       if (reqSeq !== dryRunReqSeq || controller.signal.aborted) return undefined
-      dryRunResult.value = res
-      selectedDebugRunId.value = res.runId
-      activeEvidenceKey.value = res.fields.find(f => f.runStatus === 'found')?.name || ''
+      const stabilized = stabilizeRunDetail(res)
+      dryRunResult.value = stabilized
+      selectedDebugRunId.value = stabilized.runId
+      activeEvidenceKey.value = stabilized.fields.find(f => f.runStatus === 'found')?.name || ''
       if (ideCenterMode.value === 'code' || ideCenterMode.value === 'diff') {
         ideCenterMode.value = 'preview'
       }
-      showToast(`试运行完成：${res.status}（${res.durationSec} 秒，${res.rounds} 轮，${res.apiCallCount} 次接口调用）`,
-        res.status === 'FAILED' ? 'error' : res.status === 'PARTIAL' ? 'warning' : 'success')
+      showToast(`试运行完成：${stabilized.status}（${stabilized.durationSec} 秒，${stabilized.rounds} 轮，${stabilized.apiCallCount} 次接口调用）`,
+        stabilized.status === 'FAILED' ? 'error' : stabilized.status === 'PARTIAL' ? 'warning' : 'success')
       void refreshTemplateDebugRuns(id)
       void refreshRuns()
-      return res
+      return stabilized
     } catch (err) {
       if (controller.signal.aborted || (err as { name?: string })?.name === 'AbortError') {
         return undefined
@@ -1937,8 +1952,9 @@ export const usePlatformStore = defineStore('platform', () => {
     runDetail.value = null
     const detail = await guard(() => platformApi.getRun(runId), '加载运行详情失败')
     if (!detail || reqSeq !== runDetailReqSeq) return
-    runDetail.value = detail
-    activeEvidenceKey.value = detail.fields.find(f => f.runStatus === 'found')?.name || ''
+    const stabilized = stabilizeRunDetail(detail)
+    runDetail.value = stabilized
+    activeEvidenceKey.value = stabilized.fields.find(f => f.runStatus === 'found')?.name || ''
   }
 
   // ======================================================================== 15. 回归（第二阶段）
@@ -2012,9 +2028,12 @@ export const usePlatformStore = defineStore('platform', () => {
   }
 
   // ======================================================================== 17. 系统设置（提示词版本化 + 网关/模型热更新）
-  function applySysPrompt(state: SystemPromptState) {
+  function applySysPrompt(state: SystemPromptState, opts?: { preserveDirty?: boolean }) {
+    const isDirty = sysPromptState.value !== null && sysPromptText.value !== sysPromptState.value.sysPromptText
     sysPromptState.value = state
-    sysPromptText.value = state.sysPromptText
+    if (!(opts?.preserveDirty && isDirty)) {
+      sysPromptText.value = state.sysPromptText
+    }
     sysPromptStatus.value = state.sysPromptStatus
   }
 
@@ -2030,7 +2049,9 @@ export const usePlatformStore = defineStore('platform', () => {
     }
   }
 
-  async function loadSettings() {
+  async function loadSettings(opts?: { preserveDirty?: boolean }) {
+    const seq = ++settingsReqSeq
+    const preserveDirty = opts?.preserveDirty ?? true
     const [state, revs, info, rtState, rtRevs] = await Promise.all([
       guard(() => platformApi.fetchSystemPrompt(), '加载系统提示词失败'),
       guard(() => platformApi.fetchSystemPromptRevisions()),
@@ -2038,7 +2059,8 @@ export const usePlatformStore = defineStore('platform', () => {
       fetchRuntimeOptional(() => platformApi.fetchRuntimeConfig(), '加载运行时配置失败'),
       fetchRuntimeOptional(() => platformApi.fetchRuntimeConfigRevisions(), '加载配置修订历史失败'),
     ])
-    if (state) applySysPrompt(state)
+    if (seq !== settingsReqSeq) return
+    if (state) applySysPrompt(state, { preserveDirty })
     sysPromptRevisions.value = revs || []
     modelInfo.value = info || null
     if (rtState) runtimeState.value = rtState
@@ -2068,7 +2090,7 @@ export const usePlatformStore = defineStore('platform', () => {
     } catch (err) {
       if (err instanceof ApiError && (err.status === 409 || err.code === 'DRAFT_CONFLICT')) {
         if (await promptDraftConflictReload(err, '全局系统提示词')) {
-          await loadSettings()
+          await loadSettings({ preserveDirty: false })
           showToast('已重新加载服务端最新系统提示词', 'info')
         }
         return false
@@ -2087,14 +2109,14 @@ export const usePlatformStore = defineStore('platform', () => {
         note,
         sysPromptState.value?.draft?.revision,
       )
-      await Promise.all([loadSettings(), refreshReleases()])
+      await Promise.all([loadSettings({ preserveDirty: false }), refreshReleases()])
       onlineBaselineSeq.value += 1
       showToast(`系统提示词已发布（${res.rev}），立即生效`)
       return true
     } catch (err) {
       if (err instanceof ApiError && (err.status === 409 || err.code === 'DRAFT_CONFLICT')) {
         if (await promptDraftConflictReload(err, '全局系统提示词')) {
-          await loadSettings()
+          await loadSettings({ preserveDirty: false })
           showToast('已重新加载服务端最新系统提示词', 'info')
         }
         return false
@@ -2184,7 +2206,7 @@ export const usePlatformStore = defineStore('platform', () => {
     theme, sidebarCollapsed, isFocusFullscreen, currentNav, currentTemplateId, workbenchTab,
     skillsSubView, selectedSkillId, skillDetailTab, apisSubView, selectedApiName, apiDetailTab, apiEditMode,
     runsSubView, selectedRunId, runDetailTab, settingsSubView, settingsTargetPromptRev,
-    activeDrawer, editingFieldIndex, pendingFieldName, editingCaseIndex, editingRegDiffIndex,
+    activeDrawer, editingRegDiffIndex,
     activeModal, targetOfflineTemplateId, copySourceTemplateId, targetEmergencyRev, rollbackTargetRev, targetRollbackInfo, conflictInfo,
     reportViewMode, activeEvidenceKey, inspectorTab, historyDiffTab, historyVerA, historyVerB, expandedTexts,
     // 核查模板专业 IDE 工作台状态
@@ -2193,7 +2215,7 @@ export const usePlatformStore = defineStore('platform', () => {
     ideSelectedRev, ideDiffTargetRev, ideDebugTab, ideDebugCollapsed, ideDebugMaximized, ideCursorPos,
     ideInsertRequest, ideLocateRequest, onlineBaselineSeq,
     templateSearch, templateStatusFilter, skillSearch, apiSearch,
-    runMobileSearch, runTemplateFilter, runStatusFilter, runBatchSearch,
+    runMobileSearch, runTemplateFilter, runStatusFilter, runBatchSearch, runDateFrom, runDateTo,
     // 登录
     loginError, loginErrorText, loginUser, loginPass, loginShowPass, loginRemember,
     currentUser, currentUserLabel, currentUserRole,
@@ -2223,13 +2245,13 @@ export const usePlatformStore = defineStore('platform', () => {
     loadTemplate, openTemplateWorkbench, handleBackFromWorkbench, markCurrentTemplateDirty, recomputeFieldBodyUsage,
     handleSaveDraft, handleDiscardDraft, validateCurrentTemplate, publishCurrentTemplate,
     openRollbackTemplateModal, rollbackTemplateToRev, openConflictDraftDiff, loadTemplateRevisions, loadTemplateDiff, switchWorkbenchTab,
-    openFieldDrawer, jumpToFieldDrawer, newFieldTemplate, upsertTemplateField, deleteTemplateField, moveTemplateField,
+    jumpToFieldDrawer, newFieldTemplate, upsertTemplateField, deleteTemplateField, moveTemplateField,
     toggleFieldCheck, toggleAllFieldChecks, batchUpdateEvidenceType, insertFieldIntoBody,
     saveTemplateFieldRemote, deleteTemplateFieldRemote, batchUpdateEvidenceRemote, reorderTemplateFieldsRemote, updateTemplateSkillsRemote,
     requestInsertIntoBody, requestLocateFieldInBody, selectIdeFieldByName,
     refreshTemplateDebugRuns, selectTemplateDebugRun, clearSelectedDebugRun,
     addTemplateInput, removeTemplateInput, updateTemplateSkills, removeTemplateSkill,
-    refreshCases, openCaseDrawer, saveTemplateCase, createRegressionCase, createCaseFromRun, deleteTemplateCase,
+    refreshCases, saveTemplateCase, createRegressionCase, createCaseFromRun, deleteTemplateCase,
     loadCaseIntoDryRun, loadRunIntoDryRun, executeDryRun, abortActiveDryRun, selectEvidence, setInspectorTab, setReportViewMode,
     // Skill
     loadSkill, openSkillDetail, openSkillByName, setSkillMarkdown, saveSkillDraft, discardSkillDraft,

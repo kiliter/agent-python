@@ -10,9 +10,10 @@
   契约：docs/chat-embed-api.md
 -->
 <script setup lang="ts">
-import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, type CSSProperties } from 'vue'
-import { ElMessageBox } from 'element-plus'
+import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, type CSSProperties } from 'vue'
 import {
+  AlertCircle,
+  AlertTriangle,
   ChevronDown,
   ChevronUp,
   CircleCheck,
@@ -31,7 +32,7 @@ import {
 import * as api from './chatApi'
 import { ChatApiError, chatErrorText, isAbortError } from './chatApi'
 import { copyText, renderSafeMarkdown } from './markdown'
-import { stageToast } from './stageToast'
+import { clearStageToasts, stageToast } from './stageToast'
 import type {
   ChatInitMessage,
   ChatMessage,
@@ -53,6 +54,7 @@ import ChatInput from './components/ChatInput.vue'
 import PreviewDialog from './components/PreviewDialog.vue'
 import TemplateStructureDialog from './components/TemplateStructureDialog.vue'
 import SwitchTemplateDialog from './components/SwitchTemplateDialog.vue'
+import StageConfirmDialog from './components/StageConfirmDialog.vue'
 
 // ==================== 1. PC 宽屏等比例缩放 + 自适应一键切换 ====================
 const BASE_WIDTH = 1280
@@ -268,6 +270,55 @@ function updateRunDraft(run: RunMessage, markdown: string) {
   if (st) st.draft = markdown
 }
 
+interface ConfirmDialogState {
+  visible: boolean
+  title: string
+  message: string
+  items: string[]
+  confirmText: string
+  cancelText: string
+  resolve: ((ok: boolean) => void) | null
+}
+
+const confirmDialog = reactive<ConfirmDialogState>({
+  visible: false,
+  title: '',
+  message: '',
+  items: [],
+  confirmText: '确定',
+  cancelText: '取消',
+  resolve: null,
+})
+
+function closeConfirmDialog(ok: boolean) {
+  const resolver = confirmDialog.resolve
+  confirmDialog.visible = false
+  confirmDialog.resolve = null
+  resolver?.(ok)
+}
+
+function openConfirmDialog(opts: {
+  title: string
+  message: string
+  items?: string[]
+  confirmText?: string
+  cancelText?: string
+}): Promise<boolean> {
+  if (confirmDialog.resolve) {
+    confirmDialog.resolve(false)
+    confirmDialog.resolve = null
+  }
+  confirmDialog.title = opts.title
+  confirmDialog.message = opts.message
+  confirmDialog.items = opts.items || []
+  confirmDialog.confirmText = opts.confirmText || '确定'
+  confirmDialog.cancelText = opts.cancelText || '取消'
+  confirmDialog.visible = true
+  return new Promise<boolean>(resolve => {
+    confirmDialog.resolve = resolve
+  })
+}
+
 async function selectRunVersion(run: RunMessage, nextNo: number): Promise<boolean> {
   syncRunDraftState(run)
   const st = reportDraftMap[run.runId]
@@ -276,20 +327,13 @@ async function selectRunVersion(run: RunMessage, nextNo: number): Promise<boolea
   const curVer = run.versions.find(v => v.no === st.selectedNo)
   const isEdited = !!curVer && st.draft !== curVer.markdown
   if (isEdited) {
-    try {
-      await ElMessageBox.confirm(
-        '当前报告存在未确认的手工微调，切换版本将丢弃这些修改，是否继续？',
-        '切换报告版本',
-        {
-          type: 'warning',
-          confirmButtonText: '丢弃修改并切换',
-          cancelButtonText: '取消',
-          appendTo: '.embed-stage',
-        },
-      )
-    } catch {
-      return false
-    }
+    const ok = await openConfirmDialog({
+      title: '切换报告版本',
+      message: '当前报告存在未确认的手工微调，切换版本将丢弃这些修改，是否继续？',
+      confirmText: '丢弃修改并切换',
+      cancelText: '取消',
+    })
+    if (!ok) return false
   }
   const targetVer = run.versions.find(v => v.no === nextNo)
   if (!targetVer) return false
@@ -641,6 +685,7 @@ async function handleInit(data: ChatInitMessage) {
       switchTplVisible.value = false
       tplStructureId.value = null
       previewModalRunId.value = null
+      closeConfirmDialog(false)
       clearReportDraftMap()
       clearRawEventsCache()
     }
@@ -687,14 +732,32 @@ function mergeRawEvents(a: RawProcessEvent[], b: RawProcessEvent[]): RawProcessE
   const unseq: RawProcessEvent[] = []
   for (const ev of [...(a || []), ...(b || [])]) {
     if (!ev || typeof ev !== 'object') continue
-    if (typeof ev.seq === 'number' && ev.seq > 0) {
-      bySeq.set(ev.seq, ev)
+    const raw = markRaw(ev)
+    if (typeof raw.seq === 'number' && raw.seq > 0) {
+      bySeq.set(raw.seq, raw)
     } else {
-      unseq.push(ev)
+      unseq.push(raw)
     }
   }
   const sorted = Array.from(bySeq.values()).sort((x, y) => x.seq - y.seq)
   return unseq.length ? [...sorted, ...unseq] : sorted
+}
+
+/** 实时 SSE 原样事件 O(1) 单调追加：避免高频流式更新下每次克隆全表并执行 O(N log N) 排序 */
+function appendRawEvent(runId: string, ev: RawProcessEvent) {
+  if (!ev || typeof ev !== 'object') return
+  const raw = markRaw(ev)
+  const cur = rawEventsMap[runId]
+  if (!cur || !cur.length) {
+    rawEventsMap[runId] = [raw]
+    return
+  }
+  const last = cur[cur.length - 1]!
+  if (typeof raw.seq === 'number' && raw.seq > 0 && typeof last.seq === 'number' && raw.seq > last.seq) {
+    cur.push(raw)
+    return
+  }
+  rawEventsMap[runId] = mergeRawEvents(cur, [raw])
 }
 
 async function ensureRawEvents(runId: string, force = false) {
@@ -831,12 +894,17 @@ function abortAllStreams() {
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve()
   return new Promise(resolve => {
-    const t = setTimeout(resolve, ms)
-    signal.addEventListener('abort', () => {
+    const onAbort = () => {
       clearTimeout(t)
       resolve()
-    })
+    }
+    const t = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal.addEventListener('abort', onAbort, { once: true })
   })
 }
 
@@ -862,12 +930,17 @@ function subscribeRun(runId: string) {
                 reconnectingMap[runId] = false
                 const r = findRun(runId)
                 if (!r || r.steps.some(s => s.seq === step.seq)) return
-                r.steps = mergeSteps(r.steps, [step])
+                const last = r.steps[r.steps.length - 1]
+                if (!last || step.seq > last.seq) {
+                  r.steps.push(step)
+                } else {
+                  r.steps = mergeSteps(r.steps, [step])
+                }
               },
               onRaw: ev => {
                 failures = 0
                 reconnectingMap[runId] = false
-                rawEventsMap[runId] = mergeRawEvents(rawEventsMap[runId] || [], [ev])
+                appendRawEvent(runId, ev)
                 rawErrorMap[runId] = ''
               },
               onFinal: msg => {
@@ -881,7 +954,7 @@ function subscribeRun(runId: string) {
             ctrl.signal,
             { includeRaw: true, rawAfter },
           )
-          if (gotFinal) break
+          if (gotFinal || ctrl.signal.aborted) break
         } catch (err) {
           if (isAbortError(err) || ctrl.signal.aborted) break
           if (err instanceof ChatApiError && err.status >= 400 && err.status < 500) {
@@ -1006,28 +1079,13 @@ async function stopRun(run: RunMessage) {
 
 // ==================== 8. 报告确认与回传父页面 ====================
 async function askPartial(missing: string[]): Promise<boolean> {
-  try {
-    await ElMessageBox.confirm(
-      h('div', { class: 'partial-confirm' }, [
-        h('p', { style: 'margin:0 0 8px' }, '以下字段未查到，报告中将显示为占位内容，确认仍要提交并回传父页面吗？'),
-        h(
-          'ul',
-          { style: 'margin:0;padding-left:18px;max-height:180px;overflow:auto' },
-          (missing.length ? missing : ['（未返回明细）']).map(f => h('li', f)),
-        ),
-      ]),
-      '部分字段缺失确认',
-      {
-        type: 'warning',
-        confirmButtonText: '确认并回传',
-        cancelButtonText: '取消',
-        appendTo: '.embed-stage',
-      },
-    )
-    return true
-  } catch {
-    return false
-  }
+  return openConfirmDialog({
+    title: '部分字段缺失确认',
+    message: '以下字段未查到，报告中将显示为占位内容，确认仍要提交并回传父页面吗？',
+    items: missing.length ? missing : ['（未返回明细）'],
+    confirmText: '确认并回传',
+    cancelText: '取消',
+  })
 }
 
 async function confirmRun(run: RunMessage) {
@@ -1180,8 +1238,10 @@ function formatTime(iso: string): string {
 
 function onGlobalKeydown(e: KeyboardEvent) {
   if (e.key !== 'Escape') return
-  // 若当前有二次确认框打开，交给 Element Plus 处理
-  if (document.querySelector('.embed-stage .el-overlay-message-box:not([style*="display: none"])')) return
+  if (confirmDialog.visible) {
+    closeConfirmDialog(false)
+    return
+  }
   if (inputsPanelOpen.value) {
     inputsPanelOpen.value = false
     return
@@ -1239,8 +1299,11 @@ onBeforeUnmount(() => {
   window.removeEventListener('message', onWindowMessage)
   stopHandshake()
   abortAllStreams()
+  closeConfirmDialog(false)
+  clearStageToasts()
   clearRawEventsCache()
   clearReportDraftMap()
+  api.setApiKey('')
   api.setSessionId('')
   if (fallbackTimer) clearTimeout(fallbackTimer)
   if (smoothScrollTimer) clearTimeout(smoothScrollTimer)
@@ -1303,22 +1366,17 @@ onBeforeUnmount(() => {
             </div>
 
             <!-- 2) 等比缩放 / 自适应布局一键切换按钮 -->
-            <el-tooltip
-              :teleported="false"
-              content="切换 PC 基准等比例缩放 / 流式自适应布局"
-              placement="bottom"
+            <button
+              type="button"
+              class="topbar-pill-btn"
+              :class="{ 'is-scale-active': scaleMode === 'scaled' }"
+              title="切换 PC 基准等比例缩放 / 流式自适应布局"
+              @click="toggleScaleMode"
             >
-              <button
-                type="button"
-                class="topbar-pill-btn"
-                :class="{ 'is-scale-active': scaleMode === 'scaled' }"
-                @click="toggleScaleMode"
-              >
-                <Maximize2 v-if="scaleMode === 'scaled'" :size="13" />
-                <Columns2 v-else :size="13" />
-                <span>{{ scaleMode === 'scaled' ? `等比缩放 (${scalePercent}%)` : '自适应布局' }}</span>
-              </button>
-            </el-tooltip>
+              <Maximize2 v-if="scaleMode === 'scaled'" :size="13" />
+              <Columns2 v-else :size="13" />
+              <span>{{ scaleMode === 'scaled' ? `等比缩放 (${scalePercent}%)` : '自适应布局' }}</span>
+            </button>
 
             <!-- 3) 浏览全部模板按钮 -->
             <button
@@ -1445,7 +1503,11 @@ onBeforeUnmount(() => {
         <div v-if="phase !== 'ready'" class="state-stage">
           <div class="state-box">
             <template v-if="phase === 'invalid'">
-              <el-result icon="error" title="页面参数缺失" sub-title="URL 中缺少必填的 userId 或 orderId 参数" />
+              <div class="loader-circle is-error">
+                <AlertCircle :size="26" />
+              </div>
+              <div class="state-title">页面参数缺失</div>
+              <div class="state-desc">URL 中缺少必填的 userId 或 orderId 参数</div>
             </template>
             <template v-else-if="phase === 'waiting'">
               <div class="loader-circle">
@@ -1455,11 +1517,11 @@ onBeforeUnmount(() => {
               <div class="state-desc">等待父页面响应握手并下发工单参数与单据原文…</div>
             </template>
             <template v-else-if="phase === 'no-init'">
-              <el-result
-                icon="warning"
-                title="未收到上层参数"
-                sub-title="请确认宿主页面已监听 chat-ready 消息并回传 chat-init"
-              />
+              <div class="loader-circle is-warn">
+                <AlertTriangle :size="26" />
+              </div>
+              <div class="state-title">未收到上层参数</div>
+              <div class="state-desc">请确认宿主页面已监听 chat-ready 消息并回传 chat-init</div>
             </template>
             <template v-else-if="phase === 'loading'">
               <div class="loader-circle">
@@ -1469,7 +1531,11 @@ onBeforeUnmount(() => {
               <div class="state-desc">同步历史会话与在线模板快照…</div>
             </template>
             <template v-else-if="phase === 'error'">
-              <el-result icon="error" title="会话加载失败" :sub-title="fatalText" />
+              <div class="loader-circle is-error">
+                <AlertCircle :size="26" />
+              </div>
+              <div class="state-title">会话加载失败</div>
+              <div class="state-desc">{{ fatalText }}</div>
             </template>
           </div>
         </div>
@@ -1733,8 +1799,10 @@ onBeforeUnmount(() => {
       <TemplateStructureDialog
         :visible="tplStructureId !== null"
         :session-id="session?.sessionId || ''"
+        :inputs-version="session?.inputsVersion ?? 0"
+        :target="session?.target || 'online'"
         :template-id="tplStructureId"
-        :session-inputs="session?.inputs || {}"
+        :session-inputs="session?.inputs"
         :busy="busy"
         :action-pending="actionPending"
         @close="tplStructureId = null"
@@ -1744,6 +1812,17 @@ onBeforeUnmount(() => {
             runTemplate(id)
           }
         "
+      />
+
+      <StageConfirmDialog
+        :visible="confirmDialog.visible"
+        :title="confirmDialog.title"
+        :message="confirmDialog.message"
+        :items="confirmDialog.items"
+        :confirm-text="confirmDialog.confirmText"
+        :cancel-text="confirmDialog.cancelText"
+        @confirm="closeConfirmDialog(true)"
+        @cancel="closeConfirmDialog(false)"
       />
     </div>
   </div>
@@ -2227,6 +2306,16 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   margin-bottom: 4px;
+}
+.loader-circle.is-error {
+  background: var(--gpt-coral-bg);
+  border-color: var(--gpt-coral-border);
+  color: var(--gpt-coral);
+}
+.loader-circle.is-warn {
+  background: var(--gpt-amber-bg);
+  border-color: var(--gpt-amber-border);
+  color: var(--gpt-amber-strong);
 }
 .state-title {
   font-size: 16px;

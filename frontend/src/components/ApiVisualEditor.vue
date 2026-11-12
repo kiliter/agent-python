@@ -155,6 +155,8 @@ type EnvelopeKey = (typeof ENVELOPE_KEYS)[number]
 const PROTECTED_HEADERS = new Set(['host', 'content-length', 'transfer-encoding'])
 const XML_TAG_RE = /^[A-Za-z_][\w.\-]*$/
 const PLACEHOLDER_RE = /\$\{([^}]+)\}/g
+/** 对齐后端 domain/api_contract.py#BUILTIN_PLACEHOLDERS（$ 开头名称保留给平台内置占位符，禁止在 input 中声明） */
+const BUILTIN_PLACEHOLDERS = new Set(['$now'])
 const PHONE_KEYS = new Set(['route_value', 'userMobile', 'mobile', 'phone', 'billId', 'msisdn'])
 const VALID_RECORDS_MODES = new Set<RecordsMode>(['auto', 'object', 'list', 'scalar', 'none'])
 
@@ -754,8 +756,7 @@ function collectPlaceholdersFromAny(val: unknown, bucket: Set<string>) {
   }
 }
 
-const undeclaredPlaceholders = computed<string[]>(() => {
-  const declared = new Set(declaredParamNames.value)
+const usedPlaceholders = computed<string[]>(() => {
   const used = new Set<string>()
   for (const h of form.headers) {
     if (h.key.trim()) collectPlaceholdersFromAny(h.value, used)
@@ -767,7 +768,12 @@ const undeclaredPlaceholders = computed<string[]>(() => {
   for (const row of form.contentRows) {
     if (row.path.trim()) collectPlaceholdersFromAny(row.value, used)
   }
-  return [...used].filter(name => !declared.has(name))
+  return [...used]
+})
+
+const undeclaredPlaceholders = computed<string[]>(() => {
+  const declared = new Set(declaredParamNames.value)
+  return usedPlaceholders.value.filter(name => !name.startsWith('$') && !declared.has(name))
 })
 
 const localErrors = computed<string[]>(() => {
@@ -787,13 +793,16 @@ const localErrors = computed<string[]>(() => {
     errs.push('XML 协议列表数组模式 (mode=list) 下，响应节点路径 (response.records.path) 不能为空')
   }
 
-  // 入参名重名与正则合法性
+  // 入参名重名、内置保留前缀与正则合法性
   const seenParams = new Set<string>()
   for (const p of form.params) {
     const pName = p.name.trim()
     if (!pName) {
       errs.push('存在参数名为空的入参行，请填写或删除')
       continue
+    }
+    if (pName.startsWith('$')) {
+      errs.push(`入参名称「${pName}」以 $ 开头，$ 开头的名称保留给内置占位符（如 ${wrapPlaceholder('$now')}）`)
     }
     if (seenParams.has(pName)) {
       errs.push(`入参名称「${pName}」重复声明`)
@@ -837,6 +846,13 @@ const localErrors = computed<string[]>(() => {
       if (p && p.split('.').some(seg => !seg.trim())) {
         errs.push(`JSON 请求体路径「${p}」包含空键名`)
       }
+    }
+  }
+
+  const builtinList = [...BUILTIN_PLACEHOLDERS].map(wrapPlaceholder).join('、')
+  for (const refName of usedPlaceholders.value) {
+    if (refName.startsWith('$') && !BUILTIN_PLACEHOLDERS.has(refName)) {
+      errs.push(`请求模板引用了未知的内置占位符 ${wrapPlaceholder(refName)}（可用：${builtinList}）`)
     }
   }
 
@@ -997,6 +1013,7 @@ function addInputParam(prefillName = '') {
 
 function addAllUndeclaredParams() {
   for (const name of undeclaredPlaceholders.value) {
+    if (!name || name.startsWith('$')) continue
     const isPhone = name.includes('手机') || name.toLowerCase().includes('mobile')
     const isTime14 = name.includes('时间')
     form.params.push({
@@ -1723,11 +1740,24 @@ function extractColumnsFromSample() {
 }
 
 // ==================== 深度后端契约校验 ====================
+let validateReqSeq = 0
+
+watch(
+  () => props.apiName,
+  () => {
+    validateReqSeq += 1
+    remoteValidating.value = false
+    remoteValidation.value = null
+  },
+)
+
 async function handleRunValidate() {
   validationPopoverOpen.value = !validationPopoverOpen.value
   const apiWithVal = platformApi as PlatformApiWithValidate
-  if (!props.apiName || typeof apiWithVal.validateApi !== 'function') return
+  const targetName = props.apiName
+  if (!targetName || typeof apiWithVal.validateApi !== 'function') return
 
+  const seq = ++validateReqSeq
   remoteValidating.value = true
   try {
     const sampleArgs: Record<string, string> = {}
@@ -1739,7 +1769,8 @@ async function handleRunValidate() {
       else if (p.pattern === '^\\d{8}$') sampleArgs[k] = '20261111'
       else sampleArgs[k] = wrapPlaceholder(k)
     }
-    const res = await apiWithVal.validateApi(props.apiName, props.yamlText, sampleArgs)
+    const res = await apiWithVal.validateApi(targetName, props.yamlText, sampleArgs)
+    if (seq !== validateReqSeq || props.apiName !== targetName) return
     remoteValidation.value = res
     if (res.ok && localErrors.value.length === 0) {
       store.showToast('契约 Schema 与网关组装预览校验通过', 'success')
@@ -1747,7 +1778,9 @@ async function handleRunValidate() {
   } catch {
     // 后端尚未热载新路由时静默回退至前端本地即时校验
   } finally {
-    remoteValidating.value = false
+    if (seq === validateReqSeq) {
+      remoteValidating.value = false
+    }
   }
 }
 

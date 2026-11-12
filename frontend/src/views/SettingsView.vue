@@ -8,7 +8,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { ElMessageBox } from 'element-plus'
-import { diffLines } from 'diff'
+import { buildFullDiffRows } from '@/utils/textDiff'
 import {
   Maximize2,
   Minimize2,
@@ -249,24 +249,12 @@ const promptDiffRows = computed<PromptDiffRow[]>(() => {
   if (!selectedPromptRev.value || promptVersionLoading.value || promptVersionError.value) return []
   const baseStr = promptBaselineCompareText.value
   const targetStr = selectedPromptRevText.value
-  const parts = diffLines(baseStr, targetStr)
-  const rows: PromptDiffRow[] = []
-  let bNo = 1
-  let tNo = 1
-  for (const part of parts) {
-    const lines = part.value.split('\n')
-    if (lines[lines.length - 1] === '') lines.pop()
-    for (const line of lines) {
-      if (part.added) {
-        rows.push({ kind: 'add', baseNo: null, targetNo: tNo++, text: line })
-      } else if (part.removed) {
-        rows.push({ kind: 'del', baseNo: bNo++, targetNo: null, text: line })
-      } else {
-        rows.push({ kind: 'ctx', baseNo: bNo++, targetNo: tNo++, text: line })
-      }
-    }
-  }
-  return rows
+  return buildFullDiffRows(baseStr, targetStr).map(r => ({
+    kind: r.kind === 'same' ? 'ctx' : (r.kind as 'add' | 'del'),
+    baseNo: r.oldNo,
+    targetNo: r.newNo,
+    text: r.text,
+  }))
 })
 
 const promptDiffStats = computed(() => {
@@ -471,19 +459,26 @@ const apiKeyDisplayValue = computed<string>(() => {
   return effectiveRuntimeConfig.value?.reportApiKeysMasked || '***'
 })
 
+let apiKeyFetchSeq = 0
+
 async function loadApiKeySettings(silent = false): Promise<ApiKeySettings | null> {
+  const seq = ++apiKeyFetchSeq
   apiKeyFetching.value = true
   try {
     const res = await platformApi.fetchApiKeySettings()
+    if (seq !== apiKeyFetchSeq) return null
     apiKeySettings.value = res
     return res
   } catch (err) {
+    if (seq !== apiKeyFetchSeq) return null
     if (!silent) {
       store.showError(err, '获取 API Key 配置失败')
     }
     return null
   } finally {
-    apiKeyFetching.value = false
+    if (seq === apiKeyFetchSeq) {
+      apiKeyFetching.value = false
+    }
   }
 }
 

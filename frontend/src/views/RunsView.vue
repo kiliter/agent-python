@@ -24,9 +24,19 @@ const detail = computed(() => store.runDetail)
 const tab = computed(() => store.runDetailTab)
 const runReportViewMode = ref<'rendered' | 'markdown'>('rendered')
 
-/** 查询时间范围（yyyy-MM-dd，空表示不限，后端默认最近 7 天） */
-const dateFrom = ref('')
-const dateTo = ref('')
+/** 查询时间范围（yyyy-MM-dd，空表示不限，后端默认最近 7 天，统一存储于 store 避免切换页签与导航竞态） */
+const dateFrom = computed({
+  get: () => store.runDateFrom,
+  set: val => {
+    store.runDateFrom = val
+  },
+})
+const dateTo = computed({
+  get: () => store.runDateTo,
+  set: val => {
+    store.runDateTo = val
+  },
+})
 const querying = ref(false)
 
 /** 入参列表 */
@@ -216,7 +226,6 @@ function onSelectRunReportField(fieldName: string, field?: TemplateField) {
   store.runDetailTab = 'fields'
 }
 
-let queryRunsReqSeq = 0
 let filterDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
 function clearFilterDebounceTimer() {
@@ -245,40 +254,14 @@ function onDateFilterChange() {
   void queryRuns()
 }
 
-/** 按全部筛选条件向后端查询运行记录（避免服务端 500 条上限截断历史匹配记录） */
+/** 按全部筛选条件向后端查询运行记录（复用 store.refreshRuns 共享请求序号，彻底消除导航切换竞态） */
 async function queryRuns() {
   clearFilterDebounceTimer()
-  const seq = ++queryRunsReqSeq
-  const parsedTplId =
-    store.runTemplateFilter && store.runTemplateFilter !== 'ALL'
-      ? Number.parseInt(store.runTemplateFilter, 10)
-      : Number.NaN
-  const templateId = Number.isFinite(parsedTplId) && parsedTplId > 0 ? parsedTplId : undefined
-  const status =
-    store.runStatusFilter && store.runStatusFilter !== 'ALL' ? store.runStatusFilter : undefined
-  const mobile = store.runMobileSearch.trim() || undefined
-  const q = store.runBatchSearch.trim() || undefined
-
   querying.value = true
   try {
-    const list = await platformApi.fetchRuns({
-      dateFrom: dateFrom.value || undefined,
-      dateTo: dateTo.value || undefined,
-      mobile,
-      templateId,
-      status,
-      q,
-      limit: 500,
-    })
-    if (seq !== queryRunsReqSeq) return
-    store.runs = list
-  } catch (err) {
-    if (seq !== queryRunsReqSeq) return
-    store.showError(err, '查询运行记录失败')
+    await store.refreshRuns()
   } finally {
-    if (seq === queryRunsReqSeq) {
-      querying.value = false
-    }
+    querying.value = false
   }
 }
 
@@ -299,7 +282,9 @@ onMounted(() => {
     store.runMobileSearch.trim() ||
     store.runTemplateFilter !== 'ALL' ||
     store.runStatusFilter !== 'ALL' ||
-    store.runBatchSearch.trim()
+    store.runBatchSearch.trim() ||
+    dateFrom.value ||
+    dateTo.value
   ) {
     void queryRuns()
   }

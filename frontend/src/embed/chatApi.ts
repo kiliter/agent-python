@@ -12,6 +12,7 @@ import type {
   TemplateOption,
   TemplatePreview,
 } from './types'
+import { readSseStream } from '@/utils/sse'
 
 const API_BASE = `${import.meta.env.VITE_API_BASE_URL || '/api/v1'}/chat`
 /** 管理端登录 token 的 sessionStorage 键（同源模拟页兜底鉴权） */
@@ -153,55 +154,31 @@ export interface SseEvent {
 }
 
 /**
- * 读取 SSE 响应体：按空行切分事件块，支持 CRLF、多行 data、注释行（: keep-alive）与流尾冲刷。
- * 流正常结束时返回；网络错误或中止时抛出。
+ * 读取 SSE 响应体：复用统一流式帧解析器，支持提前终止与 AbortSignal 取消时释放底层流。
  */
-async function readSse(resp: Response, onEvent: (ev: SseEvent) => void): Promise<void> {
+async function readSse(
+  resp: Response,
+  onEvent: (ev: SseEvent) => boolean | void,
+  signal?: AbortSignal,
+): Promise<void> {
   if (!resp.body) throw new ChatApiError(0, 'NO_STREAM', '服务端未返回事件流')
-  const reader = resp.body.getReader()
-  const decoder = new TextDecoder('utf-8')
-  let buffer = ''
-
-  const handleBlock = (block: string) => {
-    let event = 'message'
-    let id: string | null = null
-    const dataLines: string[] = []
-    for (const line of block.split(/\r?\n/)) {
-      if (!line || line.startsWith(':')) continue
-      const idx = line.indexOf(':')
-      const field = idx >= 0 ? line.slice(0, idx) : line
-      let value = idx >= 0 ? line.slice(idx + 1) : ''
-      if (value.startsWith(' ')) value = value.slice(1)
-      if (field === 'event') event = value.trim()
-      else if (field === 'data') dataLines.push(value)
-      else if (field === 'id') id = value.trim()
-    }
-    if (!dataLines.length) return
-    const raw = dataLines.join('\n')
-    let data: unknown = raw
-    try {
-      data = JSON.parse(raw)
-    } catch {
-      /* 非 JSON 数据保持原文 */
-    }
-    onEvent({ event, data, id })
-  }
-
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    // 统一换行后按空行切分完整事件块
-    buffer = buffer.replace(/\r\n/g, '\n')
-    let sep = buffer.indexOf('\n\n')
-    while (sep >= 0) {
-      handleBlock(buffer.slice(0, sep))
-      buffer = buffer.slice(sep + 2)
-      sep = buffer.indexOf('\n\n')
-    }
-  }
-  buffer += decoder.decode()
-  if (buffer.trim()) handleBlock(buffer)
+  await readSseStream(
+    resp,
+    frame => {
+      let data: unknown = frame.data
+      try {
+        data = JSON.parse(frame.data)
+      } catch {
+        /* 非 JSON 数据保持原文 */
+      }
+      return onEvent({
+        event: frame.event,
+        data,
+        id: frame.id || null,
+      })
+    },
+    signal,
+  )
 }
 
 // ==================== 接口封装 ====================
@@ -243,14 +220,22 @@ export async function sendMessage(
     body: JSON.stringify(body),
     signal,
   })
-  await readSse(resp, ev => {
-    const data = ev.data as Record<string, unknown>
-    if (ev.event === 'status') handlers.onStatus?.(String(data?.text ?? ''))
-    else if (ev.event === 'message') handlers.onMessage?.(data as unknown as ChatMessage)
-    else if (ev.event === 'error')
-      handlers.onError?.({ code: String(data?.code ?? 'ERROR'), message: String(data?.message ?? '处理失败') })
-    else if (ev.event === 'done') handlers.onDone?.(data?.session as ChatSession)
-  })
+  await readSse(
+    resp,
+    ev => {
+      const data = ev.data as Record<string, unknown>
+      if (ev.event === 'status') handlers.onStatus?.(String(data?.text ?? ''))
+      else if (ev.event === 'message') handlers.onMessage?.(data as unknown as ChatMessage)
+      else if (ev.event === 'error')
+        handlers.onError?.({ code: String(data?.code ?? 'ERROR'), message: String(data?.message ?? '处理失败') })
+      else if (ev.event === 'done') {
+        handlers.onDone?.(data?.session as ChatSession)
+        return true
+      }
+      return false
+    },
+    signal,
+  )
 }
 
 /** 获取模板库条目列表（可选关键词检索） */
@@ -314,14 +299,20 @@ export async function streamRunEvents(
     signal,
   })
   let gotFinal = false
-  await readSse(resp, ev => {
-    if (ev.event === 'step') handlers.onStep(ev.data as RunStep)
-    else if (ev.event === 'raw') handlers.onRaw?.(ev.data as RawProcessEvent)
-    else if (ev.event === 'final') {
-      gotFinal = true
-      handlers.onFinal(ev.data as ChatMessage)
-    }
-  })
+  await readSse(
+    resp,
+    ev => {
+      if (ev.event === 'step') handlers.onStep(ev.data as RunStep)
+      else if (ev.event === 'raw') handlers.onRaw?.(ev.data as RawProcessEvent)
+      else if (ev.event === 'final') {
+        gotFinal = true
+        handlers.onFinal(ev.data as ChatMessage)
+        return true
+      }
+      return false
+    },
+    signal,
+  )
   return gotFinal
 }
 
