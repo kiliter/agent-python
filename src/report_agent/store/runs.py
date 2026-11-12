@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import math
 import os
@@ -18,11 +17,12 @@ import string
 import threading
 import time
 from collections import OrderedDict, defaultdict
+from contextlib import suppress
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .fsutil import append_line, read_json, read_jsonl, write_json
+from .fsutil import append_jsonl, read_json, read_jsonl, write_json
 from .layout import DataLayout, InvalidResource, ensure_within
 
 log = logging.getLogger(__name__)
@@ -62,8 +62,9 @@ def _parse_run_day(run_id: str) -> date | None:
     m = RUN_ID_RE.match(run_id)
     if not m:
         return None
+    s = m.group(1)
     try:
-        return datetime.strptime(m.group(1), "%Y%m%d").date()
+        return date(int(s[:4]), int(s[4:6]), int(s[6:8]))
     except ValueError:
         return None
 
@@ -253,6 +254,7 @@ class RunStore:
         self._task: asyncio.Task | None = None
         self._stats_cache: tuple[float, dict[str, Any]] | None = None
         self._orphan_recovered = False
+        self._write_lock = threading.Lock()
         self._cache_lock = threading.Lock()
         self._day_cache: OrderedDict[Path, tuple[tuple[int, int, int], list[dict[str, Any]]]] = OrderedDict()
         self._pending: OrderedDict[str, tuple[dict[str, Any], dict[str, Any]]] = OrderedDict()
@@ -266,6 +268,7 @@ class RunStore:
         queue: asyncio.Queue[tuple[dict[str, Any], dict[str, Any]] | None] = asyncio.Queue()
         self._queue = queue
         self._task = asyncio.create_task(self._writer(queue), name="run-store-writer")
+        await asyncio.sleep(0)
 
     def _stat_day_sig(self, ddir: Path, *, include_dir_mtime: bool) -> tuple[int, int, int]:
         ddir_mtime = 0
@@ -312,31 +315,45 @@ class RunStore:
                     by_id[recovered["runId"]] = recovered
                     recovered_count += 1
                     if heal_index:
-                        try:
-                            append_line(
-                                ddir / "index.jsonl",
-                                json.dumps(recovered, ensure_ascii=False, separators=(",", ":")),
-                            )
-                        except OSError:
-                            pass
+                        with suppress(OSError):
+                            append_jsonl(ddir / "index.jsonl", recovered)
         return recovered_count
 
     def _recover_all_orphans(self) -> None:
         """启动阶段执行一次孤儿文件恢复，避免日常分页查询反复全目录扫描 *.json。"""
-        for _, ddir in self._day_dirs_between(date.min, date.max):
-            by_id: dict[str, dict[str, Any]] = {}
-            for raw in read_jsonl(ddir / "index.jsonl"):
-                norm = _normalize_summary(raw)
-                if norm is not None:
-                    by_id[norm["runId"]] = norm
-            n = self._recover_day_orphans(ddir, by_id, heal_index=True)
-            if n:
-                log.info("启动恢复 %s 下 %d 条孤儿运行记录至 index.jsonl", ddir, n)
-            items = list(by_id.values())
-            items.sort(key=lambda x: x["runId"])
-            sig = self._stat_day_sig(ddir, include_dir_mtime=False)
-            self._store_day_cache(ddir, sig, items)
-        self._orphan_recovered = True
+        with self._write_lock:
+            for _, ddir in self._day_dirs_between(date.min, date.max):
+                by_id: dict[str, dict[str, Any]] = {}
+                for raw in read_jsonl(ddir / "index.jsonl"):
+                    norm = _normalize_summary(raw)
+                    if norm is not None:
+                        by_id[norm["runId"]] = norm
+                n = self._recover_day_orphans(ddir, by_id, heal_index=True)
+                if n:
+                    log.info("启动恢复 %s 下 %d 条孤儿运行记录至 index.jsonl", ddir, n)
+                items = list(by_id.values())
+                items.sort(key=lambda x: x["runId"])
+                sig = self._stat_day_sig(ddir, include_dir_mtime=False)
+                self._store_day_cache(ddir, sig, items)
+            self._orphan_recovered = True
+
+    def _drain_queue(self, queue: asyncio.Queue[tuple[dict[str, Any], dict[str, Any]] | None]) -> None:
+        """同步排空队列中尚未消费的记录，防止异常退出或取消导致丢数据或残留 _pending。"""
+        while not queue.empty():
+            try:
+                rem = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if rem is None:
+                continue
+            try:
+                self._write(*rem)
+            except Exception:  # noqa: BLE001
+                run_id = str(rem[0].get("runId") or "")
+                if run_id:
+                    with self._cache_lock:
+                        self._pending.pop(run_id, None)
+                log.exception("退出排空运行记录失败 runId=%s", rem[0].get("runId"))
 
     async def stop(self) -> None:
         """停止前把队列中剩余的记录写完，并重置状态使后续投递退回同步落盘。"""
@@ -344,12 +361,16 @@ class RunStore:
         self._queue = None
         self._task = None
         if queue is not None and task is not None:
-            await queue.put(None)
-            await task
+            if not task.done():
+                await queue.put(None)
+            with suppress(asyncio.CancelledError):
+                await task
+            self._drain_queue(queue)
 
     def submit(self, summary: dict[str, Any], detail: dict[str, Any]) -> None:
         """投递一条运行记录。未启动后台写入（如单元测试、命令行、已停止后）时同步写入。"""
-        if self._queue is None:
+        queue, task = self._queue, self._task
+        if queue is None or task is None or task.done():
             self._write(summary, detail)
         else:
             norm = _normalize_summary(summary)
@@ -357,21 +378,24 @@ class RunStore:
                 with self._cache_lock:
                     self._pending[norm["runId"]] = (norm, detail)
             self._stats_cache = None
-            self._queue.put_nowait((summary, detail))
+            queue.put_nowait((summary, detail))
 
     async def _writer(self, queue: asyncio.Queue[tuple[dict[str, Any], dict[str, Any]] | None]) -> None:
-        while True:
-            item = await queue.get()
-            if item is None:
-                break
-            try:
-                await asyncio.to_thread(self._write, *item)
-            except Exception:  # noqa: BLE001 - 写记录失败不能影响主流程
-                run_id = str(item[0].get("runId") or "")
-                if run_id:
-                    with self._cache_lock:
-                        self._pending.pop(run_id, None)
-                log.exception("写入运行记录失败 runId=%s", item[0].get("runId"))
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                try:
+                    await asyncio.to_thread(self._write, *item)
+                except Exception:  # noqa: BLE001 - 写记录失败不能影响主流程
+                    run_id = str(item[0].get("runId") or "")
+                    if run_id:
+                        with self._cache_lock:
+                            self._pending.pop(run_id, None)
+                    log.exception("写入运行记录失败 runId=%s", item[0].get("runId"))
+        finally:
+            self._drain_queue(queue)
 
     def _run_path(self, run_id: str) -> tuple[date, Path, Path] | None:
         day = _parse_run_day(run_id)
@@ -391,26 +415,27 @@ class RunStore:
             if loc is None:
                 raise InvalidResource(f"运行编号「{run_id}」格式不合法")
             _, d, json_path = loc
-            inc_dir = not self._orphan_recovered
-            pre_sig = self._stat_day_sig(d, include_dir_mtime=inc_dir)
-            write_json(json_path, detail)
-            append_line(d / "index.jsonl", json.dumps(summary, ensure_ascii=False, separators=(",", ":")))
-            norm = _normalize_summary(summary)
-            post_sig = self._stat_day_sig(d, include_dir_mtime=inc_dir)
-            with self._cache_lock:
-                cached = self._day_cache.get(d)
-                if cached is not None and cached[0] == pre_sig and norm is not None:
-                    prev_items = cached[1]
-                    if not prev_items or prev_items[-1]["runId"] < norm["runId"]:
-                        next_items = [*prev_items, norm]
+            with self._write_lock:
+                inc_dir = not self._orphan_recovered
+                pre_sig = self._stat_day_sig(d, include_dir_mtime=inc_dir)
+                write_json(json_path, detail)
+                append_jsonl(d / "index.jsonl", summary)
+                norm = _normalize_summary(summary)
+                post_sig = self._stat_day_sig(d, include_dir_mtime=inc_dir)
+                with self._cache_lock:
+                    cached = self._day_cache.get(d)
+                    if cached is not None and cached[0] == pre_sig and norm is not None:
+                        prev_items = cached[1]
+                        if not prev_items or prev_items[-1]["runId"] < norm["runId"]:
+                            next_items = [*prev_items, norm]
+                        else:
+                            merged = {it["runId"]: it for it in prev_items}
+                            merged[norm["runId"]] = norm
+                            next_items = sorted(merged.values(), key=lambda x: x["runId"])
+                        self._day_cache[d] = (post_sig, next_items)
+                        self._day_cache.move_to_end(d)
                     else:
-                        merged = {it["runId"]: it for it in prev_items}
-                        merged[norm["runId"]] = norm
-                        next_items = sorted(merged.values(), key=lambda x: x["runId"])
-                    self._day_cache[d] = (post_sig, next_items)
-                    self._day_cache.move_to_end(d)
-                else:
-                    self._day_cache.pop(d, None)
+                        self._day_cache.pop(d, None)
             self._stats_cache = None
         finally:
             if run_id:
@@ -481,11 +506,11 @@ class RunStore:
         raw = read_json(json_path)
         if isinstance(raw, dict):
             return _normalize_detail(raw, run_id)
-        for item in read_jsonl(d / "index.jsonl"):
-            norm = _normalize_summary(item)
-            if norm and norm["runId"] == run_id:
-                log.warning("运行详情缺失或损坏，已从索引摘要恢复 runId=%s", run_id)
-                return _detail_from_summary(norm)
+        if d.is_dir():
+            for norm in self._read_day_summaries(d):
+                if norm["runId"] == run_id:
+                    log.warning("运行详情缺失或损坏，已从索引摘要恢复 runId=%s", run_id)
+                    return _detail_from_summary(norm)
         return None
 
     def list(self, date_from: date | None = None, date_to: date | None = None, limit: int = 200,
@@ -505,15 +530,14 @@ class RunStore:
             if p_day is not None and date_from <= p_day <= date_to:
                 pending_by_day[p_day].append(p_item)
 
-        day_map: dict[date, Path] = dict(self._day_dirs_between(date_from, date_to))
-        for p_day in pending_by_day:
-            day_map.setdefault(p_day, _day_dir(self.root, p_day))
+        disk_days: dict[date, Path] = dict(self._day_dirs_between(date_from, date_to))
+        all_days = sorted(disk_days.keys() | pending_by_day.keys(), reverse=True)
 
         result: list[dict[str, Any]] = []
         skipped = 0
-        for d in sorted(day_map.keys(), reverse=True):
-            ddir = day_map[d]
-            items = self._read_day_summaries(ddir) if ddir.is_dir() else []
+        for d in all_days:
+            ddir = disk_days.get(d)
+            items = self._read_day_summaries(ddir) if ddir is not None else []
             pend_list = pending_by_day.get(d)
             if pend_list:
                 merged = {it["runId"]: it for it in items}
@@ -587,16 +611,17 @@ class RunStore:
                 total_failed += 1
 
             run_day = _parse_run_day(item["runId"])
-            if run_day and run_day.isoformat() in daily_map:
-                bucket = daily_map[run_day.isoformat()]
-                bucket["total"] += 1
-                bucket["_durations"].append(dur)
-                if st == "SUCCESS":
-                    bucket["success"] += 1
-                elif st == "PARTIAL":
-                    bucket["partial"] += 1
-                else:
-                    bucket["failed"] += 1
+            if run_day is not None:
+                bucket = daily_map.get(run_day.isoformat())
+                if bucket is not None:
+                    bucket["total"] += 1
+                    bucket["_durations"].append(dur)
+                    if st == "SUCCESS":
+                        bucket["success"] += 1
+                    elif st == "PARTIAL":
+                        bucket["partial"] += 1
+                    else:
+                        bucket["failed"] += 1
 
             tid_val = item.get("templateId")
             if tid_val is not None:
@@ -663,14 +688,20 @@ class RunStore:
         }
 
     def cleanup(self, keep_days: int) -> int:
-        """删除超过保留天数的日期目录。"""
+        """删除超过保留天数的日期目录，并顺带清理已变空的月份与年份目录。"""
         if keep_days <= 0 or not self.root.exists():
             return 0
         cutoff = date.today() - timedelta(days=keep_days)
         removed = 0
-        for ydir in self.root.iterdir():
-            for mdir in ydir.iterdir() if ydir.is_dir() else []:
-                for ddir in mdir.iterdir() if mdir.is_dir() else []:
+        for ydir in list(self.root.iterdir()):
+            if not ydir.is_dir() or not ydir.name.isdigit():
+                continue
+            for mdir in list(ydir.iterdir()):
+                if not mdir.is_dir() or not mdir.name.isdigit():
+                    continue
+                for ddir in list(mdir.iterdir()):
+                    if not ddir.is_dir() or not ddir.name.isdigit():
+                        continue
                     try:
                         d = date(int(ydir.name), int(mdir.name), int(ddir.name))
                     except ValueError:
@@ -680,6 +711,10 @@ class RunStore:
                         with self._cache_lock:
                             self._day_cache.pop(ddir, None)
                         removed += 1
+                with suppress(OSError):
+                    mdir.rmdir()
+            with suppress(OSError):
+                ydir.rmdir()
         if removed:
             self._stats_cache = None
         return removed

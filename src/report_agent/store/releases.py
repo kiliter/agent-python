@@ -17,11 +17,12 @@ import secrets
 import shutil
 import threading
 from collections import OrderedDict
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 from ..domain.resources import ResourceSet, load_resource_dir
-from .fsutil import append_line, atomic_symlink, read_jsonl, write_json
+from .fsutil import append_jsonl, atomic_symlink, atomic_write_bytes, read_jsonl, write_json
 from .git_repo import GitRepo
 from .layout import REV_RE, DataLayout, ResourceRef, ensure_within
 
@@ -41,6 +42,7 @@ class ReleaseStore:
         self.lock = lock
         self.keep = keep
         self._entries: list[dict[str, Any]] | None = None
+        self._by_rev: dict[str, dict[str, Any]] | None = None
         self._entries_sig: tuple[int, int] | None = None
         self._snapshots: OrderedDict[str, ResourceSet] = OrderedDict()
         self._snap_lock = threading.Lock()
@@ -52,41 +54,59 @@ class ReleaseStore:
         except OSError:
             return (0, -1)
 
+    def _invalidate_entries_cache(self) -> None:
+        self._entries = None
+        self._by_rev = None
+        self._entries_sig = None
+
+    def _ensure_entries_loaded(self) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+        sig = self._index_sig()
+        if self._entries is None or self._by_rev is None or self._entries_sig != sig:
+            valid: list[dict[str, Any]] = []
+            for item in read_jsonl(self.layout.release_index):
+                rev = item.get("rev")
+                commit = item.get("commit")
+                if not isinstance(rev, str) or not REV_RE.match(rev) or not isinstance(commit, str) or not commit:
+                    continue
+                try:
+                    n = int(item.get("n") or rev[1:])
+                except (TypeError, ValueError):
+                    continue
+                valid.append({**item, "n": n})
+            valid.sort(key=lambda e: e["n"])
+            self._entries = valid
+            self._by_rev = {e["rev"]: e for e in valid}
+            self._entries_sig = sig
+        return self._entries, self._by_rev
+
     # ------------------------------------------------------------------ 索引
     def entries(self) -> list[dict[str, Any]]:
         """全部版本元数据，按版本号升序。自动跳过损坏或不完整的索引行。"""
         with self.lock:
-            sig = self._index_sig()
-            if self._entries is None or self._entries_sig != sig:
-                valid: list[dict[str, Any]] = []
-                for item in read_jsonl(self.layout.release_index):
-                    rev = item.get("rev")
-                    commit = item.get("commit")
-                    if not isinstance(rev, str) or not REV_RE.match(rev) or not isinstance(commit, str) or not commit:
-                        continue
-                    try:
-                        n = int(item.get("n") or rev[1:])
-                    except (TypeError, ValueError):
-                        continue
-                    valid.append({**item, "n": n})
-                valid.sort(key=lambda e: e["n"])
-                self._entries = valid
-                self._entries_sig = sig
-            return list(self._entries)
+            entries, _ = self._ensure_entries_loaded()
+            return list(entries)
 
     def entry(self, rev: str) -> dict[str, Any]:
         if not isinstance(rev, str) or not REV_RE.match(rev):
             raise ReleaseNotFound(rev)
-        for e in self.entries():
-            if e["rev"] == rev:
-                return e
-        raise ReleaseNotFound(rev)
+        with self.lock:
+            _, by_rev = self._ensure_entries_loaded()
+            found = by_rev.get(rev)
+            if found is None:
+                raise ReleaseNotFound(rev)
+            return dict(found)
 
     def has(self, rev: str) -> bool:
-        return bool(isinstance(rev, str) and REV_RE.match(rev) and any(e["rev"] == rev for e in self.entries()))
+        if not isinstance(rev, str) or not REV_RE.match(rev):
+            return False
+        with self.lock:
+            _, by_rev = self._ensure_entries_loaded()
+            return rev in by_rev
 
     def next_number(self) -> int:
-        return max((int(e["n"]) for e in self.entries()), default=0) + 1
+        with self.lock:
+            entries, _ = self._ensure_entries_loaded()
+            return (int(entries[-1]["n"]) if entries else 0) + 1
 
     def live_rev(self) -> str | None:
         """当前线上版本号。"""
@@ -176,37 +196,61 @@ class ReleaseStore:
                 if any(c["kind"] == ref.kind and c["key"] == ref.key for c in e.get("changes", []))]
 
     def read_file_at(self, rev: str, rel_path: str) -> str | None:
-        """读取某版本中的一个文件。"""
+        """读取某版本中的一个文件；快照已完整物化且文件不存在时直接返回 None，避免无效 git show 子进程开销。"""
         entry = self.entry(rev)
         rel_dir = self.layout.release_dir(rev)
         path = ensure_within(rel_dir, rel_dir / rel_path)
         try:
             if path.is_file():
                 return path.read_text(encoding="utf-8")
-        except FileNotFoundError:
+            if (rel_dir / ".release.json").is_file():
+                return None
+        except (FileNotFoundError, OSError):
             pass
+        except UnicodeDecodeError:
+            return None
         data = self.repo.show(entry["commit"], rel_path)
-        return data.decode("utf-8") if data is not None else None
+        if data is None:
+            return None
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
 
     # ------------------------------------------------------------------ 写入（调用方持有写锁）
     def add(self, entry: dict[str, Any], built_dir: Path) -> None:
-        """登记新版本并切换为线上版本。"""
+        """登记新版本并切换为线上版本；切换失败时完整回滚索引与目录，保证版本与 Git 一致性。"""
         with self.lock:
-            final = self.layout.release_dir(entry["rev"])
+            rev = entry["rev"]
+            final = self.layout.release_dir(rev)
+            if final.exists() and not self.has(rev):
+                shutil.rmtree(final, ignore_errors=True)
             write_json(built_dir / ".release.json", entry)
+            prev_index = self.layout.release_index.read_bytes() if self.layout.release_index.exists() else None
             os.replace(built_dir, final)
-            append_line(self.layout.release_index, _dumps(entry))
-            self._entries = None
-            self._entries_sig = None
-            atomic_symlink(entry["rev"], self.layout.current)
+            try:
+                append_jsonl(self.layout.release_index, entry)
+                self._invalidate_entries_cache()
+                atomic_symlink(rev, self.layout.current)
+            except BaseException:
+                self._invalidate_entries_cache()
+                if prev_index is None:
+                    self.layout.release_index.unlink(missing_ok=True)
+                else:
+                    with suppress(OSError):
+                        atomic_write_bytes(self.layout.release_index, prev_index)
+                if self.live_rev() != rev:
+                    shutil.rmtree(final, ignore_errors=True)
+                raise
 
     def switch(self, rev: str) -> None:
         """紧急切换线上版本。"""
-        self.ensure_materialized(rev)
-        atomic_symlink(rev, self.layout.current)
+        with self.lock:
+            self.ensure_materialized(rev)
+            atomic_symlink(rev, self.layout.current)
 
     def prune(self) -> None:
-        """只保留最近 keep 个版本目录和线上版本目录，更早的可随时从 Git 恢复。"""
+        """只保留最近 keep 个版本目录和线上版本目录（先原子重命名再删除，避免与无锁读并发半删冲突）。"""
         with self.lock:
             live = self.live_rev()
             revs = [e["rev"] for e in self.entries()]
@@ -214,14 +258,19 @@ class ReleaseStore:
             for rev in revs:
                 path = self.layout.release_dir(rev)
                 if rev not in keep and path.exists():
-                    shutil.rmtree(path, ignore_errors=True)
+                    trash = self.layout.releases / f".prune-{rev}-{os.getpid()}-{secrets.token_hex(4)}"
+                    try:
+                        os.replace(path, trash)
+                    except OSError:
+                        shutil.rmtree(path, ignore_errors=True)
+                    else:
+                        shutil.rmtree(trash, ignore_errors=True)
 
     def recover(self) -> None:
-        """启动时清理未完成的构建目录与临时草稿目录，并确保线上版本目录存在。"""
-        for tmp in self.layout.releases.glob(".build-*"):
-            shutil.rmtree(tmp, ignore_errors=True)
-        for tmp in self.layout.releases.glob(".restore-*"):
-            shutil.rmtree(tmp, ignore_errors=True)
+        """启动时清理未完成的构建目录、恢复目录、淘汰目录与临时草稿目录，并确保线上版本目录存在。"""
+        for pattern in (".build-*", ".restore-*", ".prune-*"):
+            for tmp in self.layout.releases.glob(pattern):
+                shutil.rmtree(tmp, ignore_errors=True)
         if self.layout.drafts.exists():
             for kind_dir in self.layout.drafts.iterdir():
                 if not kind_dir.is_dir():
@@ -236,9 +285,3 @@ class ReleaseStore:
             last = self.entries()[-1]["rev"]
             log.warning("线上指针缺失或无效，指向最新版本 %s", last)
             self.switch(last)
-
-
-def _dumps(obj: Any) -> str:
-    import json
-
-    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))

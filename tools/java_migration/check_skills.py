@@ -53,7 +53,8 @@ HERE = Path(__file__).resolve().parent
 # 待校验的 Python 资源目录（默认内置 seed），可用环境变量 MIGRATION_RESOURCES 指定其它目录
 STAGING = Path(os.environ.get("MIGRATION_RESOURCES") or (HERE.parent.parent / "src/report_agent/seed"))
 HARNESS = HERE / "harness"
-JAVA_CLASSES = Path("/Users/zhangjialin/IdeaProjects/agent/pdf-agent-parse/target/classes")
+JAVA_AGENT = Path(os.environ.get("JAVA_AGENT_HOME", "/Users/zhangjialin/IdeaProjects/agent"))
+JAVA_CLASSES = JAVA_AGENT / "pdf-agent-parse/target/classes"
 M2 = Path.home() / ".m2/repository"
 JARS = [
     "tools/jackson/core/jackson-core/3.1.4/jackson-core-3.1.4.jar",
@@ -150,7 +151,7 @@ def java_cp() -> str | None:
     paths = [JAVA_CLASSES] + [M2 / j for j in JARS]
     if not all(p.exists() for p in paths):
         return None
-    return ":".join(str(p) for p in paths)
+    return os.pathsep.join(str(p) for p in paths)
 
 
 def run_java(main: str, *args: str) -> dict[str, str] | None:
@@ -163,8 +164,10 @@ def run_java(main: str, *args: str) -> dict[str, str] | None:
         src = HARNESS / f"{main}.java"
         subprocess.run(["javac", "-encoding", "UTF-8", "-cp", cp, "-d", str(out_dir), str(src)], check=True,
                        capture_output=True)
-        res = subprocess.run(["java", "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-cp", f"{out_dir}:{cp}", main, *args],
-                             capture_output=True, text=True, encoding="utf-8", check=True)
+        res = subprocess.run(
+            ["java", "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-cp", f"{out_dir}{os.pathsep}{cp}", main, *args],
+            capture_output=True, text=True, encoding="utf-8", check=True,
+        )
         out = {}
         for line in res.stdout.splitlines():
             if "\t" in line:

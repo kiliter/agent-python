@@ -9,10 +9,14 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import getpass
 import sys
+from typing import Any
 
 from .config import get_settings
+
+_BG_TASKS: set[asyncio.Task[Any]] = set()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -42,7 +46,17 @@ def main(argv: list[str] | None = None) -> int:
         from .container import build_container
 
         c = build_container(settings, model=object())
-        print(f"数据目录：{c.layout.root}，线上版本：{c.releases.live_rev()}")
+        try:
+            print(f"数据目录：{c.layout.root}，线上版本：{c.releases.live_rev()}")
+        finally:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                asyncio.run(c.gateway.aclose())
+            else:
+                task = loop.create_task(c.gateway.aclose())
+                _BG_TASKS.add(task)
+                task.add_done_callback(_BG_TASKS.discard)
         return 0
     if args.cmd == "user" and args.action == "add":
         from .api.auth import UserStore

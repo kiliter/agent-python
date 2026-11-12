@@ -127,7 +127,7 @@ class CaseStore:
             return []
         cases: list[CaseDef] = []
         for p in sorted(d.glob("*.yaml")):
-            if p.name.startswith(".") or not _CASE_ID_RE.match(p.stem):
+            if p.name.startswith(".") or p.is_symlink() or not _CASE_ID_RE.match(p.stem):
                 continue
             case = self._load_file(p)
             try:
@@ -155,9 +155,9 @@ class CaseStore:
                     if not _CASE_ID_RE.match(stem):
                         continue
                     try:
-                        if not entry.is_file():
+                        if not entry.is_file(follow_symlinks=False):
                             continue
-                        st = entry.stat()
+                        st = entry.stat(follow_symlinks=False)
                     except OSError:
                         continue
                     if self._is_valid_case_file(entry.path, st.st_mtime_ns, st.st_size):

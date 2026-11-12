@@ -49,30 +49,53 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
-def atomic_write_bytes(path: Path, data: bytes) -> None:
-    """原子写入二进制内容。"""
+def _chmod_safe(path_or_fd: Path | int, mode: int) -> None:
+    """尽力设置文件或文件描述符权限，兼容不支持 POSIX chmod 的文件系统。"""
+    try:
+        if isinstance(path_or_fd, int):
+            if hasattr(os, "fchmod"):
+                os.fchmod(path_or_fd, mode)
+        else:
+            path_or_fd.chmod(mode)
+    except OSError:
+        pass
+
+
+def atomic_write_bytes(path: Path, data: bytes, *, mode: int | None = None) -> None:
+    """原子写入二进制内容；指定 mode 时在写入前先收紧临时文件权限，杜绝权限裸露窗口。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
+        if mode is not None:
+            _chmod_safe(fd, mode)
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
+        if mode is not None:
+            _chmod_safe(Path(tmp), mode)
         os.replace(tmp, path)
+        if mode is not None:
+            _chmod_safe(path, mode)
         _fsync_dir(path.parent)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
 
 
-def atomic_write_text(path: Path, text: str) -> None:
+def atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> None:
     """原子写入 UTF-8 文本。"""
-    atomic_write_bytes(path, text.encode("utf-8"))
+    atomic_write_bytes(path, text.encode("utf-8"), mode=mode)
 
 
-def write_json(path: Path, data: Any) -> None:
+def write_json(path: Path, data: Any, *, mode: int | None = None) -> None:
     """原子写入 JSON（UTF-8，不转义中文）。"""
-    atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2, default=str) + "\n")
+    atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2, default=str) + "\n", mode=mode)
+
+
+def dumps_jsonl(data: Any) -> str:
+    """紧凑序列化单行 JSONL 记录（不转义中文）。"""
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
 def read_json(path: Path, default: Any = None) -> Any:
@@ -94,13 +117,44 @@ def read_text(path: Path) -> str | None:
         return None
 
 
-def append_line(path: Path, line: str) -> None:
-    """追加一行到 JSONL 文件并 fsync。调用方负责保证单写者。"""
+def append_line(path: Path, line: str, *, mode: int | None = None) -> None:
+    """追加一行到 JSONL 文件并 fsync。调用方负责保证单写者；指定 mode 时以受限权限打开并修正文件权限。"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(line.rstrip("\n") + "\n")
-        fh.flush()
-        os.fsync(fh.fileno())
+    payload = (line.rstrip("\n") + "\n").encode("utf-8")
+    if mode is None:
+        with path.open("ab") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        return
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, mode)
+    fd_owned = False
+    try:
+        _chmod_safe(fd, mode)
+        fh = os.fdopen(fd, "ab")
+        fd_owned = True
+        with fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except BaseException:
+        if not fd_owned:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        raise
+    _chmod_safe(path, mode)
+
+
+def append_jsonl(path: Path, data: dict[str, Any], *, mode: int | None = None) -> None:
+    """将字典序列化为单行 JSON 追加至 JSONL 文件并 fsync。"""
+    append_line(path, dumps_jsonl(data), mode=mode)
+
+
+def append_audit(path: Path, action: str, operator: str, detail: dict[str, Any]) -> None:
+    """追加一条统一格式的审计日志记录。"""
+    append_jsonl(path, {"time": now_iso(), "action": action, "operator": operator, **detail})
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -184,7 +238,9 @@ def replace_dir_contents(dst: Path, src: Path, keep: set[str] | None = None) -> 
         if child.name in keep:
             continue
         target = dst / child.name
-        if child.is_dir():
-            shutil.copytree(child, target)
+        if child.is_symlink():
+            os.symlink(os.readlink(child), target)
+        elif child.is_dir():
+            shutil.copytree(child, target, symlinks=True)
         else:
             shutil.copy2(child, target)

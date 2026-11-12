@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import logging.handlers
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -134,27 +134,30 @@ def create_app(settings: Settings | None = None, container: Container | None = N
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         c = container or build_container(settings)
+        eff = c.settings
         app.state.container = c
         users = UserStore(c.layout.config / "users.yaml")
-        if users.count() == 0 and settings.admin_bootstrap_password:
-            users.upsert("admin", settings.admin_bootstrap_password.get_secret_value(), "管理员", "系统维护")
+        if users.count() == 0 and eff.admin_bootstrap_password:
+            users.upsert("admin", eff.admin_bootstrap_password.get_secret_value(), "管理员", "系统维护")
             log.warning("已用 ADMIN_BOOTSTRAP_PASSWORD 创建 admin 账号，请登录后尽快修改密码")
         elif users.count() == 0:
             log.warning("还没有管理端用户，请执行：report-agent user add --username <名> --display-name <显示名>")
         app.state.users = users
-        app.state.tokens = TokenService(TokenService.load_secret(settings, c.layout.config), settings.admin_token_ttl_s)
+        app.state.tokens = TokenService(TokenService.load_secret(eff, c.layout.config), eff.admin_token_ttl_s)
         app.state.login_guard = LoginGuard()
-        app.state.report_keys = settings.report_api_key_set()
+        app.state.report_keys = eff.report_api_key_set()
         if not app.state.report_keys:
             log.warning("未配置 REPORT_API_KEYS，上游接口 /api/v1/reports 不校验调用方")
         await c.runs.start()
         cleanup = asyncio.create_task(_cleanup_loop(c), name="runs-cleanup")
         log.info("服务启动完成：数据目录 %s，线上版本 %s，模型 %s，网关 %s", c.layout.root, c.releases.live_rev(),
-                 settings.llm_model, settings.gateway_mode)
+                 eff.llm_model, eff.gateway_mode)
         try:
             yield
         finally:
             cleanup.cancel()
+            with suppress(asyncio.CancelledError):
+                await cleanup
             if c.chat is not None:
                 await c.chat.aclose()
             await c.runs.stop()
@@ -185,7 +188,10 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         def spa(path: str):
             if path == "api" or path.startswith("api/"):
                 return _error(404, "NOT_FOUND", f"接口 /{path} 不存在")
-            target = (dist_dir / path).resolve()
+            try:
+                target = (dist_dir / path).resolve()
+            except OSError:
+                return _error(404, "NOT_FOUND", "资源不存在")
             if path and target.is_file() and target.is_relative_to(dist_dir):
                 return FileResponse(target)
             index_file = dist_dir / "index.html"

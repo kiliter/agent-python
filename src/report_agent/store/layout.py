@@ -43,12 +43,37 @@ class InvalidResource(ValueError):
 
 
 def ensure_within(base: Path, target: Path) -> Path:
-    """确保目标路径位于 base 目录内部，防止路径穿越。"""
-    if "\x00" in str(target):
+    """确保目标路径（含解析软链接后的真实路径）位于 base 目录内部，防止路径穿越与软链逃逸。"""
+    if "\x00" in str(base) or "\x00" in str(target):
         raise InvalidResource("资源路径包含非法字符")
     base_norm = Path(os.path.normpath(os.path.abspath(base)))
     target_norm = Path(os.path.normpath(os.path.abspath(target)))
-    if base_norm not in target_norm.parents:
+    if target_norm == base_norm or not target_norm.is_relative_to(base_norm):
+        raise InvalidResource("非法的资源路径访问")
+    try:
+        base_res = base.resolve()
+        target_res = target.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise InvalidResource("非法的资源路径访问") from exc
+    if target_res == base_res or not target_res.is_relative_to(base_res):
+        raise InvalidResource("非法的资源路径访问")
+    return target
+
+
+def ensure_entry_within(base: Path, target: Path) -> Path:
+    """确保条目自身（不跟随末端软链接）位于 base 目录内部，用于安全摘除或清理末端软链接/条目。"""
+    if "\x00" in str(base) or "\x00" in str(target):
+        raise InvalidResource("资源路径包含非法字符")
+    base_norm = Path(os.path.normpath(os.path.abspath(base)))
+    target_norm = Path(os.path.normpath(os.path.abspath(target)))
+    if target_norm == base_norm or not target_norm.is_relative_to(base_norm):
+        raise InvalidResource("非法的资源路径访问")
+    try:
+        base_res = base.resolve()
+        parent_res = target_norm.parent.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise InvalidResource("非法的资源路径访问") from exc
+    if parent_res != base_res and not parent_res.is_relative_to(base_res):
         raise InvalidResource("非法的资源路径访问")
     return target
 
@@ -150,21 +175,21 @@ class DataLayout:
 def copy_resource(src_root: Path, dst_root: Path, ref: ResourceRef) -> None:
     """把一个资源从 src 树复制到 dst 树（先删除 dst 中的旧内容）。"""
     remove_resource(dst_root, ref)
-    src = src_root / ref.tree_path()
-    dst = dst_root / ref.tree_path()
+    src = ensure_within(src_root, src_root / ref.tree_path())
+    dst = ensure_entry_within(dst_root, dst_root / ref.tree_path())
     if not src.exists():
         return
     dst.parent.mkdir(parents=True, exist_ok=True)
-    if src.is_dir():
+    if src.is_dir() and not src.is_symlink():
         shutil.copytree(src, dst, ignore=shutil.ignore_patterns(META_FILE))
     else:
         shutil.copy2(src, dst)
 
 
 def remove_resource(root: Path, ref: ResourceRef) -> None:
-    """从树中删除一个资源。"""
-    target = root / ref.tree_path()
-    if target.is_dir():
+    """从树中删除一个资源（兼容指向外部或悬空的目录/文件软链接安全摘除）。"""
+    target = ensure_entry_within(root, root / ref.tree_path())
+    if target.is_symlink() or target.is_file():
+        target.unlink(missing_ok=True)
+    elif target.is_dir():
         shutil.rmtree(target)
-    elif target.exists():
-        target.unlink()

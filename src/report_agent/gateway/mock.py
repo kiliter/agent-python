@@ -14,23 +14,40 @@ from typing import Any
 
 from ..domain.api_contract import ApiContract
 from .base import ApiCallResult, decode_xml, parse_xml, xml_to_json_data
-from .unified_xml import (build_request_json, build_request_xml, mask_json, mask_xml, parse_gateway_json_response,
+from .unified_xml import (build_masked_request_json, build_request_xml, mask_xml, parse_gateway_json_response,
                           parse_gateway_response)
 
 _SAFE_MOCK_NAME_RE = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
 
 
 class MockGatewayClient:
-    """从文件读取响应的网关（支持 XML 与 JSON 双协议，JSON 模式兼容同名 XML 样例自动转换）。"""
+    """从文件读取响应的网关（支持 XML 与 JSON 双协议，优先读取 root，未命中时可选回退 fallback_root）。"""
 
-    def __init__(self, root: Path, style: str = "java") -> None:
+    def __init__(self, root: Path, style: str = "java", fallback_root: Path | None = None) -> None:
         self.root = root
         self.style = style
+        self.fallback_root = fallback_root
 
     async def aclose(self) -> None:
         return None
 
-    def _safe_file(self, path: Path, root_resolved: Path) -> Path | None:
+    def _search_roots(self) -> list[tuple[Path, Path]]:
+        roots: list[tuple[Path, Path]] = []
+        seen: set[Path] = set()
+        for candidate in (self.root, self.fallback_root):
+            if candidate is None:
+                continue
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if resolved not in seen:
+                seen.add(resolved)
+                roots.append((candidate, resolved))
+        return roots
+
+    @staticmethod
+    def _safe_file(path: Path, root_resolved: Path) -> Path | None:
         try:
             resolved = path.resolve()
         except OSError:
@@ -39,50 +56,48 @@ class MockGatewayClient:
             return None
         return resolved
 
+    def _find_candidate(self, names: list[str], roots: list[tuple[Path, Path]]) -> Path | None:
+        for base, base_resolved in roots:
+            for fname in names:
+                resolved = self._safe_file(base / fname, base_resolved)
+                if resolved is not None:
+                    return resolved
+        return None
+
     async def invoke(self, contract: ApiContract, args: dict[str, Any]) -> ApiCallResult:
         start = time.monotonic()
         try:
             request = contract.build_request(args)
             contract.build_headers(args)
             if contract.is_json:
-                preview = mask_json(build_request_json(contract.processCode, request, "mock", "mock"))
+                preview = build_masked_request_json(contract.processCode, request)
             else:
                 preview = mask_xml(build_request_xml(contract.processCode, request, "mock", "mock", self.style))
         except ValueError as exc:
             return ApiCallResult(ok=False, error=f"请求报文组装失败：{exc}")
         if not _SAFE_MOCK_NAME_RE.match(contract.name or ""):
             return ApiCallResult(ok=False, error=f"非法的接口名称：{contract.name!r}", request_preview=preview)
-        root_resolved = self.root.resolve()
+        roots = self._search_roots()
         route = str(request.get("route_value") or "").strip()
         valid_route = bool(route and route.isascii() and route.isdigit())
 
         if contract.is_json:
-            json_candidates: list[Path] = []
-            if valid_route:
-                json_candidates.append(self.root / f"{contract.name}.{route}.json")
-            json_candidates.append(self.root / f"{contract.name}.json")
-            for path in json_candidates:
-                resolved = self._safe_file(path, root_resolved)
-                if resolved is None:
-                    continue
+            json_names = ([f"{contract.name}.{route}.json"] if valid_route else []) + [f"{contract.name}.json"]
+            json_hit = self._find_candidate(json_names, roots)
+            if json_hit is not None:
                 try:
-                    raw_bytes = resolved.read_bytes()
+                    raw_bytes = json_hit.read_bytes()
                 except OSError as exc:
                     return ApiCallResult(ok=False, error=f"读取样例响应失败：{exc}", request_preview=preview)
                 text = decode_xml(raw_bytes, None)
                 cost = int((time.monotonic() - start) * 1000)
                 return parse_gateway_json_response(contract, text, 200, cost, preview)
 
-            xml_fallbacks: list[Path] = []
-            if valid_route:
-                xml_fallbacks.append(self.root / f"{contract.name}.{route}.xml")
-            xml_fallbacks.append(self.root / f"{contract.name}.xml")
-            for path in xml_fallbacks:
-                resolved = self._safe_file(path, root_resolved)
-                if resolved is None:
-                    continue
+            xml_names = ([f"{contract.name}.{route}.xml"] if valid_route else []) + [f"{contract.name}.xml"]
+            xml_hit = self._find_candidate(xml_names, roots)
+            if xml_hit is not None:
                 try:
-                    raw_bytes = resolved.read_bytes()
+                    raw_bytes = xml_hit.read_bytes()
                 except OSError as exc:
                     return ApiCallResult(ok=False, error=f"读取样例响应失败：{exc}", request_preview=preview)
                 xml_text = decode_xml(raw_bytes, None)
@@ -97,16 +112,11 @@ class MockGatewayClient:
             return ApiCallResult(ok=False, error=f"mock 模式下没有找到样例响应 {contract.name}.json",
                                  request_preview=preview)
 
-        candidates: list[Path] = []
-        if valid_route:
-            candidates.append(self.root / f"{contract.name}.{route}.xml")
-        candidates.append(self.root / f"{contract.name}.xml")
-        for path in candidates:
-            resolved = self._safe_file(path, root_resolved)
-            if resolved is None:
-                continue
+        xml_names = ([f"{contract.name}.{route}.xml"] if valid_route else []) + [f"{contract.name}.xml"]
+        xml_hit = self._find_candidate(xml_names, roots)
+        if xml_hit is not None:
             try:
-                raw_bytes = resolved.read_bytes()
+                raw_bytes = xml_hit.read_bytes()
             except OSError as exc:
                 return ApiCallResult(ok=False, error=f"读取样例响应失败：{exc}", request_preview=preview)
             text = decode_xml(raw_bytes, None)

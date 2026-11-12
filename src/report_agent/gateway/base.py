@@ -251,7 +251,17 @@ def _extract_xml_dotted(el: ET.Element, dotted_key: str) -> tuple[bool, str]:
         if not sub_els:
             return True, (target.text or "").strip()
         return True, ET.tostring(target, encoding="unicode")
-    return True, _json_cell_to_str([_xml_node_to_json(n) for n in nodes])
+    non_empty: list[Any] = []
+    for n in nodes:
+        val = _xml_node_to_json(n)
+        if _is_empty_json_record(val):
+            continue
+        non_empty.append(val)
+    if not non_empty:
+        return True, ""
+    if len(non_empty) == 1:
+        return True, _json_cell_to_str(non_empty[0])
+    return True, _json_cell_to_str(non_empty)
 
 
 def _xml_scalar_to_record(el: ET.Element) -> dict[str, str]:
@@ -360,6 +370,9 @@ def extract_records(contract: ApiContract, root: ET.Element) -> ApiCallResult:
 
 
 def _first_text(root: ET.Element, tags: list[str]) -> str | None:
+    if not tags:
+        return None
+    top = tags[0]
     wanted = set(tags)
     found_by_tag: dict[str, str] = {}
     for el in root.iter():
@@ -367,9 +380,9 @@ def _first_text(root: ET.Element, tags: list[str]) -> str | None:
         if tag in wanted and tag not in found_by_tag and not _is_xsi_nil(el):
             txt = (el.text or "").strip()
             if txt:
+                if tag == top:
+                    return txt
                 found_by_tag[tag] = txt
-                if len(found_by_tag) == len(wanted):
-                    break
     for tag in tags:
         if tag in found_by_tag:
             return found_by_tag[tag]
@@ -553,24 +566,23 @@ def _json_item_to_record(
 
 
 def _first_json_text(data: Any, keys: list[str]) -> str | None:
-    """按优先级在 JSON 树中递归查找首个非空错误说明字段。"""
-    for target in keys:
-        found = _find_json_key_first(data, target)
-        if found:
-            return found
-    return None
-
-
-def _find_json_key_first(node: Any, key: str) -> str | None:
-    """使用显式栈迭代查找首个匹配键的非空标量说明（防范超深嵌套 JSON 触发 RecursionError）。"""
-    stack: list[Any] = [node]
+    """按优先级在 JSON 树中单遍迭代查找首个非空错误说明字段（显式栈防范超深嵌套触发 RecursionError）。"""
+    if not keys:
+        return None
+    top = keys[0]
+    wanted = set(keys)
+    found_by_key: dict[str, str] = {}
+    stack: list[Any] = [data]
     while stack:
         cur = stack.pop()
         if isinstance(cur, dict):
-            if key in cur and cur[key] is not None and not isinstance(cur[key], (dict, list)):
-                s = _json_cell_to_str(cur[key]).strip()
-                if s:
-                    return s
+            for k, v in cur.items():
+                if k in wanted and k not in found_by_key and v is not None and not isinstance(v, (dict, list)):
+                    s = _json_cell_to_str(v).strip()
+                    if s:
+                        if k == top:
+                            return s
+                        found_by_key[k] = s
             vals = list(cur.values())
             for v in reversed(vals):
                 if isinstance(v, (dict, list)):
@@ -579,6 +591,9 @@ def _find_json_key_first(node: Any, key: str) -> str | None:
             for item in reversed(cur):
                 if isinstance(item, (dict, list)):
                     stack.append(item)
+    for target in keys:
+        if target in found_by_key:
+            return found_by_key[target]
     return None
 
 

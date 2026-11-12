@@ -18,7 +18,15 @@ from pathlib import Path
 from typing import Any
 
 from .fsutil import _fsync_dir, atomic_write_text, now_iso, read_json, read_text, write_json
-from .layout import META_FILE, DataLayout, InvalidResource, ResourceRef, ensure_within, is_valid_resource_key
+from .layout import (
+    META_FILE,
+    DataLayout,
+    InvalidResource,
+    ResourceRef,
+    ensure_entry_within,
+    ensure_within,
+    is_valid_resource_key,
+)
 
 
 class DraftConflict(RuntimeError):
@@ -58,7 +66,7 @@ class DraftStore:
             return []
         out: list[str] = []
         for p in base.iterdir():
-            if p.name.startswith(".") or not p.is_dir() or not is_valid_resource_key(kind, p.name):
+            if p.name.startswith(".") or p.is_symlink() or not p.is_dir() or not is_valid_resource_key(kind, p.name):
                 continue
             if isinstance(read_json(p / META_FILE), dict):
                 out.append(p.name)
@@ -129,22 +137,31 @@ class DraftStore:
             write_json(self._dir(ref) / META_FILE, meta)
 
     def delete(self, ref: ResourceRef) -> bool:
-        """删除草稿。"""
+        """删除草稿（兼容指向外部或悬空的末端软链接安全摘除）。"""
         with self.lock:
-            d = self._dir(ref)
+            d = ensure_entry_within(self.layout.drafts, self.layout.drafts / ref.kind / ref.key)
+            if d.is_symlink() or d.is_file():
+                d.unlink(missing_ok=True)
+                return True
             if not d.exists():
                 return False
             shutil.rmtree(d)
             return True
 
     def apply_to_tree(self, ref: ResourceRef, tree_root: Path) -> None:
-        """把草稿内容写入一棵发布树（替换该资源的旧内容）。"""
+        """把草稿内容写入一棵发布树（替换该资源的旧内容，先安全摘除可能存在的末端软链接）。"""
         src = self._dir(ref)
-        dst = ensure_within(tree_root, tree_root / ref.tree_path())
+        dst = ensure_entry_within(tree_root, tree_root / ref.tree_path())
         if ref.is_dir():
-            if dst.exists():
+            if dst.is_symlink() or dst.is_file():
+                dst.unlink(missing_ok=True)
+            elif dst.is_dir():
                 shutil.rmtree(dst)
             shutil.copytree(src, dst, ignore=shutil.ignore_patterns(META_FILE))
         else:
+            if dst.is_symlink() or dst.is_file():
+                dst.unlink(missing_ok=True)
+            elif dst.is_dir():
+                shutil.rmtree(dst)
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src / self.single_file_name(ref), dst)
