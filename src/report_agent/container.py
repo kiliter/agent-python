@@ -47,6 +47,7 @@ def _gateway_signature(s: Settings) -> tuple:
         s.gateway_access_token.get_secret_value(),
         s.gateway_xml_style,
         s.gateway_connect_timeout_s,
+        s.gateway_max_concurrency,
     )
 
 
@@ -99,8 +100,11 @@ def build_gateway(settings: Settings, layout: DataLayout) -> GatewayClient:
             settings.gateway_url, settings.gateway_app_id.get_secret_value(),
             settings.gateway_access_token.get_secret_value(), settings.gateway_xml_style,
             settings.gateway_connect_timeout_s,
+            max_concurrency=settings.gateway_max_concurrency,
         )
-    return MockGatewayClient(layout.mock_gateway, settings.gateway_xml_style)
+    return MockGatewayClient(
+        layout.mock_gateway, settings.gateway_xml_style, fallback_root=SEED_DIR / "mock-gateway",
+    )
 
 
 def build_container(settings: Settings, model=None, gateway: GatewayClient | None = None) -> Container:
@@ -190,7 +194,8 @@ def seed(layout: DataLayout, publisher: Publisher, cases: CaseStore, seed_dir: P
     mock_src = seed_dir / "mock-gateway"
     if mock_src.exists() and not any(layout.mock_gateway.iterdir()):
         for f in mock_src.iterdir():
-            shutil.copy2(f, layout.mock_gateway / f.name)
+            if f.is_file() and not f.name.startswith("."):
+                shutil.copy2(f, layout.mock_gateway / f.name)
     cases_src = seed_dir / "cases"
     if cases_src.exists() and not any(layout.cases.iterdir()):
         shutil.copytree(cases_src, layout.cases, dirs_exist_ok=True)

@@ -51,6 +51,21 @@ class ReloadableGatewayClient:
         with self._lock:
             return self._slot.client
 
+    def _spawn_close_task(self, coro) -> asyncio.Task[None] | None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            coro.close()
+            return None
+        if loop.is_closed():
+            coro.close()
+            return None
+        task = loop.create_task(coro)
+        with self._lock:
+            self._closing_tasks.add(task)
+        task.add_done_callback(self._discard_task)
+        return task
+
     async def invoke(self, contract: ApiContract, args: dict[str, Any]) -> ApiCallResult:
         with self._lock:
             slot = self._slot
@@ -67,7 +82,10 @@ class ReloadableGatewayClient:
                     if slot in self._retired_inflight:
                         self._retired_inflight.remove(slot)
             if close_now:
-                await _safe_aclose(slot.client)
+                # 挂入独立后台任务并 shield 等待：正常返回时同步关毕，遇外层超时取消时亦不会中断底层连接池释放
+                task = self._spawn_close_task(_safe_aclose(slot.client))
+                if task is not None:
+                    await asyncio.shield(task)
 
     def swap(self, new_client: GatewayClient) -> GatewayClient | None:
         """原子替换为新的底层网关客户端，并安全退役旧客户端。"""
@@ -86,15 +104,7 @@ class ReloadableGatewayClient:
                 self._retired_inflight.append(old_slot)
 
         if immediate_close is not None:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-            if loop is not None and not loop.is_closed():
-                task = loop.create_task(self.aclose_retired())
-                with self._lock:
-                    self._closing_tasks.add(task)
-                task.add_done_callback(self._discard_task)
+            self._spawn_close_task(self.aclose_retired())
         return old_slot.client
 
     def _discard_task(self, task: asyncio.Task[None]) -> None:

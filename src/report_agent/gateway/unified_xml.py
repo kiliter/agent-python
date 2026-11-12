@@ -101,16 +101,22 @@ def build_request_xml(process_code: str, request: dict[str, Any], app_id: str, a
 _MASK_TAGS = ("app_id", "access_token")
 _MASK_NONEMPTY_TAGS = ("verify_code",)
 _PHONE_TAGS = ("route_value", "userMobile", "mobile", "phone", "billId", "msisdn")
+_PHONE_11_RE = re.compile(r"^\d{11}$")
+_XML_MASK_RES = (
+    *((re.compile(rf"(<{tag}>)[^<]*(</{tag}>)"), r"\1***\2") for tag in _MASK_TAGS),
+    *((re.compile(rf"(<{tag}>)(?!\$\{{[^}}]+\}}<)[^<]+(</{tag}>)"), r"\1***\2") for tag in _MASK_NONEMPTY_TAGS),
+    *((re.compile(rf"(<{tag}>)(\d{{3}})\d{{4}}(\d{{4}})(</{tag}>)"), r"\1\2****\3\4") for tag in _PHONE_TAGS),
+)
+_JSON_FALLBACK_MASK_RES = (
+    *((re.compile(rf'("{tag}"\s*:\s*)"[^"]*"'), r'\1"***"') for tag in (*_MASK_TAGS, *_MASK_NONEMPTY_TAGS)),
+    *((re.compile(rf'("{tag}"\s*:\s*")(\d{{3}})\d{{4}}(\d{{4}}")'), r"\1\2****\3") for tag in _PHONE_TAGS),
+)
 
 
 def mask_xml(xml: str) -> str:
     """日志与管理端展示用的脱敏报文。"""
-    for tag in _MASK_TAGS:
-        xml = re.sub(rf"(<{tag}>)[^<]*(</{tag}>)", r"\1***\2", xml)
-    for tag in _MASK_NONEMPTY_TAGS:
-        xml = re.sub(rf"(<{tag}>)(?!\$\{{[^}}]+\}}<)[^<]+(</{tag}>)", r"\1***\2", xml)
-    for tag in _PHONE_TAGS:
-        xml = re.sub(rf"(<{tag}>)(\d{{3}})\d{{4}}(\d{{4}})(</{tag}>)", r"\1\2****\3\4", xml)
+    for pattern, repl in _XML_MASK_RES:
+        xml = pattern.sub(repl, xml)
     return xml
 
 
@@ -127,8 +133,10 @@ def _sanitize_json_value(val: Any, _depth: int = 0) -> Any:
     return val
 
 
-def build_request_json(process_code: str, request: dict[str, Any], app_id: str, access_token: str) -> str:
-    """按统一网关 JSON 协议组装 {"operation_in": {...}} UTF-8 格式化请求报文。"""
+def _build_request_json_obj(
+    process_code: str, request: dict[str, Any], app_id: str, access_token: str
+) -> dict[str, Any]:
+    """按统一网关 JSON 协议构造 {"operation_in": {...}} 请求字典。"""
     raw_req = request if isinstance(request, dict) else {}
     if isinstance(raw_req.get("operation_in"), dict) and set(raw_req.keys()) == {"operation_in"}:
         raw_req = raw_req["operation_in"]
@@ -158,7 +166,12 @@ def build_request_json(process_code: str, request: dict[str, Any], app_id: str, 
         ks = str(k)
         if ks not in _ENVELOPE_KEYS:
             envelope[ks] = _sanitize_json_value(v)
-    return json.dumps({"operation_in": envelope}, ensure_ascii=False, indent=2)
+    return {"operation_in": envelope}
+
+
+def build_request_json(process_code: str, request: dict[str, Any], app_id: str, access_token: str) -> str:
+    """按统一网关 JSON 协议组装 {"operation_in": {...}} UTF-8 格式化请求报文。"""
+    return json.dumps(_build_request_json_obj(process_code, request, app_id, access_token), ensure_ascii=False, indent=2)
 
 
 def _mask_json_node(node: Any) -> Any:
@@ -177,7 +190,7 @@ def _mask_json_node(node: Any) -> Any:
             elif k in _PHONE_TAGS:
                 if isinstance(v, (str, int)) and not isinstance(v, bool):
                     s = str(v)
-                    out[k] = f"{s[:3]}****{s[7:]}" if re.fullmatch(r"\d{11}", s) else v
+                    out[k] = f"{s[:3]}****{s[7:]}" if _PHONE_11_RE.match(s) else v
                 else:
                     out[k] = _mask_json_node(v)
             else:
@@ -194,19 +207,23 @@ def mask_json(text: str) -> str:
         parsed = json.loads(text)
     except Exception:  # noqa: BLE001
         fallback = text
-        for tag in (*_MASK_TAGS, *_MASK_NONEMPTY_TAGS):
-            fallback = re.sub(rf'("{tag}"\s*:\s*)"[^"]*"', r'\1"***"', fallback)
-        for tag in _PHONE_TAGS:
-            fallback = re.sub(rf'("{tag}"\s*:\s*")(\d{{3}})\d{{4}}(\d{{4}}")', r"\1\2****\3", fallback)
+        for pattern, repl in _JSON_FALLBACK_MASK_RES:
+            fallback = pattern.sub(repl, fallback)
         return fallback
     return json.dumps(_mask_json_node(parsed), ensure_ascii=False, indent=2)
+
+
+def build_masked_request_json(process_code: str, request: dict[str, Any]) -> str:
+    """直接构造脱敏后的 JSON 请求预览文本，避免重复反序列化开销。"""
+    obj = _build_request_json_obj(process_code, request, "preview", "preview")
+    return json.dumps(_mask_json_node(obj), ensure_ascii=False, indent=2)
 
 
 def build_request_preview(contract: ApiContract, args: dict[str, Any] | None = None, style: str = "java") -> str:
     """按契约协议生成脱敏请求预览报文；未传入的参数保留 ${参数名} 占位符。"""
     preview_req = contract.build_preview_request(args or {})
     if contract.is_json:
-        return mask_json(build_request_json(contract.processCode, preview_req, "preview", "preview"))
+        return build_masked_request_json(contract.processCode, preview_req)
     return mask_xml(build_request_xml(contract.processCode, preview_req, "preview", "preview", style))
 
 
@@ -265,7 +282,13 @@ class UnifiedGatewayXmlClient:
         self.connect_timeout_s = connect_timeout_s
         self.max_concurrency = max(1, eff_concurrency)
         self._sem = asyncio.Semaphore(self.max_concurrency)
-        self._client = httpx.AsyncClient(follow_redirects=False)
+        self._client = httpx.AsyncClient(
+            follow_redirects=False,
+            limits=httpx.Limits(
+                max_connections=max(100, self.max_concurrency),
+                max_keepalive_connections=min(32, self.max_concurrency),
+            ),
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -276,8 +299,9 @@ class UnifiedGatewayXmlClient:
             request = contract.build_request(args)
             custom_headers = contract.build_headers(args)
             if contract.is_json:
-                payload = build_request_json(contract.processCode, request, self.app_id, self.access_token)
-                preview = mask_json(payload)
+                req_obj = _build_request_json_obj(contract.processCode, request, self.app_id, self.access_token)
+                payload = json.dumps(req_obj, ensure_ascii=False, indent=2)
+                preview = json.dumps(_mask_json_node(req_obj), ensure_ascii=False, indent=2)
                 headers = _merge_http_headers(
                     {"Content-Type": "application/json; charset=utf-8", "Accept": "application/json"},
                     custom_headers,
@@ -293,13 +317,14 @@ class UnifiedGatewayXmlClient:
             return ApiCallResult(ok=False, error=f"请求报文组装失败：{exc}")
         attempts = contract.retry.maxAttempts if contract.idempotent else 1
         timeout = httpx.Timeout(contract.timeoutMs / 1000, connect=self.connect_timeout_s)
+        payload_bytes = payload.encode("utf-8")
         start = time.monotonic()
         last_error = ""
         for attempt in range(1, attempts + 1):
             try:
                 async with self._sem:
                     resp = await self._client.post(
-                        self.url, content=payload.encode("utf-8"), timeout=timeout, headers=headers,
+                        self.url, content=payload_bytes, timeout=timeout, headers=headers,
                     )
             except httpx.ConnectTimeout as exc:
                 last_error = f"网关连接超时（>{self.connect_timeout_s:g}s）：{type(exc).__name__} {exc}".strip()
@@ -325,7 +350,7 @@ class UnifiedGatewayXmlClient:
                     continue
                 return ApiCallResult(ok=False, error=last_error, cost_ms=_ms(start), request_preview=preview,
                                      attempts=attempt)
-            except httpx.HTTPError as exc:
+            except (httpx.HTTPError, RuntimeError) as exc:
                 last_error = f"网关请求异常：{type(exc).__name__} {exc}".strip()
                 return ApiCallResult(ok=False, error=last_error, cost_ms=_ms(start), request_preview=preview,
                                      attempts=attempt)
@@ -380,11 +405,14 @@ def parse_gateway_json_response(contract: ApiContract, text: str, status: int | 
                              raw=text[:20000], request_preview=preview, attempts=attempts)
     result.http_status = status
     result.cost_ms = cost
-    try:
-        pretty = json.dumps(data, ensure_ascii=False, indent=2)
-    except (Exception, RecursionError):  # noqa: BLE001
-        pretty = text
-    result.raw = pretty if len(pretty) <= 200000 else pretty[:200000]
+    if len(text) <= 200_000:
+        try:
+            pretty = json.dumps(data, ensure_ascii=False, indent=2)
+        except (Exception, RecursionError):  # noqa: BLE001
+            pretty = text
+        result.raw = pretty if len(pretty) <= 200_000 else pretty[:200_000]
+    else:
+        result.raw = text[:200_000]
     result.request_preview = preview
     result.attempts = attempts
     return result

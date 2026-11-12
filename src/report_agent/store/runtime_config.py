@@ -10,12 +10,9 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import math
-import os
 import re
-import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,7 +22,7 @@ from urllib.parse import urlsplit
 from pydantic import SecretStr
 
 from ..config import Settings
-from .fsutil import _fsync_dir, append_line, fmt_time, now_iso, read_json, read_jsonl
+from .fsutil import _chmod_safe, append_audit, append_jsonl, fmt_time, now_iso, read_json, read_jsonl, write_json
 from .layout import DataLayout, InvalidResource, ensure_within
 from .service import ResourceNotFound
 
@@ -106,57 +103,6 @@ def mask_api_keys(raw: str | None) -> str:
     if not keys:
         return ""
     return ", ".join(mask_secret(k) for k in keys)
-
-
-def _chmod_safe(path_or_fd: Path | int, mode: int) -> None:
-    try:
-        if isinstance(path_or_fd, int):
-            if hasattr(os, "fchmod"):
-                os.fchmod(path_or_fd, mode)
-        else:
-            path_or_fd.chmod(mode)
-    except OSError:
-        pass
-
-
-def _atomic_write_json_600(path: Path, data: Any) -> None:
-    """以 0o600 权限原子写入 JSON 文件（先设置临时文件权限再落盘替换，避免任何权限裸露窗口）。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = (json.dumps(data, ensure_ascii=False, indent=2, default=str) + "\n").encode("utf-8")
-    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    try:
-        _chmod_safe(fd, 0o600)
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(payload)
-            fh.flush()
-            os.fsync(fh.fileno())
-        _chmod_safe(Path(tmp), 0o600)
-        os.replace(tmp, path)
-        _chmod_safe(path, 0o600)
-        _fsync_dir(path.parent)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-
-
-def _append_jsonl_600(path: Path, entry: dict[str, Any]) -> None:
-    """以 0o600 权限追加一行 JSONL 记录并 fsync。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    line = (json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    try:
-        _chmod_safe(fd, 0o600)
-        with os.fdopen(fd, "ab") as fh:
-            fh.write(line)
-            fh.flush()
-            os.fsync(fh.fileno())
-    except BaseException:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        raise
-    _chmod_safe(path, 0o600)
 
 
 def _check_http_url(url: str, label: str) -> str | None:
@@ -779,6 +725,12 @@ class RuntimeSnapshot:
         }
 
 
+def _format_keys_summary(prefix: str, changed_keys: list[str]) -> str:
+    preview_keys = ", ".join(changed_keys[:4])
+    suffix = f" 等 {len(changed_keys)} 项" if len(changed_keys) > 4 else ""
+    return f"{prefix}（{preview_keys}{suffix}）"
+
+
 class RuntimeConfigStore:
     """磁盘持久化的版本化运行配置存储。"""
 
@@ -791,6 +743,8 @@ class RuntimeConfigStore:
         self.index_path = self.root / "index.jsonl"
         self._active: RuntimeSnapshot | None = None
         self._fallback_settings: Settings = _DEFAULT_FALLBACK_SETTINGS
+        self._index_cache: tuple[tuple[int, int], list[dict[str, Any]]] | None = None
+        self._public_cfg_cache: dict[str, dict[str, Any]] = {}
 
     def _ensure_dirs(self) -> None:
         self.revisions_dir.mkdir(parents=True, exist_ok=True)
@@ -803,10 +757,24 @@ class RuntimeConfigStore:
         return ensure_within(self.revisions_dir, self.revisions_dir / f"{rev}.json")
 
     def exists(self) -> bool:
-        """磁盘上是否已存在持久化的运行配置。"""
-        return self.current_path.is_file()
+        """磁盘上是否已存在持久化的运行配置（含 current.json 丢失但索引或历史快照仍存在的待恢复态）。"""
+        if self.current_path.is_file() or self.index_path.is_file():
+            return True
+        return self.revisions_dir.is_dir() and any(
+            CONFIG_REV_RE.match(p.stem) for p in self.revisions_dir.glob("c*.json")
+        )
+
+    def _index_sig(self) -> tuple[int, int]:
+        try:
+            st = self.index_path.stat()
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return (0, -1)
 
     def _read_index_entries(self) -> list[dict[str, Any]]:
+        sig = self._index_sig()
+        if self._index_cache is not None and self._index_cache[0] == sig:
+            return list(self._index_cache[1])
         valid: list[dict[str, Any]] = []
         for item in read_jsonl(self.index_path):
             rev = item.get("rev")
@@ -818,7 +786,8 @@ class RuntimeConfigStore:
                 continue
             valid.append({**item, "n": n})
         valid.sort(key=lambda e: e["n"])
-        return valid
+        self._index_cache = (sig, valid)
+        return list(valid)
 
     def _next_number(self) -> int:
         max_n = max((int(e["n"]) for e in self._read_index_entries()), default=0)
@@ -853,21 +822,8 @@ class RuntimeConfigStore:
         n = self._next_number()
         rev = f"c{n}"
         ts = now_iso()
-        snap_doc = {
-            "rev": rev,
-            "n": n,
-            "time": ts,
-            "operator": operator,
-            "type": type_label,
-            "source": source,
-            "summary": summary,
-            "note": note,
-            "changedKeys": list(changed_keys),
-            "config": cfg.to_storage_dict(),
-        }
-        _atomic_write_json_600(self._revision_path(rev), snap_doc)
-        index_entry = {
-            "rev": rev,
+        storage_dict = cfg.to_storage_dict()
+        meta_fields = {
             "n": n,
             "time": ts,
             "operator": operator,
@@ -877,20 +833,11 @@ class RuntimeConfigStore:
             "note": note,
             "changedKeys": list(changed_keys),
         }
-        _append_jsonl_600(self.index_path, index_entry)
-        current_doc = {
-            "activeRev": rev,
-            "n": n,
-            "time": ts,
-            "operator": operator,
-            "type": type_label,
-            "source": source,
-            "summary": summary,
-            "note": note,
-            "changedKeys": list(changed_keys),
-            "config": cfg.to_storage_dict(),
-        }
-        _atomic_write_json_600(self.current_path, current_doc)
+        write_json(self._revision_path(rev), {"rev": rev, **meta_fields, "config": storage_dict}, mode=0o600)
+        append_jsonl(self.index_path, {"rev": rev, **meta_fields}, mode=0o600)
+        self._index_cache = None
+        write_json(self.current_path, {"activeRev": rev, **meta_fields, "config": storage_dict}, mode=0o600)
+        self._public_cfg_cache[rev] = cfg.to_public_dict()
         snap = RuntimeSnapshot(
             rev=rev,
             n=n,
@@ -906,116 +853,58 @@ class RuntimeConfigStore:
         self._active = snap
         return snap
 
-    def _audit(self, action: str, operator: str, detail: dict[str, Any]) -> None:
-        append_line(
-            self.layout.audit,
-            json.dumps({"time": now_iso(), "action": action, "operator": operator, **detail}, ensure_ascii=False),
-        )
-
     def bootstrap_or_load(self, settings: Settings) -> RuntimeSnapshot:
         """启动时调用：若无持久化文件则从环境变量初始化释放 c1；若已存在则加载磁盘生效配置。"""
         with self.lock:
+            if self._fallback_settings != settings:
+                self._public_cfg_cache.clear()
             self._fallback_settings = settings
             self._ensure_dirs()
             self._cleanup_tmp_files()
             cur = read_json(self.current_path)
             if isinstance(cur, dict) and isinstance(cur.get("config"), dict):
-                rev = str(cur.get("activeRev") or "c1")
-                if not CONFIG_REV_RE.match(rev):
-                    rev = "c1"
-                n = int(cur.get("n") or rev[1:])
-                cfg = RuntimeConfig.from_storage_dict(cur["config"], fallback_settings=settings)
-                ts = str(cur.get("time") or now_iso())
-                op = str(cur.get("operator") or "system")
-                type_label = str(cur.get("type") or "初始化")
-                source = str(cur.get("source") or type_label)
-                summary = str(cur.get("summary") or "")
-                note = str(cur.get("note") or "")
-                changed_keys = [str(k) for k in (cur.get("changedKeys") or []) if isinstance(k, str)]
-                # 兼容旧版 current.json 缺失新增字段（如 reportApiKeys）时归一化回写保存
-                normalized_dict = cfg.to_storage_dict()
-                if cur["config"] != normalized_dict:
-                    _atomic_write_json_600(
-                        self.current_path,
-                        {
-                            "activeRev": rev,
-                            "n": n,
-                            "time": ts,
-                            "operator": op,
-                            "type": type_label,
-                            "source": source,
-                            "summary": summary,
-                            "note": note,
-                            "changedKeys": changed_keys,
-                            "config": normalized_dict,
-                        },
-                    )
-                # 确保对应的不可变版本快照也存在（兼容崩溃恢复）
-                rev_path = self._revision_path(rev)
-                if not rev_path.exists():
-                    _atomic_write_json_600(
-                        rev_path,
-                        {
-                            "rev": rev,
-                            "n": n,
-                            "time": ts,
-                            "operator": op,
-                            "type": type_label,
-                            "source": source,
-                            "summary": summary,
-                            "note": note,
-                            "changedKeys": changed_keys,
-                            "config": normalized_dict,
-                        },
-                    )
-                _chmod_safe(self.current_path, 0o600)
-                if self.index_path.exists():
-                    _chmod_safe(self.index_path, 0o600)
-                snap = RuntimeSnapshot(
-                    rev=rev,
-                    n=n,
-                    time=ts,
-                    operator=op,
-                    type=type_label,
-                    source=source,
-                    summary=summary,
-                    note=note,
-                    changed_keys=changed_keys,
-                    config=cfg,
-                )
-                self._active = snap
-                return snap
-
-            # 若 current.json 缺失但历史索引存在（极端崩溃场景），优先从最近一个有效快照恢复
-            entries = self._read_index_entries()
-            for entry in reversed(entries):
-                rev_doc = read_json(self._revision_path(entry["rev"]))
-                if isinstance(rev_doc, dict) and isinstance(rev_doc.get("config"), dict):
-                    cfg = RuntimeConfig.from_storage_dict(rev_doc["config"], fallback_settings=settings)
-                    rev = entry["rev"]
-                    n = int(entry["n"])
-                    ts = str(rev_doc.get("time") or entry.get("time") or now_iso())
-                    op = str(rev_doc.get("operator") or entry.get("operator") or "system")
-                    type_label = str(rev_doc.get("type") or entry.get("type") or "恢复")
-                    source = str(rev_doc.get("source") or entry.get("source") or type_label)
-                    summary = str(rev_doc.get("summary") or entry.get("summary") or "")
-                    note = str(rev_doc.get("note") or entry.get("note") or "")
-                    changed_keys = [str(k) for k in (entry.get("changedKeys") or []) if isinstance(k, str)]
-                    _atomic_write_json_600(
-                        self.current_path,
-                        {
-                            "activeRev": rev,
-                            "n": n,
-                            "time": ts,
-                            "operator": op,
-                            "type": type_label,
-                            "source": source,
-                            "summary": summary,
-                            "note": note,
-                            "changedKeys": changed_keys,
-                            "config": cfg.to_storage_dict(),
-                        },
-                    )
+                try:
+                    rev = str(cur.get("activeRev") or "c1")
+                    if not CONFIG_REV_RE.match(rev):
+                        rev = "c1"
+                    n = int(cur.get("n") or rev[1:])
+                    cfg = RuntimeConfig.from_storage_dict(cur["config"], fallback_settings=settings)
+                except (TypeError, ValueError) as exc:
+                    log.warning("current.json 字段损坏，尝试从历史快照恢复：%s", exc)
+                else:
+                    ts = str(cur.get("time") or now_iso())
+                    op = str(cur.get("operator") or "system")
+                    type_label = str(cur.get("type") or "初始化")
+                    source = str(cur.get("source") or type_label)
+                    summary = str(cur.get("summary") or "")
+                    note = str(cur.get("note") or "")
+                    changed_keys = [str(k) for k in (cur.get("changedKeys") or []) if isinstance(k, str)]
+                    normalized_dict = cfg.to_storage_dict()
+                    meta_fields = {
+                        "n": n,
+                        "time": ts,
+                        "operator": op,
+                        "type": type_label,
+                        "source": source,
+                        "summary": summary,
+                        "note": note,
+                        "changedKeys": changed_keys,
+                    }
+                    # 兼容旧版 current.json 缺失新增字段（如 reportApiKeys）时归一化回写保存
+                    if cur["config"] != normalized_dict:
+                        write_json(
+                            self.current_path,
+                            {"activeRev": rev, **meta_fields, "config": normalized_dict},
+                            mode=0o600,
+                        )
+                    # 确保对应的不可变版本快照也存在（兼容崩溃恢复）
+                    rev_path = self._revision_path(rev)
+                    if not rev_path.exists():
+                        write_json(rev_path, {"rev": rev, **meta_fields, "config": normalized_dict}, mode=0o600)
+                    _chmod_safe(self.current_path, 0o600)
+                    if self.index_path.exists():
+                        _chmod_safe(self.index_path, 0o600)
+                    self._public_cfg_cache[rev] = cfg.to_public_dict()
                     snap = RuntimeSnapshot(
                         rev=rev,
                         n=n,
@@ -1029,8 +918,73 @@ class RuntimeConfigStore:
                         config=cfg,
                     )
                     self._active = snap
-                    log.warning("current.json 缺失或损坏，已从最近快照 %s 自动恢复", rev)
                     return snap
+
+            # 若 current.json 缺失或损坏，优先从 index.jsonl 或 revisions/c*.json 最近一个有效快照恢复
+            candidates: list[dict[str, Any]] = list(reversed(self._read_index_entries()))
+            seen_revs = {c["rev"] for c in candidates}
+            if self.revisions_dir.is_dir():
+                disk_revs = sorted(
+                    (p.stem for p in self.revisions_dir.glob("c*.json") if CONFIG_REV_RE.match(p.stem)),
+                    key=lambda r: int(r[1:]),
+                    reverse=True,
+                )
+                for r in disk_revs:
+                    if r not in seen_revs:
+                        candidates.append({"rev": r, "n": int(r[1:])})
+
+            for entry in candidates:
+                rev_doc = read_json(self._revision_path(entry["rev"]))
+                if not isinstance(rev_doc, dict) or not isinstance(rev_doc.get("config"), dict):
+                    continue
+                try:
+                    cfg = RuntimeConfig.from_storage_dict(rev_doc["config"], fallback_settings=settings)
+                    n = int(entry["n"])
+                except (TypeError, ValueError):
+                    continue
+                rev = entry["rev"]
+                ts = str(rev_doc.get("time") or entry.get("time") or now_iso())
+                op = str(rev_doc.get("operator") or entry.get("operator") or "system")
+                type_label = str(rev_doc.get("type") or entry.get("type") or "恢复")
+                source = str(rev_doc.get("source") or entry.get("source") or type_label)
+                summary = str(rev_doc.get("summary") or entry.get("summary") or "")
+                note = str(rev_doc.get("note") or entry.get("note") or "")
+                raw_ck = rev_doc.get("changedKeys") or entry.get("changedKeys") or []
+                changed_keys = [str(k) for k in raw_ck if isinstance(k, str)]
+                meta_fields = {
+                    "n": n,
+                    "time": ts,
+                    "operator": op,
+                    "type": type_label,
+                    "source": source,
+                    "summary": summary,
+                    "note": note,
+                    "changedKeys": changed_keys,
+                }
+                write_json(
+                    self.current_path,
+                    {"activeRev": rev, **meta_fields, "config": cfg.to_storage_dict()},
+                    mode=0o600,
+                )
+                if not any(e["rev"] == rev for e in self._read_index_entries()):
+                    append_jsonl(self.index_path, {"rev": rev, **meta_fields}, mode=0o600)
+                    self._index_cache = None
+                self._public_cfg_cache[rev] = cfg.to_public_dict()
+                snap = RuntimeSnapshot(
+                    rev=rev,
+                    n=n,
+                    time=ts,
+                    operator=op,
+                    type=type_label,
+                    source=source,
+                    summary=summary,
+                    note=note,
+                    changed_keys=changed_keys,
+                    config=cfg,
+                )
+                self._active = snap
+                log.warning("current.json 缺失或损坏，已从最近快照 %s 自动恢复", rev)
+                return snap
 
             # 首次启动：将环境变量配置释放到磁盘生成 c1
             cfg = RuntimeConfig.from_settings(settings)
@@ -1062,21 +1016,29 @@ class RuntimeConfigStore:
         return self.active().to_public_state()
 
     def revisions(self) -> list[dict[str, Any]]:
-        """按版本号倒序返回全部配置历史（脱敏展示）。"""
+        """按版本号倒序返回全部配置历史（脱敏展示，命中内存缓存时免重复读取快照文件）。"""
         with self.lock:
             active = self.active()
             entries = self._read_index_entries()
             out: list[dict[str, Any]] = []
             for e in reversed(entries):
                 rev = e["rev"]
-                rev_doc = read_json(self._revision_path(rev))
-                if isinstance(rev_doc, dict) and isinstance(rev_doc.get("config"), dict):
-                    snap_cfg = RuntimeConfig.from_storage_dict(rev_doc["config"], fallback_settings=self._fallback_settings)
-                    masked_cfg = snap_cfg.to_public_dict()
-                elif rev == active.rev:
-                    masked_cfg = active.config.to_public_dict()
-                else:
-                    masked_cfg = {}
+                masked_cfg = self._public_cfg_cache.get(rev)
+                if masked_cfg is None:
+                    rev_doc = read_json(self._revision_path(rev))
+                    if isinstance(rev_doc, dict) and isinstance(rev_doc.get("config"), dict):
+                        try:
+                            snap_cfg = RuntimeConfig.from_storage_dict(
+                                rev_doc["config"], fallback_settings=self._fallback_settings
+                            )
+                            masked_cfg = snap_cfg.to_public_dict()
+                            self._public_cfg_cache[rev] = masked_cfg
+                        except (TypeError, ValueError):
+                            masked_cfg = {}
+                    elif rev == active.rev:
+                        masked_cfg = active.config.to_public_dict()
+                    else:
+                        masked_cfg = {}
                 out.append(
                     {
                         "rev": rev,
@@ -1087,7 +1049,7 @@ class RuntimeConfigStore:
                         "note": e.get("note") or "",
                         "online": rev == active.rev,
                         "changedKeys": list(e.get("changedKeys") or []),
-                        "config": masked_cfg,
+                        "config": dict(masked_cfg),
                     }
                 )
             return out
@@ -1117,19 +1079,17 @@ class RuntimeConfigStore:
             if not changed_keys:
                 return current, False
             clean_note = (note or "").strip()
-            preview_keys = ", ".join(changed_keys[:4])
-            suffix = f" 等 {len(changed_keys)} 项" if len(changed_keys) > 4 else ""
-            summary = f"更新运行配置（{preview_keys}{suffix}）"
             snap = self._write_revision(
                 cfg=new_cfg,
                 operator=operator,
                 type_label="修改",
                 source="管理端热更新",
-                summary=summary,
+                summary=_format_keys_summary("更新运行配置", changed_keys),
                 note=clean_note,
                 changed_keys=changed_keys,
             )
-            self._audit(
+            append_audit(
+                self.layout.audit,
                 "runtime-config-update",
                 operator,
                 {"rev": snap.rev, "base": current.rev, "changedKeys": changed_keys, "note": clean_note},
@@ -1146,7 +1106,12 @@ class RuntimeConfigStore:
             rev_doc = read_json(rev_path)
             if not isinstance(rev_doc, dict) or not isinstance(rev_doc.get("config"), dict):
                 raise ResourceNotFound(f"运行配置版本 {clean_target} 不存在")
-            target_cfg = RuntimeConfig.from_storage_dict(rev_doc["config"], fallback_settings=self._fallback_settings)
+            try:
+                target_cfg = RuntimeConfig.from_storage_dict(
+                    rev_doc["config"], fallback_settings=self._fallback_settings
+                )
+            except (TypeError, ValueError) as exc:
+                raise RuntimeConfigValidationError([f"运行配置版本 {clean_target} 数据已损坏：{exc}"]) from exc
             target_cfg.validate()
             current = self.active()
             changed_keys = current.config.diff_keys(target_cfg)
@@ -1161,7 +1126,8 @@ class RuntimeConfigStore:
                 note=clean_reason,
                 changed_keys=changed_keys,
             )
-            self._audit(
+            append_audit(
+                self.layout.audit,
                 "runtime-config-rollback",
                 operator,
                 {"rev": snap.rev, "base": current.rev, "targetRev": clean_target, "reason": clean_reason,
@@ -1179,19 +1145,17 @@ class RuntimeConfigStore:
             if not changed_keys:
                 return current, False
             clean_note = (note or "").strip()
-            preview_keys = ", ".join(changed_keys[:4])
-            suffix = f" 等 {len(changed_keys)} 项" if len(changed_keys) > 4 else ""
-            summary = f"从环境变量同步（{preview_keys}{suffix}）"
             snap = self._write_revision(
                 cfg=env_cfg,
                 operator=operator,
                 type_label="环境同步",
                 source="环境变量同步",
-                summary=summary,
+                summary=_format_keys_summary("从环境变量同步", changed_keys),
                 note=clean_note,
                 changed_keys=changed_keys,
             )
-            self._audit(
+            append_audit(
+                self.layout.audit,
                 "runtime-config-sync-env",
                 operator,
                 {"rev": snap.rev, "base": current.rev, "changedKeys": changed_keys, "note": clean_note},

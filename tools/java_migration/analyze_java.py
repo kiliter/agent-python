@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -14,7 +15,8 @@ from pathlib import Path
 import yaml
 from jinja2 import Environment, nodes
 
-JAVA_RES = Path("/Users/zhangjialin/IdeaProjects/agent/pdf-agent-parse/src/main/resources")
+JAVA_AGENT = Path(os.environ.get("JAVA_AGENT_HOME", "/Users/zhangjialin/IdeaProjects/agent"))
+JAVA_RES = JAVA_AGENT / "pdf-agent-parse/src/main/resources"
 TPL_DIR = JAVA_RES / "template/md"
 RULE_DIR = JAVA_RES / "agent/rule"
 

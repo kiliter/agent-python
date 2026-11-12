@@ -24,7 +24,7 @@ from typing import Any, Literal
 from ..domain.resources import Issue, ResourceSet, load_resource_dir, validate_all
 from ..domain.template import OFFLINE_FILE
 from .drafts import DraftStore
-from .fsutil import append_line, atomic_write_text, now_iso, replace_dir_contents, trees_equal
+from .fsutil import append_audit, atomic_write_text, now_iso, replace_dir_contents, trees_equal
 from .git_repo import GitRepo
 from .layout import META_FILE, DataLayout, ResourceRef, copy_resource, ensure_within, remove_resource
 from .releases import ReleaseStore
@@ -138,7 +138,7 @@ class Publisher:
                 final = self.layout.releases / rev
                 if final.exists() and self.releases.live_rev() != rev and not self.releases.has(rev):
                     shutil.rmtree(final, ignore_errors=True)
-                if repo_touched:
+                if repo_touched and not self.releases.has(rev):
                     try:
                         self.repo.reset_to(prev_head)
                     except Exception:  # noqa: BLE001
@@ -186,5 +186,4 @@ class Publisher:
     def audit(self, action: str, operator: str, detail: dict[str, Any]) -> None:
         """追加审计日志。"""
         with self.lock:
-            append_line(self.layout.audit, json.dumps(
-                {"time": now_iso(), "action": action, "operator": operator, **detail}, ensure_ascii=False))
+            append_audit(self.layout.audit, action, operator, detail)

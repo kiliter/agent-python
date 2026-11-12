@@ -28,18 +28,24 @@ async def main() -> None:
     case = yaml.safe_load((ROOT / "tests/fixtures/seed/cases/1001/C-01.yaml").read_text(encoding="utf-8"))
     base = Settings()
     tmp = Path(tempfile.mkdtemp(prefix="smoke_"))
-    shutil.copytree(base.data_dir, tmp / "data", symlinks=True)  # 保留 releases/current 软链接
-    settings = base.model_copy(update={"data_dir": tmp / "data", "gateway_mode": "mock"})
-    c = build_container(settings)
-    out = await c.runner.run(RunRequest(tid, case["inputs"], case["documentText"], entry="试运行"))
-    print(json.dumps({k: out[k] for k in ("status", "error", "foundCount", "totalCount", "durationMs", "rounds",
-                                          "skillsLoaded", "usage")}, ensure_ascii=False))
-    for f in out["fields"]:
-        print(f"  {'✓' if f['status'] == 'found' else '·'} {f['name']} = {str(f['renderedValue'])[:70]!r}"
-              f"{'  [校验退回过]' if f['retried'] else ''}")
-    print("----- 报告 -----")
-    print(out["report"])
-    shutil.rmtree(tmp, ignore_errors=True)
+    c = None
+    try:
+        if base.data_dir.exists():
+            shutil.copytree(base.data_dir, tmp / "data", symlinks=True)  # 保留 releases/current 软链接
+        settings = base.model_copy(update={"data_dir": tmp / "data", "gateway_mode": "mock"})
+        c = build_container(settings)
+        out = await c.runner.run(RunRequest(tid, case["inputs"], case["documentText"], entry="试运行"))
+        print(json.dumps({k: out[k] for k in ("status", "error", "foundCount", "totalCount", "durationMs", "rounds",
+                                              "skillsLoaded", "usage")}, ensure_ascii=False))
+        for f in out["fields"]:
+            print(f"  {'✓' if f['status'] == 'found' else '·'} {f['name']} = {str(f['renderedValue'])[:70]!r}"
+                  f"{'  [校验退回过]' if f['retried'] else ''}")
+        print("----- 报告 -----")
+        print(out["report"])
+    finally:
+        if c is not None:
+            await c.gateway.aclose()
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

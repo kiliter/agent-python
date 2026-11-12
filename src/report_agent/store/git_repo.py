@@ -50,10 +50,15 @@ class GitRepo:
              check: bool = True) -> subprocess.CompletedProcess[bytes]:
         """执行 git 命令并返回结果。"""
         full_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C.UTF-8", **(env or {})}
-        proc = subprocess.run(
-            ["git", "-c", "core.quotepath=false", "-c", "core.autocrlf=false", *args],
-            cwd=self.path, input=input_bytes, capture_output=True, env=full_env, timeout=60,
-        )
+        try:
+            proc = subprocess.run(
+                ["git", "-c", "core.quotepath=false", "-c", "core.autocrlf=false", *args],
+                cwd=self.path, input=input_bytes, capture_output=True, env=full_env, timeout=60,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise GitError(f"git {' '.join(args)} 执行超时") from exc
+        except OSError as exc:
+            raise GitError(f"git {' '.join(args)} 无法启动: {exc}") from exc
         if check and proc.returncode != 0:
             raise GitError(f"git {' '.join(args)} 失败: {proc.stderr.decode('utf-8', 'replace').strip()}")
         return proc
@@ -128,6 +133,8 @@ class GitRepo:
             self._run("reset", "--hard", commit, check=False)
             self._run("clean", "-fd", check=False)
             return
+        self._run("update-ref", "-d", "refs/heads/main", check=False)
+        self._run("symbolic-ref", "HEAD", "refs/heads/main", check=False)
         self._run("rm", "-rf", "--cached", "--ignore-unmatch", ".", check=False)
         if self.path.exists():
             for child in self.path.iterdir():

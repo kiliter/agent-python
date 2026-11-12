@@ -39,10 +39,20 @@ def main(argv: list[str] | None = None) -> int:
                     log_level=settings.log_level.lower())
         return 0
     if args.cmd == "init":
+        import asyncio
+
         from .container import build_container
 
         c = build_container(settings, model=object())
-        print(f"数据目录：{c.layout.root}，线上版本：{c.releases.live_rev()}")
+        try:
+            print(f"数据目录：{c.layout.root}，线上版本：{c.releases.live_rev()}")
+        finally:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                asyncio.run(c.gateway.aclose())
+            else:
+                loop.create_task(c.gateway.aclose())
         return 0
     if args.cmd == "user" and args.action == "add":
         from .api.auth import UserStore

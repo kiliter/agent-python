@@ -26,7 +26,7 @@ from ..domain.template import (BODY_FILE, OFFLINE_FILE, TEMPLATE_FILE, Template,
                                parse_template_yaml)
 from .drafts import DraftConflict, DraftStore
 from .fsutil import now_iso
-from .layout import REV_RE, SYSTEM_PROMPT_KEY, DataLayout, InvalidResource, ResourceRef
+from .layout import REV_RE, SYSTEM_PROMPT_KEY, DataLayout, InvalidResource, ResourceRef, ensure_within
 from .publisher import Change, NothingToPublish, Publisher, PublishResult
 from .releases import ReleaseStore
 
@@ -106,18 +106,20 @@ class ResourceService:
         try:
             with os.scandir(root) as kind_it:
                 for kind_entry in kind_it:
-                    if kind_entry.name.startswith(".") or not kind_entry.is_dir():
+                    if kind_entry.name.startswith(".") or not kind_entry.is_dir(follow_symlinks=False):
                         continue
                     try:
                         with os.scandir(kind_entry.path) as key_it:
                             for key_entry in key_it:
-                                if key_entry.name.startswith(".") or not key_entry.is_dir():
+                                if key_entry.name.startswith(".") or not key_entry.is_dir(follow_symlinks=False):
                                     continue
                                 try:
                                     with os.scandir(key_entry.path) as file_it:
                                         for f_entry in file_it:
                                             try:
-                                                st = f_entry.stat()
+                                                if not f_entry.is_file(follow_symlinks=False):
+                                                    continue
+                                                st = f_entry.stat(follow_symlinks=False)
                                                 entries.append((
                                                     kind_entry.name,
                                                     key_entry.name,
@@ -319,10 +321,10 @@ class ResourceService:
 
     def _files_from_tree(self, ref: ResourceRef, tree) -> dict[str, str]:
         """从一棵发布树中取出资源文件内容（用于写入草稿）。"""
-        path = tree / ref.tree_path()
+        path = ensure_within(tree, tree / ref.tree_path())
         if ref.is_dir():
             return {p.name: p.read_text(encoding="utf-8") for p in path.iterdir()
-                    if p.is_file() and p.name not in (OFFLINE_FILE, ".meta.json")}
+                    if p.is_file() and not p.is_symlink() and p.name not in (OFFLINE_FILE, ".meta.json")}
         return {self.drafts.single_file_name(ref): path.read_text(encoding="utf-8")}
 
     @staticmethod
@@ -341,7 +343,8 @@ class ResourceService:
         live_rev, live = self.live()
         fp = self._drafts_fingerprint()
         with self._overlay_lock:
-            cache_key = (live_rev, self._draft_mutation_seq, fp)
+            seq = self._draft_mutation_seq
+            cache_key = (live_rev, seq, fp)
             if self._overlay_cache is not None and self._overlay_cache[0] == cache_key:
                 return self._clone_resource_set(self._overlay_cache[1])
 
@@ -372,13 +375,13 @@ class ResourceService:
         if sp is not None:
             rs.system_prompt = sp
 
-        with self._overlay_lock:
-            if (live_rev, self._draft_mutation_seq, fp) == (
-                self.releases.live_rev(),
-                self._draft_mutation_seq,
-                self._drafts_fingerprint(),
-            ):
-                self._overlay_cache = ((live_rev, self._draft_mutation_seq, fp), rs)
+        # 在锁外做复核 IO，避免持 _overlay_lock 期间阻塞并发读取线程
+        cur_live = self.releases.live_rev()
+        cur_fp = self._drafts_fingerprint() if cur_live == live_rev and self._draft_mutation_seq == seq else None
+        if cur_fp == fp:
+            with self._overlay_lock:
+                if self._draft_mutation_seq == seq:
+                    self._overlay_cache = (cache_key, rs)
         return self._clone_resource_set(rs)
 
     # ================================================================ 模板

@@ -58,7 +58,7 @@ class DraftStore:
             return []
         out: list[str] = []
         for p in base.iterdir():
-            if p.name.startswith(".") or not p.is_dir() or not is_valid_resource_key(kind, p.name):
+            if p.name.startswith(".") or p.is_symlink() or not p.is_dir() or not is_valid_resource_key(kind, p.name):
                 continue
             if isinstance(read_json(p / META_FILE), dict):
                 out.append(p.name)
@@ -132,6 +132,9 @@ class DraftStore:
         """删除草稿。"""
         with self.lock:
             d = self._dir(ref)
+            if d.is_symlink() or d.is_file():
+                d.unlink(missing_ok=True)
+                return True
             if not d.exists():
                 return False
             shutil.rmtree(d)
@@ -142,9 +145,13 @@ class DraftStore:
         src = self._dir(ref)
         dst = ensure_within(tree_root, tree_root / ref.tree_path())
         if ref.is_dir():
-            if dst.exists():
+            if dst.is_symlink() or dst.is_file():
+                dst.unlink(missing_ok=True)
+            elif dst.exists():
                 shutil.rmtree(dst)
             shutil.copytree(src, dst, ignore=shutil.ignore_patterns(META_FILE))
         else:
+            if dst.is_dir() and not dst.is_symlink():
+                shutil.rmtree(dst)
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src / self.single_file_name(ref), dst)
