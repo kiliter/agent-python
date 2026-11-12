@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from bisect import bisect_right
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 import math
@@ -23,7 +24,7 @@ from .workspace import Workspace
 VALUE_TOOLS = {"format_date"}
 _MAX_SHOW = 300
 _ZERO_WIDTH_SET = frozenset("\ufeff\u200b\u200c\u200d")
-_ZERO_WIDTH_RE = re.compile(r"[\ufeff\u200b\u200c\u200d]+")
+_ZW_TRANS = str.maketrans("", "", "\ufeff\u200b\u200c\u200d")
 _WS_COLLAPSE_RE = re.compile(r"\s+")
 _STRICT_NUM_RE = re.compile(r"^[+-]?(?:0|[1-9]\d*)(?:\.\d+)?$")
 
@@ -47,8 +48,7 @@ def _short(text: Any, n: int = _MAX_SHOW) -> str:
 
 
 def _normalize_line_endings(text: str) -> str:
-    cleaned = "".join(ch for ch in text if ch not in _ZERO_WIDTH_SET)
-    return cleaned.replace("\r\n", "\n").replace("\r", "\n")
+    return text.translate(_ZW_TRANS).replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _normalize_ws_with_map(text: str) -> tuple[str, list[tuple[int, int]]]:
@@ -73,11 +73,10 @@ def _normalize_ws_with_map(text: str) -> tuple[str, list[tuple[int, int]]]:
 
 
 def _collapse_ws(text: str) -> str:
-    """用预编译正则快速折叠空白字符（不分配 spans 偏移数组）。#Created By AiCoding(codex)"""
+    """用预编译转换表与正则快速折叠空白字符（不分配 spans 偏移数组）。#Created By AiCoding(codex)"""
     if not text:
         return ""
-    cleaned = _ZERO_WIDTH_RE.sub("", text) if _ZERO_WIDTH_RE.search(text) else text
-    return _WS_COLLAPSE_RE.sub(" ", cleaned).strip()
+    return _WS_COLLAPSE_RE.sub(" ", text.translate(_ZW_TRANS)).strip()
 
 
 def _as_decimal(val: Any) -> Decimal | None:
@@ -129,15 +128,23 @@ def _contains_with_ws(container: str, target: str) -> bool:
 
 
 class DocumentIndex:
-    """单据原文定位索引（惰性缓存行偏移与空白折叠映射，避免同一次运行重复扫描长单据）。#Created By AiCoding(codex)"""
+    """单据原文定位索引（惰性缓存行偏移、行列表、空白折叠映射与片段定位结果，避免同一次运行重复扫描长单据）。#Created By AiCoding(codex)"""
 
-    __slots__ = ("document", "_line_starts", "_norm_doc", "_doc_map")
+    __slots__ = ("document", "_line_starts", "_lines", "_norm_doc", "_doc_map", "_locate_cache")
 
     def __init__(self, document: str) -> None:
         self.document = document or ""
         self._line_starts: list[int] | None = None
+        self._lines: list[str] | None = None
         self._norm_doc: str | None = None
         self._doc_map: list[tuple[int, int]] | None = None
+        self._locate_cache: dict[tuple[str, str | None], list[dict[str, int]]] = {}
+
+    @property
+    def lines(self) -> list[str]:
+        if self._lines is None:
+            self._lines = self.document.splitlines()
+        return self._lines
 
     @property
     def line_starts(self) -> list[int]:
@@ -159,6 +166,12 @@ class DocumentIndex:
         document = self.document
         if not document or not quote or not quote.strip():
             return []
+        val_key = value if (value and value.strip()) else None
+        cache_key = (quote, val_key)
+        cached = self._locate_cache.get(cache_key)
+        if cached is not None:
+            return [dict(item) for item in cached]
+
         raw_spans: list[tuple[int, int]] = []
         pos = 0
         while (idx := document.find(quote, pos)) != -1:
@@ -177,12 +190,13 @@ class DocumentIndex:
                         raw_spans.append((orig_start, orig_end))
                     pos = idx + 1
 
-        if len(raw_spans) > 1 and value and value.strip():
-            narrowed = [sp for sp in raw_spans if _contains_with_ws(document[sp[0]:sp[1]], value)]
+        if len(raw_spans) > 1 and val_key is not None:
+            narrowed = [sp for sp in raw_spans if _contains_with_ws(document[sp[0]:sp[1]], val_key)]
             if narrowed:
                 raw_spans = narrowed
 
         if not raw_spans:
+            self._locate_cache[cache_key] = []
             return []
         line_starts = self.line_starts
         out: list[dict[str, int]] = []
@@ -193,7 +207,9 @@ class DocumentIndex:
             start_line = bisect_right(line_starts, start) if line_starts else 1
             end_line = bisect_right(line_starts, last) if line_starts else 1
             out.append({"offset": start, "endOffset": end, "line": max(1, start_line), "endLine": max(1, end_line)})
-        return out
+        if len(self._locate_cache) < 512:
+            self._locate_cache[cache_key] = out
+        return [dict(item) for item in out]
 
 
 def get_document_index(ws: Workspace | None, document: str) -> DocumentIndex:
@@ -224,14 +240,17 @@ def locate_quote_in_document(
     return doc_idx.locate(quote, value=value)
 
 
-def _find_reachable_cycle(start: str, graph: dict[str, list[str]]) -> list[str] | None:
-    """检测从 start 出发沿字段引用图是否能到达任意环（含 C -> A <-> B 指向环的节点）。#Created By AiCoding(codex)"""
-    done: set[str] = set()
+def _find_reachable_cycle(
+    start: str,
+    graph: dict[str, list[str]],
+    *,
+    safe_nodes: set[str] | None = None,
+) -> list[str] | None:
+    """检测从 start 出发沿字段引用图是否能到达任意环（含 C -> A <-> B 指向环的节点，safe_nodes 跨起点复用无环剪枝）。#Created By AiCoding(codex)"""
+    done = safe_nodes if safe_nodes is not None else set()
 
     def _dfs(node: str, path: list[str], on_path: set[str]) -> list[str] | None:
-        for nxt in graph.get(node, []):
-            if nxt == node and node != start:
-                return [*path, nxt]
+        for nxt in graph.get(node, ()):
             if nxt in on_path:
                 return [*path, nxt]
             if nxt in done:
@@ -242,13 +261,93 @@ def _find_reachable_cycle(start: str, graph: dict[str, list[str]]) -> list[str] 
         done.add(node)
         return None
 
-    for first in graph.get(start, []):
+    for first in graph.get(start, ()):
         if first == start:
+            continue
+        if first in done:
             continue
         hit = _dfs(first, [start, first], {start, first})
         if hit is not None:
             return hit
+    done.add(start)
     return None
+
+
+def has_supporting_real_source(
+    evidence: Iterable[Any],
+    valid_found_fields: set[str],
+    *,
+    self_field: str = "",
+    is_empty_list: bool = False,
+    ws: Workspace | None = None,
+    inputs: Mapping[str, Any] | None = None,
+    doc_index: DocumentIndex | None = None,
+) -> bool:
+    """判断证据列表中是否存在至少一条真实有效支撑源（api/document/非空 input/有效 found 的其它前置 field）。
+
+    #Created By AiCoding(codex)
+    统一供 EvidenceChecker 与 runner._cascade_degraded_fields 复用，排除自身引用（ref_name != self_field）。
+    """
+    for e in evidence:
+        if not isinstance(e, dict):
+            continue
+        t = e.get("type")
+        if t == "field":
+            ref_name = str(e.get("name") or "")
+            if ref_name and ref_name != self_field and ref_name in valid_found_fields:
+                return True
+        elif t == "api":
+            if ws is None:
+                return True
+            rid = str(e.get("resultId") or "")
+            res = ws.results.get(rid)
+            row = e.get("row")
+            if is_empty_list:
+                if (
+                    not isinstance(row, bool)
+                    and (row is None or (isinstance(row, int) and row == 0))
+                    and res is not None
+                    and res.ok
+                    and len(res.records) == 0
+                ):
+                    return True
+            else:
+                col = str(e.get("column") or "")
+                if (
+                    res is not None
+                    and res.ok
+                    and not isinstance(row, bool)
+                    and isinstance(row, int)
+                    and 0 <= row < len(res.records)
+                    and col in res.records[row]
+                ):
+                    return True
+        elif t == "document":
+            quote = scalar_to_str(e.get("quote"))
+            if quote.strip() and (doc_index is None or doc_index.locate(quote)):
+                return True
+        elif t == "input":
+            key = e.get("key")
+            if inputs is None:
+                if isinstance(key, str) and key:
+                    return True
+            elif (
+                isinstance(key, str)
+                and key in inputs
+                and inputs[key] is not None
+                and scalar_to_str(inputs[key]).strip() != ""
+            ):
+                return True
+        elif is_empty_list and t == "tool" and ws is not None:
+            call = ws.tool_calls.get(str(e.get("callId") or ""))
+            if call and call.ok and isinstance(call.output, dict):
+                cnt = call.output.get("count")
+                tot = call.output.get("total")
+                if call.tool == "call_api" and cnt == 0 and not isinstance(cnt, bool):
+                    return True
+                if call.tool == "query_result" and tot == 0 and not isinstance(tot, bool):
+                    return True
+    return False
 
 
 @dataclass
@@ -269,6 +368,7 @@ class EvidenceChecker:
         self.document = document or ""
         self.ws = workspace
         self._doc_index = get_document_index(workspace, self.document)
+        self._fields_by_name = {f.name: f for f in template.definition.fields}
 
     def _compute_supported_found_fields(self, report: dict[str, dict[str, Any]]) -> set[str]:
         """计算有效处于 found 状态且非悬空依赖 not_found 的字段集合（不动点收敛）。#Created By AiCoding(codex)"""
@@ -281,7 +381,7 @@ class EvidenceChecker:
         while changed:
             changed = False
             for fname in list(supported):
-                fdef = self.template.definition.field(fname)
+                fdef = self._fields_by_name.get(fname)
                 ans = report.get(fname)
                 if fdef is None or not isinstance(ans, dict):
                     supported.discard(fname)
@@ -292,18 +392,20 @@ class EvidenceChecker:
                     continue
                 ev_dicts = [e for e in raw_ev if isinstance(e, dict)]
                 field_refs = [
-                    str(e.get("name") or "")
+                    ref_name
                     for e in ev_dicts
                     if e.get("type") == "field"
-                    and str(e.get("name") or "") != fname
-                    and self.template.definition.field(str(e.get("name") or "")) is not None
+                    and (ref_name := str(e.get("name") or "")) != fname
+                    and ref_name in self._fields_by_name
                 ]
                 if not field_refs:
                     continue
                 if all(ref in supported for ref in field_refs):
                     continue
                 is_empty_list = fdef.is_list and isinstance(ans.get("value"), list) and len(ans["value"]) == 0
-                if not self._has_supporting_real_source(ev_dicts, supported, is_empty_list=is_empty_list):
+                if not self._has_supporting_real_source(
+                    ev_dicts, supported, self_field=fname, is_empty_list=is_empty_list
+                ):
                     supported.discard(fname)
                     changed = True
         return supported
@@ -313,51 +415,19 @@ class EvidenceChecker:
         evidence: list[dict[str, Any]],
         supported_fields: set[str],
         *,
+        self_field: str = "",
         is_empty_list: bool = False,
     ) -> bool:
-        """判断证据列表中是否存在至少一条真实有效支撑源（api/document/非空 input/有效 found 的前置 field）。#Created By AiCoding(codex)"""
-        for e in evidence:
-            t = e.get("type")
-            if t == "api":
-                if is_empty_list:
-                    raw_row = e.get("row")
-                    rid = str(e.get("resultId") or "")
-                    res = self.ws.results.get(rid)
-                    if (
-                        not isinstance(raw_row, bool)
-                        and (raw_row is None or (isinstance(raw_row, int) and raw_row == 0))
-                        and res is not None
-                        and res.ok
-                        and len(res.records) == 0
-                    ):
-                        return True
-                elif self._cell(e)[2] is None:
-                    return True
-            elif t == "document":
-                quote = scalar_to_str(e.get("quote"))
-                if quote.strip() and self._doc_index.locate(quote):
-                    return True
-            elif t == "input":
-                key = e.get("key")
-                if (
-                    isinstance(key, str)
-                    and key in self.inputs
-                    and self.inputs[key] is not None
-                    and scalar_to_str(self.inputs[key]).strip() != ""
-                ):
-                    return True
-            elif t == "field":
-                ref_name = str(e.get("name") or "")
-                if ref_name in supported_fields:
-                    return True
-            elif is_empty_list and t == "tool":
-                call = self.ws.tool_calls.get(str(e.get("callId") or ""))
-                if call and call.ok and isinstance(call.output, dict):
-                    if call.tool == "call_api" and call.output.get("count") == 0 and not isinstance(call.output.get("count"), bool):
-                        return True
-                    if call.tool == "query_result" and call.output.get("total") == 0 and not isinstance(call.output.get("total"), bool):
-                        return True
-        return False
+        """判断证据列表中是否存在至少一条真实有效支撑源。#Created By AiCoding(codex)"""
+        return has_supporting_real_source(
+            evidence,
+            supported_fields,
+            self_field=self_field,
+            is_empty_list=is_empty_list,
+            ws=self.ws,
+            inputs=self.inputs,
+            doc_index=self._doc_index,
+        )
 
     def check(self, report: dict[str, dict[str, Any]]) -> list[FieldIssue]:
         if not isinstance(report, dict):
@@ -389,8 +459,9 @@ class EvidenceChecker:
                 if refs:
                     found_field_refs[f.name] = refs
 
+        safe_nodes: set[str] = set()
         for start in found_field_refs:
-            cycle_path = _find_reachable_cycle(start, found_field_refs)
+            cycle_path = _find_reachable_cycle(start, found_field_refs, safe_nodes=safe_nodes)
             if cycle_path is not None:
                 issues.append(FieldIssue(start, f"字段证据引用存在循环依赖：{' -> '.join(cycle_path)}"))
         return issues
@@ -414,7 +485,9 @@ class EvidenceChecker:
         """
         msgs: list[str] = []
         has_query_proof = False
-        allow_nf_field = self._has_supporting_real_source(evidence, supported_fields, is_empty_list=True)
+        allow_nf_field = self._has_supporting_real_source(
+            evidence, supported_fields, self_field=f.name, is_empty_list=True
+        )
         for e in evidence:
             t = e.get("type")
             if t == "tool":
@@ -641,7 +714,9 @@ class EvidenceChecker:
                                 "没有逐字出现在引用的任何接口记录或单据片段中；请为该行补充出处证据")
             return msgs
 
-        allow_nf_field = self._has_supporting_real_source(evidence, supported_fields, is_empty_list=False)
+        allow_nf_field = self._has_supporting_real_source(
+            evidence, supported_fields, self_field=f.name, is_empty_list=False
+        )
         for e in evidence:
             msgs.extend(
                 self._check_ref_exists(
@@ -659,6 +734,8 @@ class EvidenceChecker:
         supported_fields: set[str],
     ) -> list[str]:
         raw_value = ans.get("value")
+        if isinstance(raw_value, (list, dict)):
+            return ["非列表字段的 value 必须是标量文本，不能是数组或对象"]
         value = scalar_to_str(raw_value)
         if raw_value is None or value.strip() == "":
             return ["status=found 但 value 为空；找不到请提交 not_found"]
@@ -697,7 +774,9 @@ class EvidenceChecker:
                 elif not _values_equivalent(raw_value, self.inputs[key]):
                     msgs.append(f"值「{_short(value)}」与入参「{key}」的值「{_short(self.inputs[key])}」不一致")
         else:
-            allow_nf_field = self._has_supporting_real_source(evidence, supported_fields, is_empty_list=False)
+            allow_nf_field = self._has_supporting_real_source(
+                evidence, supported_fields, self_field=f.name, is_empty_list=False
+            )
             value_tool_outputs: list[Any] = []
             for e in evidence:
                 msgs.extend(
@@ -795,7 +874,7 @@ class EvidenceChecker:
             target_name = str(e.get("name") or "")
             if target_name == f.name:
                 return [f"字段「{f.name}」不能引用自身作为证据"]
-            if not self.template.definition.field(target_name):
+            if target_name not in self._fields_by_name:
                 return [f"字段「{target_name}」不存在"]
             if supported_fields is not None and target_name not in supported_fields and not allow_not_found_field:
                 return [f"引用的前置字段「{target_name}」状态为 not_found，不能作为 found 结论的证据"]

@@ -111,6 +111,21 @@ class TrackedValue(str):
     def title(self) -> "TrackedValue":
         return self._wrap(super().title())
 
+    def removeprefix(self, prefix: str) -> "TrackedValue":  # type: ignore[override]
+        return self._wrap(super().removeprefix(prefix))
+
+    def removesuffix(self, suffix: str) -> "TrackedValue":  # type: ignore[override]
+        return self._wrap(super().removesuffix(suffix))
+
+    def split(self, sep: str | None = None, maxsplit: int = -1) -> list["TrackedValue"]:  # type: ignore[override]
+        return [self._wrap(p) for p in super().split(sep, maxsplit)]
+
+    def rsplit(self, sep: str | None = None, maxsplit: int = -1) -> list["TrackedValue"]:  # type: ignore[override]
+        return [self._wrap(p) for p in super().rsplit(sep, maxsplit)]
+
+    def splitlines(self, keepends: bool = False) -> list["TrackedValue"]:  # type: ignore[override]
+        return [self._wrap(p) for p in super().splitlines(keepends)]
+
     def __getitem__(self, key: Any) -> "TrackedValue":
         return self._wrap(super().__getitem__(key))
 
@@ -209,6 +224,10 @@ def _collect_tracked_sources(items: Iterable[Any]) -> tuple[list[str], bool]:
         elif isinstance(obj, (list, tuple)):
             for el in obj:
                 _visit(el)
+        elif isinstance(obj, Mapping):
+            for k, v in obj.items():
+                _visit(k)
+                _visit(v)
 
     for item in items:
         _visit(item)
@@ -250,20 +269,20 @@ class _TrackedTemplate(JinjaTemplate):
     """
 
     def render(self, *args: Any, **kwargs: Any) -> str:
-        if _ACTIVE_USED.get() is not None:
+        env_used = getattr(self.environment, "_used", None)
+        if env_used is None and _ACTIVE_USED.get() is not None:
             return super().render(*args, **kwargs)
-        used_set = getattr(self.environment, "_used", None)
-        token = _ACTIVE_USED.set(used_set)
+        token = _ACTIVE_USED.set(env_used)
         try:
             return super().render(*args, **kwargs)
         finally:
             _ACTIVE_USED.reset(token)
 
     async def render_async(self, *args: Any, **kwargs: Any) -> str:
-        if _ACTIVE_USED.get() is not None:
+        env_used = getattr(self.environment, "_used", None)
+        if env_used is None and _ACTIVE_USED.get() is not None:
             return await super().render_async(*args, **kwargs)
-        used_set = getattr(self.environment, "_used", None)
-        token = _ACTIVE_USED.set(used_set)
+        token = _ACTIVE_USED.set(env_used)
         try:
             return await super().render_async(*args, **kwargs)
         finally:
@@ -437,13 +456,19 @@ def parse_body(body: str) -> nodes.Template:
 
 def body_variables(body: str) -> set[str]:
     """正文中引用的全部变量（输出和条件判断都算）。"""
-    return set(meta.find_undeclared_variables(parse_body(body)))
+    try:
+        return set(meta.find_undeclared_variables(parse_body(body)))
+    except TemplateSyntaxError as exc:
+        raise BodySyntaxError(f"第 {exc.lineno} 行语法错误：{exc.message}", exc.lineno) from exc
 
 
 def printed_variables(body: str) -> set[str]:
     """正文中直接输出（{{ 变量 }}）或在循环内输出单元格的变量。#Created By AiCoding(codex)"""
     tree = parse_body(body)
-    undeclared = set(meta.find_undeclared_variables(tree))
+    try:
+        undeclared = set(meta.find_undeclared_variables(tree))
+    except TemplateSyntaxError as exc:
+        raise BodySyntaxError(f"第 {exc.lineno} 行语法错误：{exc.message}", exc.lineno) from exc
     names: set[str] = set()
     for output in tree.find_all(nodes.Output):
         for node in output.find_all(nodes.Name):
@@ -472,7 +497,7 @@ def render_body(body: str, context: dict[str, Any], *, strict_undefined: bool = 
     used: set[str] = set()
     token = _ACTIVE_USED.set(used)
     try:
-        text = template.render(**(context or {}))
+        text = template.render(context or {})
     except SecurityError as exc:
         raise SecurityError(f"模板安全沙箱拦截：{exc}") from exc
     finally:

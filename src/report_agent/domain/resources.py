@@ -19,14 +19,14 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from jinja2 import nodes
+from jinja2 import TemplateSyntaxError, meta, nodes
 from pydantic import ValidationError
 
 from .api_contract import ApiContract, parse_api_yaml
-from .jinja_env import BodySyntaxError, body_variables, parse_body
+from .jinja_env import BodySyntaxError, parse_body
 from .skill import SKILL_FILE, Skill, SkillParseError, parse_skill_markdown
 from .template import (BODY_FILE, OFFLINE_FILE, TEMPLATE_FILE, Template, TemplateDef, body_variable_lines,
-                       parse_template_yaml)
+                       parse_template_yaml, safe_regex_compile)
 
 log = logging.getLogger(__name__)
 
@@ -70,13 +70,15 @@ class ResourceSet:
 
     def allowed_apis(self, template: Template) -> list[str]:
         """模板可调用的接口：其 Skill 声明的接口并集（保持声明顺序）。"""
-        seen: list[str] = []
+        seen: set[str] = set()
+        out: list[str] = []
         for sid in template.definition.skills:
             skill = self.skills.get(sid)
-            for api in skill.meta.apis if skill else []:
+            for api in skill.meta.apis if skill else ():
                 if api in self.apis and api not in seen:
-                    seen.append(api)
-        return seen
+                    seen.add(api)
+                    out.append(api)
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +118,16 @@ def load_resource_dir(root: Path) -> ResourceSet:
         if not _within_root(tdir, root_resolved):
             rs.load_issues.append(Issue("error", "LOAD_FAILED", f"模板 {tdir.name} 路径越界", "template", tdir.name))
             continue
-        if not (tdir / TEMPLATE_FILE).exists():
+        tpl_file = tdir / TEMPLATE_FILE
+        if not tpl_file.exists() and not tpl_file.is_symlink():
+            continue
+        inner_files = [tpl_file]
+        for extra_name in (BODY_FILE, OFFLINE_FILE):
+            extra_path = tdir / extra_name
+            if extra_path.exists() or extra_path.is_symlink():
+                inner_files.append(extra_path)
+        if any(not _within_root(p, root_resolved) for p in inner_files):
+            rs.load_issues.append(Issue("error", "LOAD_FAILED", f"模板 {tdir.name} 内部文件路径越界", "template", tdir.name))
             continue
         try:
             tpl = load_template_dir(tdir)
@@ -130,10 +141,14 @@ def load_resource_dir(root: Path) -> ResourceSet:
         if not _within_root(sdir, root_resolved):
             rs.load_issues.append(Issue("error", "LOAD_FAILED", f"Skill {sdir.name} 路径越界", "skill", sdir.name))
             continue
-        if not (sdir / SKILL_FILE).exists():
+        skill_file = sdir / SKILL_FILE
+        if not skill_file.exists() and not skill_file.is_symlink():
+            continue
+        if not _within_root(skill_file, root_resolved):
+            rs.load_issues.append(Issue("error", "LOAD_FAILED", f"Skill {sdir.name} 内部文件路径越界", "skill", sdir.name))
             continue
         try:
-            skill = parse_skill_markdown((sdir / SKILL_FILE).read_text(encoding="utf-8"))
+            skill = parse_skill_markdown(skill_file.read_text(encoding="utf-8"))
             if skill.id != sdir.name:
                 raise ValueError(f"frontmatter name={skill.id} 与目录名 {sdir.name} 不一致")
             rs.skills[skill.id] = skill
@@ -157,8 +172,9 @@ def load_resource_dir(root: Path) -> ResourceSet:
 def read_offline_marker(path: Path) -> dict | None:
     """读取模板下线标记。"""
     try:
-        return json.loads((path / OFFLINE_FILE).read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
+        data = json.loads((path / OFFLINE_FILE).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
 
 
@@ -174,14 +190,19 @@ _RESERVED_FIELD_NAMES = {
 }
 
 
-def _ast_variable_lines(tree: nodes.Template | None) -> dict[str, list[int]]:
+def _ast_variable_lines(tree: nodes.Template | None) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
     if tree is None:
-        return {}
-    out: dict[str, list[int]] = {}
+        return {}, {}
+    all_lines: dict[str, list[int]] = {}
+    output_lines: dict[str, list[int]] = {}
     for node in tree.find_all(nodes.Name):
         if node.ctx == "load" and node.lineno:
-            out.setdefault(node.name, []).append(node.lineno)
-    return out
+            all_lines.setdefault(node.name, []).append(node.lineno)
+    for output in tree.find_all(nodes.Output):
+        for node in output.find_all(nodes.Name):
+            if node.ctx == "load" and node.lineno:
+                output_lines.setdefault(node.name, []).append(node.lineno)
+    return all_lines, output_lines
 
 
 def _bad_identifier(name: str) -> bool:
@@ -190,16 +211,23 @@ def _bad_identifier(name: str) -> bool:
             or bool(_BAD_NAME_RE.search(name)))
 
 
+def _for_target_binds(target: nodes.Node, var: str) -> bool:
+    """判断 for 循环绑定目标（含元组解构）是否遮蔽了变量名 var。#Created By AiCoding(codex)"""
+    if isinstance(target, nodes.Name):
+        return target.name == var
+    return any(n.name == var for n in target.find_all(nodes.Name))
+
+
 def _loop_attr_uses(items: Iterable[nodes.Node], var: str) -> list[tuple[str, int | None]]:
     """收集 items 及其子树中对循环变量 var 的属性/下标访问（var.列名、var["列名"]），返回 (列名, 行号)。
 
     #Created By AiCoding(codex)
-    遇到内层 for 重新绑定同名循环变量时，只检查其迭代表达式，不再进入内层循环体，避免误报。
+    遇到内层 for 重新绑定同名循环变量时，只检查其迭代表达式与 else 分支（else 分支未绑定内层变量），不再进入内层循环体，避免误报。
     """
     out: list[tuple[str, int | None]] = []
     for child in items:
-        if isinstance(child, nodes.For) and isinstance(child.target, nodes.Name) and child.target.name == var:
-            out.extend(_loop_attr_uses([child.iter], var))
+        if isinstance(child, nodes.For) and _for_target_binds(child.target, var):
+            out.extend(_loop_attr_uses([child.iter, *child.else_], var))
             continue
         if isinstance(child, (nodes.Getattr, nodes.Getitem)) and isinstance(child.node, nodes.Name) \
                 and child.node.name == var:
@@ -300,8 +328,8 @@ def validate_template(tpl: Template, rs: ResourceSet) -> list[Issue]:
         seen_inputs.add(inp.key)
         if inp.pattern:
             try:
-                re.compile(inp.pattern)
-            except re.error as exc:
+                safe_regex_compile(inp.pattern)
+            except ValueError as exc:
                 add("error", "INPUT_PATTERN", f"入参「{inp.key}」的格式正则不合法：{exc}")
 
     seen_fields: set[str] = set()
@@ -354,15 +382,21 @@ def validate_template(tpl: Template, rs: ResourceSet) -> list[Issue]:
     tree: nodes.Template | None = None
     try:
         tree = parse_body(tpl.body)
-        used = body_variables(tpl.body)
+        used = set(meta.find_undeclared_variables(tree))
     except BodySyntaxError as exc:
         add("error", "BODY_SYNTAX", str(exc), line=exc.lineno)
+        tree = None
+        used = set()
+    except TemplateSyntaxError as exc:
+        add("error", "BODY_SYNTAX", f"第 {exc.lineno} 行语法错误：{exc.message}", line=exc.lineno)
+        tree = None
         used = set()
     lines = body_variable_lines(tpl.body)
-    ast_lines = _ast_variable_lines(tree)
+    ast_lines, output_lines = _ast_variable_lines(tree)
     for name in sorted(used - seen_fields):
-        line = (lines.get(name) or ast_lines.get(name) or [None])[0]
-        where = f"第 {line} 行" if name in lines else (f"第 {line} 行条件判断中" if line else "条件判断中")
+        direct_lines = lines.get(name) or output_lines.get(name)
+        line = (direct_lines or ast_lines.get(name) or [None])[0]
+        where = f"第 {line} 行" if direct_lines else (f"第 {line} 行条件判断中" if line else "条件判断中")
         add("error", "BODY_UNDEFINED_FIELD", f"正文{where}使用了未定义的字段：{name}", field=name, line=line)
     for f in d.fields:
         if f.visible and f.name not in used:

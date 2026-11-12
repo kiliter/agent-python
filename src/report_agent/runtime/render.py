@@ -53,7 +53,16 @@ def field_render(f: FieldDef, ans: Any) -> FieldRender:
     if f.is_list:
         if ans.get("status") == "found" and isinstance(raw_val, list):
             rows = list_rows(f, raw_val)
-            ctx_rows = [{c.name: TrackedValue(scalar_to_str(row.get(c.name)), f.name) for c in f.columns} for row in rows]
+            ctx_rows = [
+                {
+                    c.name: TrackedValue(
+                        "" if isinstance(row.get(c.name), (list, dict)) else scalar_to_str(row.get(c.name)),
+                        f.name,
+                    )
+                    for c in f.columns
+                }
+                for row in rows
+            ]
             return FieldRender(
                 True,
                 rows,
@@ -61,8 +70,8 @@ def field_render(f: FieldDef, ans: Any) -> FieldRender:
                 TrackedList(ctx_rows, f.name, missing=False),
             )
         return FieldRender(False, None, "", TrackedList([], f.name, missing=True))
-    val_str = scalar_to_str(raw_val)
-    found = ans.get("status") == "found" and raw_val is not None and val_str.strip() != ""
+    val_str = "" if isinstance(raw_val, (list, dict)) else scalar_to_str(raw_val)
+    found = ans.get("status") == "found" and raw_val is not None and not isinstance(raw_val, (list, dict)) and val_str.strip() != ""
     rendered = val_str if found else missing_value(f)
     return FieldRender(found, val_str if found else None, rendered, TrackedValue(rendered, f.name, missing=not found))
 

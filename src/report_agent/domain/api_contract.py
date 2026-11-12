@@ -17,7 +17,9 @@ from typing import Any, Literal
 import yaml
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
+
+from .template import safe_regex_compile
 
 ConnectorType = Literal["unified-gateway-xml", "unified-gateway-json"]
 RecordsMode = Literal["auto", "object", "list", "scalar", "none"]
@@ -135,6 +137,7 @@ class ApiContract(_Base):
     input: dict[str, Any] = Field(default_factory=lambda: {"type": "object", "properties": {}})
     request: dict[str, Any] = Field(default_factory=dict)
     response: ResponseSpec = Field(default_factory=ResponseSpec)
+    _validator_cache: tuple[dict[str, Any], Draft202012Validator] | None = PrivateAttr(default=None)
 
     @field_validator("response", mode="before")
     @classmethod
@@ -166,20 +169,40 @@ class ApiContract(_Base):
         """是否为统一网关 JSON 协议连接器。"""
         return self.connector == "unified-gateway-json"
 
+    def _get_validator(self) -> Draft202012Validator:
+        """获取并按 input 字典引用缓存编译后的 JSON Schema 校验器，同时拦截高危 ReDoS 正则。#Created By AiCoding(codex)"""
+        if not isinstance(self.input, dict):
+            raise ValueError("input 必须是 JSON Schema 对象")
+        cached = self._validator_cache
+        if cached is not None and cached[0] is self.input:
+            return cached[1]
+        Draft202012Validator.check_schema(self.input)
+        for pat_path, pat in _collect_patterns(self.input):
+            try:
+                safe_regex_compile(pat)
+            except ValueError as exc:
+                raise ValueError(f"input.{pat_path} 的正则不合法：{exc}") from exc
+        validator = Draft202012Validator(self.input)
+        self._validator_cache = (self.input, validator)
+        return validator
+
     def schema_errors(self) -> list[str]:
         """检查 input 是否为合法的 JSON Schema，以及 request/headers 引用的参数与头部安全性。"""
         errors: list[str] = []
         if not self.processCode.strip():
             errors.append("processCode 不能为空")
-        try:
-            Draft202012Validator.check_schema(self.input)
-        except (SchemaError, re.error) as exc:
-            errors.append(f"input 不是合法的 JSON Schema：{exc.message if isinstance(exc, SchemaError) else exc}")
-        for pat_path, pat in _collect_patterns(self.input):
+        if not isinstance(self.input, dict):
+            errors.append("input 不是合法的 JSON Schema：顶层必须是对象")
+        else:
             try:
-                re.compile(pat)
-            except re.error as exc:
-                errors.append(f"input.{pat_path} 的正则不合法：{exc}")
+                Draft202012Validator.check_schema(self.input)
+            except (SchemaError, re.error) as exc:
+                errors.append(f"input 不是合法的 JSON Schema：{exc.message if isinstance(exc, SchemaError) else exc}")
+            for pat_path, pat in _collect_patterns(self.input):
+                try:
+                    safe_regex_compile(pat)
+                except ValueError as exc:
+                    errors.append(f"input.{pat_path} 的正则不合法：{exc}")
         if not self.is_json:
             for bad_tag in sorted(_collect_bad_xml_tags(self.request)):
                 errors.append(f"request 中包含非法的 XML 标签名：{bad_tag!r}")
@@ -187,7 +210,8 @@ class ApiContract(_Base):
             if _has_empty_json_keys(self.request):
                 errors.append("request 中包含空的 JSON 键名")
         errors.extend(_validate_headers_dict(self.headers))
-        declared = set((self.input.get("properties") or {}).keys()) if isinstance(self.input, dict) else set()
+        props_raw = self.input.get("properties") if isinstance(self.input, dict) else None
+        declared = set(props_raw.keys()) if isinstance(props_raw, dict) else set()
         # #Created By AiCoding(codex) 以 $ 开头的名称是内置占位符：不需要（也不允许）在 input 中声明
         for key in sorted(k for k in declared if str(k).startswith("$")):
             errors.append(f"input 参数名 {key!r} 以 $ 开头，$ 开头的名称保留给内置占位符")
@@ -205,10 +229,11 @@ class ApiContract(_Base):
         if not isinstance(args, dict):
             return ["参数必须是键值对象"]
         try:
-            validator = Draft202012Validator(self.input)
-            raw_errors = sorted(validator.iter_errors(args), key=lambda e: list(e.path))
-        except (SchemaError, re.error) as exc:
-            return [f"接口参数 Schema 不合法：{exc}"]
+            validator = self._get_validator()
+            raw_errors = sorted(validator.iter_errors(args), key=lambda e: [str(p) for p in e.path])
+        except (SchemaError, re.error, ValueError) as exc:
+            msg = exc.message if isinstance(exc, SchemaError) else str(exc)
+            return [f"接口参数 Schema 不合法：{msg}"]
         errors = []
         for err in raw_errors:
             where = ".".join(str(p) for p in err.path) or "参数"
@@ -217,17 +242,17 @@ class ApiContract(_Base):
 
     def build_request(self, args: dict[str, Any]) -> dict[str, Any]:
         """把 request 模板中的 ${参数} 替换为实际值（只替换字符串，不执行任何表达式）；${$now} 等内置占位符同时替换。"""
-        return _substitute(copy.deepcopy(self.request), _with_builtins(args))
+        return _substitute(self.request, _with_builtins(args))
 
     def build_preview_request(self, args: dict[str, Any] | None = None) -> dict[str, Any]:
         """把已提供的参数替换进 request，未提供的参数保留 ${参数名} 占位符供预览展示；内置占位符按当前时刻渲染。"""
-        return _substitute(copy.deepcopy(self.request), _with_builtins(args), keep_unresolved=True)
+        return _substitute(self.request, _with_builtins(args), keep_unresolved=True)
 
     def build_headers(self, args: dict[str, Any] | None = None) -> dict[str, str]:
         """渲染并校验自定义安全请求头（拦截 CRLF 注入与受保护请求头覆盖）。"""
         if not self.headers:
             return {}
-        rendered_raw = _substitute(copy.deepcopy(self.headers), _with_builtins(args))
+        rendered_raw = _substitute(self.headers, _with_builtins(args))
         rendered = {str(k).strip(): ("" if v is None else str(v)) for k, v in rendered_raw.items()}
         errs = _validate_headers_dict(rendered)
         if errs:
@@ -236,11 +261,14 @@ class ApiContract(_Base):
 
     def param_hint(self) -> str:
         """给模型看的一行参数说明。"""
-        props = self.input.get("properties") or {}
-        required = set(self.input.get("required") or [])
+        props_raw = self.input.get("properties") if isinstance(self.input, dict) else None
+        props = props_raw if isinstance(props_raw, dict) else {}
+        req_raw = self.input.get("required") if isinstance(self.input, dict) else None
+        required = set(req_raw) if isinstance(req_raw, list) else set()
         parts = []
         for key, spec in props.items():
-            desc = spec.get("description") or spec.get("pattern") or spec.get("type", "")
+            spec_dict = spec if isinstance(spec, dict) else {}
+            desc = spec_dict.get("description") or spec_dict.get("pattern") or spec_dict.get("type", "")
             parts.append(f"{key}{'（必填）' if key in required else ''}：{desc}")
         return "；".join(parts) or "无参数"
 
@@ -272,7 +300,9 @@ def _substitute(node: Any, args: dict[str, Any], *, keep_unresolved: bool = Fals
             val = args.get(key)
             if keep_unresolved and (key not in args or val is None or val == ""):
                 return node
-            return None if val is None else val
+            if val is None:
+                return None
+            return copy.deepcopy(val) if isinstance(val, (dict, list)) else val
 
         def _repl(m: re.Match[str]) -> str:
             key = m.group(1)
@@ -328,32 +358,38 @@ def _validate_headers_dict(headers: dict[str, str]) -> list[str]:
 
 
 def _collect_patterns(node: Any, prefix: str = "") -> list[tuple[str, str]]:
-    """收集 JSON Schema 中的全部 pattern 正则表达式。"""
+    """收集 JSON Schema 中的全部 pattern 正则表达式（显式栈迭代，防范超深嵌套栈溢出）。"""
     found: list[tuple[str, str]] = []
-    if isinstance(node, dict):
-        pat = node.get("pattern")
-        if isinstance(pat, str):
-            found.append((f"{prefix}pattern", pat))
-        for k, v in node.items():
-            found.extend(_collect_patterns(v, f"{prefix}{k}."))
-    elif isinstance(node, list):
-        for idx, v in enumerate(node):
-            found.extend(_collect_patterns(v, f"{prefix}[{idx}]."))
+    stack: list[tuple[Any, str]] = [(node, prefix)]
+    while stack:
+        cur, cur_prefix = stack.pop()
+        if isinstance(cur, dict):
+            pat = cur.get("pattern")
+            if isinstance(pat, str):
+                found.append((f"{cur_prefix}pattern", pat))
+            items = list(cur.items())
+            for k, v in reversed(items):
+                stack.append((v, f"{cur_prefix}{k}."))
+        elif isinstance(cur, list):
+            for idx in range(len(cur) - 1, -1, -1):
+                stack.append((cur[idx], f"{cur_prefix}[{idx}]."))
     return found
 
 
 def _collect_bad_xml_tags(node: Any) -> set[str]:
-    """收集 request 字典中非法的 XML 元素标签名。"""
+    """收集 request 字典中非法的 XML 元素标签名（显式栈迭代）。"""
     bad: set[str] = set()
-    if isinstance(node, dict):
-        for k, v in node.items():
-            tag = str(k)
-            if not _XML_TAG_RE.match(tag):
-                bad.add(tag)
-            bad |= _collect_bad_xml_tags(v)
-    elif isinstance(node, list):
-        for v in node:
-            bad |= _collect_bad_xml_tags(v)
+    stack: list[Any] = [node]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            for k, v in cur.items():
+                tag = str(k)
+                if not _XML_TAG_RE.match(tag):
+                    bad.add(tag)
+                stack.append(v)
+        elif isinstance(cur, list):
+            stack.extend(cur)
     return bad
 
 

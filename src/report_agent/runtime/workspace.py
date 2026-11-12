@@ -104,10 +104,20 @@ def queue_listener(queue: asyncio.Queue) -> Callable[[ProcessEvent], None]:
 
     def _listen(ev: ProcessEvent) -> None:
         item = ("event", ev.to_dict())
-        if loop is not None and loop.is_running():
-            loop.call_soon_threadsafe(_put, item)
-        else:
-            _put(item)
+        if loop is not None and not loop.is_closed() and loop.is_running():
+            try:
+                running = asyncio.get_running_loop()
+            except RuntimeError:
+                running = None
+            if running is loop:
+                _put(item)
+                return
+            try:
+                loop.call_soon_threadsafe(_put, item)
+                return
+            except RuntimeError:
+                pass
+        _put(item)
 
     return _listen
 

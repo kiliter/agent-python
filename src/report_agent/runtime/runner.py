@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Literal
 
-from pydantic import BaseModel, SecretStr, TypeAdapter, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from pydantic_ai import (Agent, ModelRetry, NativeOutput, PromptedOutput, RunContext, TextPart, ToolOutput,
                          UnexpectedModelBehavior, UsageLimitExceeded, UsageLimits)
 from pydantic_ai.exceptions import AgentRunError, ModelAPIError
@@ -38,6 +38,7 @@ from .evidence import (
     FieldIssue,
     format_issues,
     get_document_index,
+    has_supporting_real_source,
     locate_quote_in_document,
     scalar_to_str,
 )
@@ -53,6 +54,7 @@ log = logging.getLogger(__name__)
 
 Entry = Literal["上游调用", "试运行", "回归", "聊天窗口"]
 _JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL | re.IGNORECASE)
+_JSON_FENCE_SEARCH_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
 _BUNDLE_SEQ = itertools.count(1)
 _MAX_AGENT_CACHE = 128
 
@@ -105,7 +107,7 @@ def validate_inputs(template: Template, inputs: dict[str, str]) -> list[str]:
 
 
 def _extract_json_dict(text: str) -> dict[str, Any] | None:
-    """从模型文本输出中提取 JSON 对象（兼容 ```json 代码块包裹）。"""
+    """从模型文本输出中提取 JSON 对象（兼容整段或夹在文字后的 ```json 代码块包裹）。"""
     raw = (text or "").strip()
     if not raw:
         return None
@@ -113,10 +115,16 @@ def _extract_json_dict(text: str) -> dict[str, Any] | None:
     if m:
         raw = m.group(1).strip()
     candidates = [raw]
+    for fm in _JSON_FENCE_SEARCH_RE.finditer(raw):
+        fenced = fm.group(1).strip()
+        if fenced and fenced not in candidates:
+            candidates.append(fenced)
     start = raw.find("{")
     end = raw.rfind("}")
     if 0 <= start < end and (start > 0 or end < len(raw) - 1):
-        candidates.append(raw[start:end + 1])
+        sliced = raw[start:end + 1]
+        if sliced not in candidates:
+            candidates.append(sliced)
     for cand in candidates:
         try:
             obj = json.loads(cand)
@@ -153,78 +161,19 @@ def _extract_candidate_report(active_run: Any, field_names: set[str]) -> dict[st
     return None
 
 
-def _has_valid_non_degraded_support(
-    ans: dict[str, Any],
-    report: dict[str, dict[str, Any]],
-    failed: set[str],
-    deps: RunDeps | None = None,
-) -> bool:
-    """当衍生字段引用了模型自报 not_found 前置字段时，检查是否仍具备至少一条真实有效支撑源。#Created By AiCoding(codex)"""
-    raw_ev = ans.get("evidence")
-    if not isinstance(raw_ev, list):
-        return False
-    val = ans.get("value")
-    is_empty_list = isinstance(val, list) and len(val) == 0
-    doc_idx = get_document_index(deps.workspace, deps.document) if deps is not None else None
-    for e in raw_ev:
-        if not isinstance(e, dict):
-            continue
-        t = e.get("type")
-        if t == "field":
-            ref_name = str(e.get("name") or "")
-            ref_ans = report.get(ref_name)
-            if ref_name not in failed and isinstance(ref_ans, dict) and ref_ans.get("status") == "found":
-                return True
-        elif t == "api":
-            if deps is None:
-                return True
-            rid = str(e.get("resultId") or "")
-            res = deps.workspace.results.get(rid)
-            row = e.get("row")
-            if is_empty_list:
-                if (
-                    not isinstance(row, bool)
-                    and (row is None or (isinstance(row, int) and row == 0))
-                    and res is not None
-                    and res.ok
-                    and len(res.records) == 0
-                ):
-                    return True
-            else:
-                col = str(e.get("column") or "")
-                if (
-                    res is not None
-                    and res.ok
-                    and not isinstance(row, bool)
-                    and isinstance(row, int)
-                    and 0 <= row < len(res.records)
-                    and col in res.records[row]
-                ):
-                    return True
-        elif t == "document":
-            quote = scalar_to_str(e.get("quote"))
-            if quote.strip() and (doc_idx is None or doc_idx.locate(quote)):
-                return True
-        elif t == "input":
-            key = e.get("key")
-            if deps is None:
-                if isinstance(key, str) and key:
-                    return True
-            elif (
-                isinstance(key, str)
-                and key in deps.inputs
-                and deps.inputs[key] is not None
-                and scalar_to_str(deps.inputs[key]).strip() != ""
-            ):
-                return True
-        elif is_empty_list and t == "tool" and deps is not None:
-            call = deps.workspace.tool_calls.get(str(e.get("callId") or ""))
-            if call and call.ok and isinstance(call.output, dict):
-                if call.tool == "call_api" and call.output.get("count") == 0 and not isinstance(call.output.get("count"), bool):
-                    return True
-                if call.tool == "query_result" and call.output.get("total") == 0 and not isinstance(call.output.get("total"), bool):
-                    return True
-    return False
+def _degrade_failed_fields(report: dict[str, dict[str, Any]], ev_issues: list[FieldIssue]) -> set[str]:
+    """把证据校验未通过的字段重写为 not_found，返回被降级的字段名集合。#Created By AiCoding(codex)"""
+    grouped: dict[str, list[str]] = {}
+    for item in ev_issues:
+        grouped.setdefault(item.field, []).append(item.message)
+    for name, msgs in grouped.items():
+        report[name] = {
+            "status": "not_found",
+            "value": None,
+            "evidence": [],
+            "reasoning": "证据校验未通过：" + "；".join(msgs),
+        }
+    return set(grouped.keys())
 
 
 def _cascade_degraded_fields(
@@ -234,10 +183,18 @@ def _cascade_degraded_fields(
     deps: RunDeps | None = None,
 ) -> None:
     """将证据中引用了已降级字段或悬空依赖 not_found 前置字段的下游衍生字段递归级联降级，直到不动点。#Created By AiCoding(codex)"""
+    ws = deps.workspace if deps is not None else None
+    inputs = deps.inputs if deps is not None else None
+    doc_idx = get_document_index(deps.workspace, deps.document) if deps is not None else None
     while True:
+        valid_found = {
+            k
+            for k, v in report.items()
+            if k not in failed and isinstance(v, dict) and v.get("status") == "found"
+        }
         newly_failed: list[tuple[str, str]] = []
         for fname, ans in report.items():
-            if fname in failed or not isinstance(ans, dict) or ans.get("status") != "found":
+            if fname not in valid_found:
                 continue
             raw_ev = ans.get("evidence")
             if not isinstance(raw_ev, list):
@@ -252,17 +209,26 @@ def _cascade_degraded_fields(
                     if ref_name in failed:
                         if ref_name not in bad_failed_refs:
                             bad_failed_refs.append(ref_name)
-                    else:
-                        ref_ans = report.get(ref_name)
-                        if not isinstance(ref_ans, dict) or ref_ans.get("status") != "found":
-                            if ref_name not in not_found_refs:
-                                not_found_refs.append(ref_name)
+                    elif ref_name not in valid_found:
+                        if ref_name not in not_found_refs:
+                            not_found_refs.append(ref_name)
             if bad_failed_refs:
                 msg = f"引用的前置字段（{'、'.join(bad_failed_refs)}）校验未通过已降级，衍生结论同步降级"
                 newly_failed.append((fname, msg))
-            elif not_found_refs and not _has_valid_non_degraded_support(ans, report, failed, deps=deps):
-                msg = f"引用的前置字段（{'、'.join(not_found_refs)}）状态为 not_found，衍生结论同步降级"
-                newly_failed.append((fname, msg))
+            elif not_found_refs:
+                val = ans.get("value")
+                is_empty_list = isinstance(val, list) and len(val) == 0
+                if not has_supporting_real_source(
+                    raw_ev,
+                    valid_found,
+                    self_field=fname,
+                    is_empty_list=is_empty_list,
+                    ws=ws,
+                    inputs=inputs,
+                    doc_index=doc_idx,
+                ):
+                    msg = f"引用的前置字段（{'、'.join(not_found_refs)}）状态为 not_found，衍生结论同步降级"
+                    newly_failed.append((fname, msg))
         if not newly_failed:
             break
         for fname, msg in newly_failed:
@@ -294,15 +260,18 @@ def _salvage_partial_report(candidate: dict[str, Any], report_model: type[BaseMo
                                 "reasoning": f"{msg}，已自动降级"}
             continue
         raw_ans = candidate[f.name]
-        # #Created By AiCoding(codex) 列表字段的 value 是行数组，不能转成文本
-        if (not f.is_list and isinstance(raw_ans, dict) and raw_ans.get("value") is not None
-                and not isinstance(raw_ans.get("value"), str)):
-            raw_ans = {**raw_ans, "value": scalar_to_str(raw_ans.get("value"))}
+        # #Created By AiCoding(codex) 仅把非列表字段的基础标量（数值/布尔）转为文本，数组/对象交由模型结构校验拒绝
+        if not f.is_list and isinstance(raw_ans, dict) and isinstance(raw_ans.get("value"), (int, float, bool)):
+            raw_ans = {**raw_ans, "value": scalar_to_str(raw_ans["value"])}
         fi = by_alias.get(f.name)
         try:
             if fi is None:
                 raise ValueError("未知字段")
-            parsed = TypeAdapter(fi.annotation).validate_python(raw_ans)
+            ann = fi.annotation
+            if isinstance(ann, type) and issubclass(ann, BaseModel):
+                parsed: Any = ann.model_validate(raw_ans)
+            else:
+                parsed = TypeAdapter(ann).validate_python(raw_ans)
             salvaged[f.name] = parsed.model_dump(mode="json") if isinstance(parsed, BaseModel) else dict(parsed)
         except ValidationError as ve:
             msg = "字段结构不合法：" + "；".join(e.get("msg", "格式错误") for e in ve.errors()[:3])
@@ -319,13 +288,7 @@ def _salvage_partial_report(candidate: dict[str, Any], report_model: type[BaseMo
     ev_issues = checker.check(salvaged)
     if ev_issues:
         issues.extend(ev_issues)
-        ev_failed = {i.field for i in ev_issues}
-        failed |= ev_failed
-        for name in ev_failed:
-            salvaged[name] = {
-                "status": "not_found", "value": None, "evidence": [],
-                "reasoning": "证据校验未通过：" + "；".join(i.message for i in ev_issues if i.field == name),
-            }
+        failed |= _degrade_failed_fields(salvaged, ev_issues)
 
     _cascade_degraded_fields(salvaged, failed, issues, deps=deps)
 
@@ -372,17 +335,23 @@ class _DynamicLimiter:
     def _value(self) -> int:
         return max(0, self._limit - self._inflight)
 
+    def _prune_waiters(self) -> None:
+        while self._waiters and (self._waiters[0].done() or self._waiters[0].get_loop().is_closed()):
+            self._waiters.popleft()
+
     def _wake_waiters(self) -> None:
         while self._inflight < self._limit and self._waiters:
             fut = self._waiters.popleft()
-            if not fut.done():
-                self._inflight += 1
-                fut.set_result(None)
+            if fut.done() or fut.get_loop().is_closed():
+                continue
+            self._inflight += 1
+            fut.set_result(None)
 
     def set_limit(self, limit: int) -> None:
         self._limit = max(1, int(limit))
-        loop = self._loop
-        if loop is not None and loop.is_running():
+        self._prune_waiters()
+        loop = self._waiters[0].get_loop() if self._waiters else self._loop
+        if loop is not None and not loop.is_closed() and loop.is_running():
             try:
                 running = asyncio.get_running_loop()
             except RuntimeError:
@@ -390,13 +359,17 @@ class _DynamicLimiter:
             if running is loop:
                 self._wake_waiters()
             else:
-                loop.call_soon_threadsafe(self._wake_waiters)
+                try:
+                    loop.call_soon_threadsafe(self._wake_waiters)
+                except RuntimeError:
+                    self._wake_waiters()
         else:
             self._wake_waiters()
 
     async def __aenter__(self) -> _DynamicLimiter:
         loop = asyncio.get_running_loop()
         self._loop = loop
+        self._prune_waiters()
         if self._inflight < self._limit and not self._waiters:
             self._inflight += 1
             return self
@@ -476,15 +449,7 @@ class AgentRunner:
         """运行期原子热重载模型、参数、工具重试与动态并发限流器，立即对后续运行生效。"""
         cur = self._bundle
         next_model_settings = build_model_settings(settings)
-        if rebuild_model:
-            model_input = (
-                settings
-                if settings.llm_api_key.get_secret_value()
-                else settings.model_copy(update={"llm_api_key": SecretStr("EMPTY")})
-            )
-            next_model = build_model(model_input)
-        else:
-            next_model = cur.model
+        next_model = build_model(settings) if rebuild_model else cur.model
         next_tools = build_tools(settings.agent_tool_retries)
         self._bundle = _RuntimeBundle(
             settings=settings,
@@ -545,10 +510,7 @@ class AgentRunner:
                 return out
             if ctx.retry >= ctx.max_retries:
                 # 重试用完：不通过的字段及引用它们的下游衍生字段按“找不到”处理，其余字段照常使用
-                failed = {i.field for i in issues}
-                for name in failed:
-                    report[name] = {"status": "not_found", "value": None, "evidence": [],
-                                    "reasoning": "证据校验未通过：" + "；".join(i.message for i in issues if i.field == name)}
+                failed = _degrade_failed_fields(report, issues)
                 _cascade_degraded_fields(report, failed, issues, deps=deps)
                 issue_dicts = [i.to_dict() for i in issues]
                 deps.workspace.validation_rounds.append(issue_dicts)
@@ -621,7 +583,7 @@ class AgentRunner:
         messages: Any = None
         result = None
         active_run = None
-        cancelled = False
+        cancelled_exc: asyncio.CancelledError | None = None
         t0 = time.monotonic()
         try:
             async with rt_sem:
@@ -658,9 +620,9 @@ class AgentRunner:
             error = f"大模型调用失败：{exc}"
         except AgentRunError as exc:
             error = f"智能体运行失败：{exc}"
-        except asyncio.CancelledError:
-            # #Created By AiCoding(codex) 被调用方取消（聊天窗口「停止」）：照常写入运行记录后再向上抛出取消
-            cancelled = True
+        except asyncio.CancelledError as exc:
+            # #Created By AiCoding(codex) 被调用方取消（聊天窗口「停止」）：照常写入运行记录后再向上原样重抛取消异常
+            cancelled_exc = exc
             error = "运行已取消"
         except Exception as exc:  # noqa: BLE001 - 兜底，保证运行记录完整
             log.exception("智能体运行异常 runId=%s", run_id)
@@ -687,8 +649,8 @@ class AgentRunner:
         outcome = self._finish(run_id, started_at, rev, req, deps, report, error, usage, t0, model_name=model_name)
         detail = {**outcome, "messages": messages}
         self.runs.submit(self._summary(outcome), detail)
-        if cancelled:
-            raise asyncio.CancelledError
+        if cancelled_exc is not None:
+            raise cancelled_exc
         return outcome
 
     # ------------------------------------------------------------------ 结果整理
@@ -713,6 +675,8 @@ class AgentRunner:
             # #Created By AiCoding(codex) 渲染值统一由 render.field_render 计算（与 build_render_context 同一路径）：
             # 列表字段上下文为 TrackedList，生效分支执行 {% for %} 遍历即记为已展示（found: [] 为 SUCCESS，not_found 为 PARTIAL）。
             fr = field_render(f, ans)
+            if not fr.found:
+                ev_list = []
             context[f.name] = fr.context_value
             label, target = _evidence_label(ev_list, ws, deps.document, value=_value_hint(fr.value), report=report)
             fo = {
@@ -797,7 +761,6 @@ def _evidence_label(evidence: list[dict[str, Any]], ws: Workspace, document: str
     labels: list[str] = []
     target: dict[str, Any] | None = None
     doc_idx = get_document_index(ws, document)
-    doc_lines: list[str] | None = None
     for e in evidence:
         if not isinstance(e, dict):
             continue
@@ -830,10 +793,8 @@ def _evidence_label(evidence: list[dict[str, Any]], ws: Workspace, document: str
                     doc_target["matchCount"] = len(locs)
                     doc_target["matches"] = locs
             else:
-                if doc_lines is None:
-                    doc_lines = document.splitlines()
                 first = quote.splitlines()[0] if quote else ""
-                line = next((i + 1 for i, ln in enumerate(doc_lines) if first and first in ln), None)
+                line = next((i + 1 for i, ln in enumerate(doc_idx.lines) if first and first in ln), None)
                 line_desc = f"第 {line} 行" if line else ""
                 doc_target = {"tab": "doc", **({"line": line} if line else {})}
             short = quote if len(quote) <= 30 else quote[:30] + "…"
