@@ -92,6 +92,13 @@ async def test_gateway_concurrency_wiring_mock_fallback_and_closed_invoke(tmp_pa
         assert isinstance(live_gw, UnifiedGatewayXmlClient)
         assert live_gw.max_concurrency == 180
 
+        # 非网关配置变更（如修改 llmTemperature 或轮换 reportApiKeys）绝不能误销毁活动连接池
+        assert c.runtime_config is not None
+        c.runtime_config.update({"llmTemperature": 0.75, "reportApiKeys": "rotated-key-01"}, "admin")
+        c.apply_runtime_config()
+        assert c.gateway.current is live_gw
+        assert live_gw._client.is_closed is False
+
         # 修改 env_settings 的并发度后触发 apply_runtime_config，网关签名变化应重建实例
         assert c.env_settings is not None
         c.env_settings = c.env_settings.model_copy(update={"gateway_max_concurrency": 64})
@@ -173,7 +180,7 @@ async def test_runtime_config_recovery_when_current_missing_or_corrupted(tmp_pat
         revs[0]["config"]["llmModel"] = "mutated"
         assert c2.runtime_config.revisions()[0]["config"]["llmModel"] == "recovered-model-v2"
 
-        # 2) current.json 写入损坏的字段类型：bootstrap_or_load 应自动回退至 c2 快照而不崩溃
+        # 2) current.json 写入损坏类型或违反区间约束的配置（如 live 空 URL / 非法温度）：均回退至 c2 快照而不带病启动
         write_json(
             c2.runtime_config.current_path,
             {"activeRev": "c2", "n": "bad-int", "config": {"llmTemperature": "not-a-float"}},
@@ -182,6 +189,24 @@ async def test_runtime_config_recovery_when_current_missing_or_corrupted(tmp_pat
         snap = c2.runtime_config.bootstrap_or_load(env_settings)
         assert snap.rev == "c2"
         assert snap.config.llmModel == "recovered-model-v2"
+
+        bad_cfg_dict = snap.config.to_storage_dict()
+        bad_cfg_dict["gatewayUrl"] = ""  # gatewayMode=="live" 下 gatewayUrl 为空违反 validate()
+        write_json(
+            c2.runtime_config.current_path,
+            {"activeRev": "c2", "n": 2, "config": bad_cfg_dict},
+            mode=0o600,
+        )
+        snap_validated = c2.runtime_config.bootstrap_or_load(env_settings)
+        assert snap_validated.rev == "c2"
+        assert snap_validated.config.gatewayUrl == "https://gw-v2.example.com"
+
+        # index.jsonl 丢失时，current.json 正常分支自动补写自愈并保持 0600 权限
+        c2.runtime_config.index_path.unlink()
+        c2.runtime_config.bootstrap_or_load(env_settings)
+        assert c2.runtime_config.index_path.is_file()
+        assert stat.S_IMODE(c2.runtime_config.index_path.stat().st_mode) == 0o600
+        assert any(r["rev"] == "c2" for r in c2.runtime_config.revisions())
 
         # 3) 历史快照 c1.json 字段损坏时，rollback 抛 RuntimeConfigValidationError（400）而非未捕获 ValueError
         write_json(
@@ -219,15 +244,16 @@ def test_fsutil_permissions_and_symlink_escape_guards(container, tmp_path: Path)
     with pytest.raises(InvalidResource):
         ensure_within(base, escape_link / "keep.txt")
 
-    # DraftStore 忽略目录软链接，且 delete / remove_resource 安全摘除内部目录软链而不误删目标目录内容
-    internal_target = container.layout.drafts / ".internal_dir"
-    internal_target.mkdir(parents=True)
-    (internal_target / " marker.txt").write_text("stay", encoding="utf-8")
-
+    # DraftStore 忽略目录软链接，且 delete / remove_resource 安全摘除外部目录软链而不伤及目标目录内容
     skill_drafts_dir = container.layout.drafts / "skill"
     skill_drafts_dir.mkdir(parents=True, exist_ok=True)
+    evil_ref = ResourceRef("skill", "evil-skill")
     os.symlink(outside, skill_drafts_dir / "evil-skill")
     assert "evil-skill" not in container.drafts.list_keys("skill")
+    # 指向 base 外部的目录软链可通过 drafts.delete 安全摘除，且绝不伤及 outside
+    assert container.drafts.delete(evil_ref) is True
+    assert not (skill_drafts_dir / "evil-skill").is_symlink()
+    assert outside_secret.read_text(encoding="utf-8") == "sensitive"
 
     # 草稿目录内放入指向外部文件的软链时，read_file 拦截抛 InvalidResource
     ref = ResourceRef("skill", "accept-type")
@@ -239,16 +265,21 @@ def test_fsutil_permissions_and_symlink_escape_guards(container, tmp_path: Path)
         container.drafts.read_file(ref, "SKILL.md")
     container.drafts.delete(ref)
 
-    # remove_resource 遇到树内目录软链时只 unlink 软链，不调 shutil.rmtree 报错或删目标
+    # remove_resource 与 apply_to_tree 遇到指向外部 outside 的目录软链时只 unlink 软链，不抛错且不伤及 outside
     tree_root = tmp_path / "tree"
     (tree_root / "skills").mkdir(parents=True)
-    real_inside = tree_root / ".real_inside"
-    real_inside.mkdir()
-    (real_inside / "keep.md").write_text("ok", encoding="utf-8")
-    os.symlink(real_inside, tree_root / "skills" / "accept-type")
+    os.symlink(outside, tree_root / "skills" / "accept-type")
     remove_resource(tree_root, ref)
-    assert not (tree_root / "skills" / "accept-type").exists()
-    assert (real_inside / "keep.md").is_file()
+    assert not (tree_root / "skills" / "accept-type").is_symlink()
+    assert outside_secret.read_text(encoding="utf-8") == "sensitive"
+
+    container.drafts.write(ref, {"SKILL.md": "---\nname: accept-type\ntitle: t\ndescription: d\n---\nbody"}, "u", "r1")
+    os.symlink(outside, tree_root / "skills" / "accept-type")
+    container.drafts.apply_to_tree(ref, tree_root)
+    assert (tree_root / "skills" / "accept-type").is_dir()
+    assert not (tree_root / "skills" / "accept-type").is_symlink()
+    assert outside_secret.read_text(encoding="utf-8") == "sensitive"
+    container.drafts.delete(ref)
 
     # CaseStore 跳过软链接用例文件，overlay 指纹跳过软链
     container.cases.save(1001, CaseDef(id="C-10", name="正常用例"))

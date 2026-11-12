@@ -383,8 +383,6 @@ def _first_text(root: ET.Element, tags: list[str]) -> str | None:
                 if tag == top:
                     return txt
                 found_by_tag[tag] = txt
-                if len(found_by_tag) == len(wanted):
-                    break
     for tag in tags:
         if tag in found_by_tag:
             return found_by_tag[tag]
@@ -585,8 +583,6 @@ def _first_json_text(data: Any, keys: list[str]) -> str | None:
                         if k == top:
                             return s
                         found_by_key[k] = s
-            if len(found_by_key) == len(wanted):
-                break
             vals = list(cur.values())
             for v in reversed(vals):
                 if isinstance(v, (dict, list)):

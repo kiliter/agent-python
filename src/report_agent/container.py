@@ -80,7 +80,7 @@ class Container:
             prev_settings = self.settings
             effective = self.runtime_config.to_effective_settings(base)
             gw_changed = _gateway_signature(effective) != _gateway_signature(prev_settings)
-            if not self.external_gateway or gw_changed:
+            if gw_changed:
                 new_gw = build_gateway(effective, self.layout)
                 self.external_gateway = False
                 if isinstance(self.gateway, ReloadableGatewayClient):

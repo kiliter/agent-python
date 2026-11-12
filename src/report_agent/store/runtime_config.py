@@ -869,8 +869,9 @@ class RuntimeConfigStore:
                         rev = "c1"
                     n = int(cur.get("n") or rev[1:])
                     cfg = RuntimeConfig.from_storage_dict(cur["config"], fallback_settings=settings)
-                except (TypeError, ValueError) as exc:
-                    log.warning("current.json 字段损坏，尝试从历史快照恢复：%s", exc)
+                    cfg.validate()
+                except (TypeError, ValueError, RuntimeConfigValidationError) as exc:
+                    log.warning("current.json 字段损坏或不合法，尝试从历史快照恢复：%s", exc)
                 else:
                     ts = str(cur.get("time") or now_iso())
                     op = str(cur.get("operator") or "system")
@@ -897,10 +898,13 @@ class RuntimeConfigStore:
                             {"activeRev": rev, **meta_fields, "config": normalized_dict},
                             mode=0o600,
                         )
-                    # 确保对应的不可变版本快照也存在（兼容崩溃恢复）
+                    # 确保对应的不可变版本快照与索引行均存在（兼容崩溃恢复自愈）
                     rev_path = self._revision_path(rev)
                     if not rev_path.exists():
                         write_json(rev_path, {"rev": rev, **meta_fields, "config": normalized_dict}, mode=0o600)
+                    if not any(e["rev"] == rev for e in self._read_index_entries()):
+                        append_jsonl(self.index_path, {"rev": rev, **meta_fields}, mode=0o600)
+                        self._index_cache = None
                     _chmod_safe(self.current_path, 0o600)
                     if self.index_path.exists():
                         _chmod_safe(self.index_path, 0o600)
@@ -939,8 +943,9 @@ class RuntimeConfigStore:
                     continue
                 try:
                     cfg = RuntimeConfig.from_storage_dict(rev_doc["config"], fallback_settings=settings)
+                    cfg.validate()
                     n = int(entry["n"])
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, RuntimeConfigValidationError):
                     continue
                 rev = entry["rev"]
                 ts = str(rev_doc.get("time") or entry.get("time") or now_iso())

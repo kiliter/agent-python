@@ -9,10 +9,14 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import getpass
 import sys
+from typing import Any
 
 from .config import get_settings
+
+_BG_TASKS: set[asyncio.Task[Any]] = set()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -39,8 +43,6 @@ def main(argv: list[str] | None = None) -> int:
                     log_level=settings.log_level.lower())
         return 0
     if args.cmd == "init":
-        import asyncio
-
         from .container import build_container
 
         c = build_container(settings, model=object())
@@ -52,7 +54,9 @@ def main(argv: list[str] | None = None) -> int:
             except RuntimeError:
                 asyncio.run(c.gateway.aclose())
             else:
-                loop.create_task(c.gateway.aclose())
+                task = loop.create_task(c.gateway.aclose())
+                _BG_TASKS.add(task)
+                task.add_done_callback(_BG_TASKS.discard)
         return 0
     if args.cmd == "user" and args.action == "add":
         from .api.auth import UserStore

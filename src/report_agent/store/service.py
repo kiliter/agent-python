@@ -340,12 +340,17 @@ class ResourceService:
 
     def overlay(self) -> ResourceSet:
         """线上资源叠加全部草稿（试运行“用草稿”及工作台聚合读取使用），按 (live_rev, seq, 草稿指纹) 缓存。"""
-        live_rev, live = self.live()
-        fp = self._drafts_fingerprint()
         with self._overlay_lock:
             seq = self._draft_mutation_seq
-            cache_key = (live_rev, seq, fp)
-            if self._overlay_cache is not None and self._overlay_cache[0] == cache_key:
+        live_rev, live = self.live()
+        fp = self._drafts_fingerprint()
+        cache_key = (live_rev, seq, fp)
+        with self._overlay_lock:
+            if (
+                self._draft_mutation_seq == seq
+                and self._overlay_cache is not None
+                and self._overlay_cache[0] == cache_key
+            ):
                 return self._clone_resource_set(self._overlay_cache[1])
 
         rs = ResourceSet(system_prompt=live.system_prompt, templates=dict(live.templates),
@@ -375,12 +380,15 @@ class ResourceService:
         if sp is not None:
             rs.system_prompt = sp
 
-        # 在锁外做复核 IO，避免持 _overlay_lock 期间阻塞并发读取线程
-        cur_live = self.releases.live_rev()
-        cur_fp = self._drafts_fingerprint() if cur_live == live_rev and self._draft_mutation_seq == seq else None
+        # 在锁外做复核 IO，写入缓存前在锁内同时复核 seq 与 live_rev
+        cur_fp = (
+            self._drafts_fingerprint()
+            if self.releases.live_rev() == live_rev and self._draft_mutation_seq == seq
+            else None
+        )
         if cur_fp == fp:
             with self._overlay_lock:
-                if self._draft_mutation_seq == seq:
+                if self._draft_mutation_seq == seq and self.releases.live_rev() == live_rev:
                     self._overlay_cache = (cache_key, rs)
         return self._clone_resource_set(rs)
 

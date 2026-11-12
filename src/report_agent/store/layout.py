@@ -60,6 +60,24 @@ def ensure_within(base: Path, target: Path) -> Path:
     return target
 
 
+def ensure_entry_within(base: Path, target: Path) -> Path:
+    """确保条目自身（不跟随末端软链接）位于 base 目录内部，用于安全摘除或清理末端软链接/条目。"""
+    if "\x00" in str(base) or "\x00" in str(target):
+        raise InvalidResource("资源路径包含非法字符")
+    base_norm = Path(os.path.normpath(os.path.abspath(base)))
+    target_norm = Path(os.path.normpath(os.path.abspath(target)))
+    if target_norm == base_norm or not target_norm.is_relative_to(base_norm):
+        raise InvalidResource("非法的资源路径访问")
+    try:
+        base_res = base.resolve()
+        parent_res = target_norm.parent.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise InvalidResource("非法的资源路径访问") from exc
+    if parent_res != base_res and not parent_res.is_relative_to(base_res):
+        raise InvalidResource("非法的资源路径访问")
+    return target
+
+
 def is_valid_resource_key(kind: str, key: str) -> bool:
     """检查资源标识是否符合各类型的命名规范。"""
     if not isinstance(key, str) or not key or "\x00" in key:
@@ -158,7 +176,7 @@ def copy_resource(src_root: Path, dst_root: Path, ref: ResourceRef) -> None:
     """把一个资源从 src 树复制到 dst 树（先删除 dst 中的旧内容）。"""
     remove_resource(dst_root, ref)
     src = ensure_within(src_root, src_root / ref.tree_path())
-    dst = ensure_within(dst_root, dst_root / ref.tree_path())
+    dst = ensure_entry_within(dst_root, dst_root / ref.tree_path())
     if not src.exists():
         return
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -169,8 +187,8 @@ def copy_resource(src_root: Path, dst_root: Path, ref: ResourceRef) -> None:
 
 
 def remove_resource(root: Path, ref: ResourceRef) -> None:
-    """从树中删除一个资源（兼容目录软链接安全摘除）。"""
-    target = ensure_within(root, root / ref.tree_path())
+    """从树中删除一个资源（兼容指向外部或悬空的目录/文件软链接安全摘除）。"""
+    target = ensure_entry_within(root, root / ref.tree_path())
     if target.is_symlink() or target.is_file():
         target.unlink(missing_ok=True)
     elif target.is_dir():
