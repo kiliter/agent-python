@@ -77,8 +77,8 @@ def _build_row_model(f: FieldDef, model_name: str) -> type[BaseModel]:
 def build_report_model(template: Template) -> type[BaseModel]:
     """生成本模板的交卷模型。"""
     d = template.definition
-    input_keys = [i.key for i in d.inputs]
-    field_names = [f.name for f in d.fields]
+    input_keys = list(dict.fromkeys(i.key for i in d.inputs if i.key))
+    field_names = list(dict.fromkeys(f.name for f in d.fields if f.name))
     suffix = str(d.id)
 
     InputEvidence = None

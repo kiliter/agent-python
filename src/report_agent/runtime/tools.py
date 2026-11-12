@@ -18,7 +18,7 @@ import logging
 import time
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai import ModelRetry, RunContext, Tool, ToolDefinition
 
 from ..gateway.base import ApiCallResult
@@ -30,7 +30,6 @@ from .text_tools import (
     expand_period as _expand_period,
     extract_dates as _extract_dates,
     normalize_text as _normalize,
-    normalized_contains,
     regex_extract as _regex_extract,
     time_diff as _time_diff,
 )
@@ -182,6 +181,25 @@ def _format_api_success_payload(contract: Any, result: ApiResult, default_previe
     }
 
 
+def _record_cached_api_hit(
+    ctx: RunContext[RunDeps],
+    name: str,
+    clean_args: dict[str, Any],
+    contract: Any,
+    hit: ApiResult,
+) -> dict[str, Any]:
+    """记录并组装幂等缓存或在途复用命中的 call_api 返回值。#Created By AiCoding(codex)"""
+    payload = _format_api_success_payload(contract, hit, ctx.deps.settings.agent_preview_rows)
+    call_id = _record(
+        ctx,
+        "call_api",
+        {"name": name, "args": clean_args},
+        {"resultId": hit.result_id, "count": len(hit.records)},
+        summary={"resultId": hit.result_id, "ok": True, "count": len(hit.records), "costMs": 0},
+    )
+    return {"callId": call_id, **payload}
+
+
 # ============================================================================ call_api
 async def call_api(ctx: RunContext[RunDeps], name: str, args: dict[str, Any]) -> dict[str, Any]:
     """调用一个业务接口。完整结果保存在工作区，这里只返回条数和预览；细看请用 query_result。
@@ -206,27 +224,26 @@ async def call_api(ctx: RunContext[RunDeps], name: str, args: dict[str, Any]) ->
     ws = deps.workspace
     cache_key: tuple[str, str] | None = None
     if contract.idempotent:
-        cache_key = (name, json.dumps(clean_args, sort_keys=True, ensure_ascii=False))
-        cached = ws._idempotent_cache.get(cache_key)
-        if cached is not None:
-            payload = _format_api_success_payload(contract, cached, deps.settings.agent_preview_rows)
-            call_id = _record(
-                ctx, "call_api", {"name": name, "args": clean_args},
-                {"resultId": cached.result_id, "count": len(cached.records)},
-                summary={"resultId": cached.result_id, "ok": True, "count": len(cached.records), "costMs": 0},
-            )
-            return {"callId": call_id, **payload}
-        inflight = ws._idempotent_inflight.get(cache_key)
-        if inflight is not None:
-            shared = await asyncio.shield(inflight)
+        cache_key = (name, json.dumps(clean_args, sort_keys=True, ensure_ascii=False, default=str))
+        seen_inflight: set[int] = set()
+        while True:
+            cached = ws._idempotent_cache.get(cache_key)
+            if cached is not None:
+                return _record_cached_api_hit(ctx, name, clean_args, contract, cached)
+            inflight = ws._idempotent_inflight.get(cache_key)
+            if inflight is None or id(inflight) in seen_inflight:
+                break
+            seen_inflight.add(id(inflight))
+            try:
+                shared = await asyncio.shield(inflight)
+            except asyncio.CancelledError:
+                # 若当前任务自身已被取消则向上抛出；若是前序并发调用单独被取消，则由当前存活任务接手执行
+                cur_task = asyncio.current_task()
+                if cur_task is None or cur_task.cancelling() > 0:
+                    raise
+                continue
             if shared.ok:
-                payload = _format_api_success_payload(contract, shared, deps.settings.agent_preview_rows)
-                call_id = _record(
-                    ctx, "call_api", {"name": name, "args": clean_args},
-                    {"resultId": shared.result_id, "count": len(shared.records)},
-                    summary={"resultId": shared.result_id, "ok": True, "count": len(shared.records), "costMs": 0},
-                )
-                return {"callId": call_id, **payload}
+                return _record_cached_api_hit(ctx, name, clean_args, contract, shared)
 
     fut: asyncio.Future[ApiResult] | None = None
     if cache_key is not None and cache_key not in ws._idempotent_inflight:
@@ -251,9 +268,9 @@ async def call_api(ctx: RunContext[RunDeps], name: str, args: dict[str, Any]) ->
             ws._idempotent_cache[cache_key] = result
         if fut is not None and not fut.done():
             fut.set_result(result)
-    except BaseException as exc:
+    except BaseException:
         if fut is not None and not fut.done():
-            fut.set_exception(exc)
+            fut.cancel()
         raise
     finally:
         if fut is not None and cache_key is not None and ws._idempotent_inflight.get(cache_key) is fut:
@@ -297,6 +314,8 @@ async def _prepare_call_api(ctx: RunContext[RunDeps], tool_def: ToolDefinition) 
 class Condition(BaseModel):
     """筛选条件。#Created By AiCoding(codex)"""
 
+    model_config = ConfigDict(extra="forbid")
+
     column: str = Field(description="列名")
     op: Literal[
         "equals",
@@ -319,6 +338,8 @@ class Condition(BaseModel):
 
 
 class OrderBy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     column: str
     desc: bool = True
 
@@ -336,8 +357,8 @@ def _validate_condition_params(conditions: list[Condition]) -> str | None:
     return None
 
 
-def _match(cell: str, cond: Condition) -> bool:
-    """按单个 Condition 判断单元格文本是否命中。#Created By AiCoding(codex)"""
+def _match(cell: str, cond: Condition, *, norm_value: str | None = None) -> bool:
+    """按单个 Condition 判断单元格文本是否命中（支持预计算的归一化目标串减少重复开销）。#Created By AiCoding(codex)"""
     text = cell
     if cond.before and cond.before in text:
         text = text[: text.index(cond.before)]
@@ -355,9 +376,59 @@ def _match(cell: str, cond: Condition) -> bool:
         return cond.value in text
     if cond.op == "notContains":
         return cond.value not in text
-    if cond.op == "normalizedContains":
-        return normalized_contains(text, cond.value)
-    return not normalized_contains(text, cond.value)
+    t_norm = _normalize(cond.value) if norm_value is None else norm_value
+    hit = bool(t_norm) and t_norm in _normalize(text)
+    return hit if cond.op == "normalizedContains" else not hit
+
+
+def _validate_query_columns(
+    results_list: list[ApiResult],
+    where_list: list[Condition],
+    any_list: list[Condition],
+    order_by: OrderBy | None,
+    columns: list[str] | None,
+) -> str | None:
+    """统一校验单表与多表合并模式下的筛选列、排序列与投影列是否存在。#Created By AiCoding(codex)"""
+    all_cols: set[str] = set()
+    for r in results_list:
+        all_cols.update(r.columns.keys())
+        for rec in r.records:
+            all_cols.update(rec.keys())
+    if not all_cols:
+        return None
+    sorted_cols = sorted(all_cols)
+    for c in (*where_list, *any_list):
+        if c.column not in all_cols:
+            return f"列 {c.column} 不存在，可用列：{sorted_cols}"
+    if order_by and order_by.column not in all_cols:
+        return f"排序列 {order_by.column} 不存在，可用列：{sorted_cols}"
+    if columns:
+        bad_cols = [col for col in columns if col not in all_cols]
+        if bad_cols:
+            return f"投影列 {', '.join(bad_cols)} 不存在，可用列：{sorted_cols}"
+    return None
+
+
+def _filter_and_sort_records(
+    results_list: list[ApiResult],
+    where_list: list[Condition],
+    any_list: list[Condition],
+    order_by: OrderBy | None,
+) -> list[tuple[str, int, dict[str, Any]]]:
+    """对一个或多个成功接口结果执行 AND/OR 筛选与统一排序（预归一化条件常量）。#Created By AiCoding(codex)"""
+    where_pairs = [(c, _normalize(c.value) if c.op.startswith("normalized") else None) for c in where_list]
+    any_pairs = [(c, _normalize(c.value) if c.op.startswith("normalized") else None) for c in any_list]
+    matched: list[tuple[str, int, dict[str, Any]]] = []
+    for res in results_list:
+        for i, rec in enumerate(res.records):
+            if where_pairs and not all(_match(_cell_text(rec, c.column), c, norm_value=nv) for c, nv in where_pairs):
+                continue
+            if any_pairs and not any(_match(_cell_text(rec, c.column), c, norm_value=nv) for c, nv in any_pairs):
+                continue
+            matched.append((res.result_id, i, rec))
+    if order_by:
+        matched.sort(key=lambda x: _cell_text(x[2], order_by.column), reverse=order_by.desc)
+    return matched
 
 
 async def query_result(
@@ -388,9 +459,16 @@ async def query_result(
     deps = ctx.deps
     where_list = where or []
     any_list = anyOf or []
-    limit = max(1, min(int(limit if limit is not None else 20), 100))
     multi_mode = bool(resultIds)
     rids = list(dict.fromkeys(str(r).strip() for r in (resultIds or []))) if multi_mode else []
+
+    if isinstance(limit, bool):
+        msg = "limit 必须是正整数"
+        bad_args: dict[str, Any] = {"resultIds": rids} if multi_mode else {"resultId": resultId}
+        bad_args["limit"] = limit
+        fallback = {**({"resultIds": rids} if multi_mode else {"resultId": resultId}), "ok": False, "error": msg, "total": 0, "rows": []}
+        return _fail_or_retry(ctx, "query_result", bad_args, msg, fallback)
+    limit = max(1, min(int(limit if limit is not None else 20), 100))
 
     args: dict[str, Any] = {
         "where": [c.model_dump(exclude_none=True) for c in where_list],
@@ -408,29 +486,24 @@ async def query_result(
     if columns is not None:
         args["columns"] = list(columns)
 
+    def _err_payload(err_msg: str) -> dict[str, Any]:
+        key_part = {"resultIds": rids} if multi_mode else {"resultId": resultId}
+        return {**key_part, "ok": False, "error": err_msg, "total": 0, "rows": []}
+
     cond_err = _validate_condition_params([*where_list, *any_list])
     if cond_err:
-        fallback = (
-            {"resultIds": rids, "ok": False, "error": cond_err, "total": 0, "rows": []}
-            if multi_mode
-            else {"resultId": resultId, "ok": False, "error": cond_err, "total": 0, "rows": []}
-        )
-        return _fail_or_retry(ctx, "query_result", args, cond_err, fallback)
+        return _fail_or_retry(ctx, "query_result", args, cond_err, _err_payload(cond_err))
+
+    proj_cols = set(columns) if columns else None
 
     if multi_mode:
         if any(not rid for rid in rids):
             msg = "resultIds 中不能包含空字符串"
-            return _fail_or_retry(
-                ctx, "query_result", args, msg,
-                {"resultIds": rids, "ok": False, "error": msg, "total": 0, "rows": []},
-            )
+            return _fail_or_retry(ctx, "query_result", args, msg, _err_payload(msg))
         missing_rids = [rid for rid in rids if rid not in deps.workspace.results]
         if missing_rids:
             msg = f"resultId {', '.join(missing_rids)} 不存在，可用：{list(deps.workspace.results)}"
-            return _fail_or_retry(
-                ctx, "query_result", args, msg,
-                {"resultIds": rids, "ok": False, "error": msg, "total": 0, "rows": []},
-            )
+            return _fail_or_retry(ctx, "query_result", args, msg, _err_payload(msg))
         results_list = [deps.workspace.results[rid] for rid in rids]
         failed_res = [r for r in results_list if not r.ok]
         if failed_res:
@@ -441,48 +514,13 @@ async def query_result(
                 "resultIds": rids, "ok": False, "error": err, "total": 0, "rows": [],
                 "note": "存在调用失败的接口结果，没有可合并筛选的记录",
             }
-
-        all_cols: set[str] = set()
-        for r in results_list:
-            all_cols.update(r.columns.keys())
-            for rec in r.records:
-                all_cols.update(rec.keys())
-        if all_cols:
-            for c in [*where_list, *any_list]:
-                if c.column not in all_cols:
-                    msg = f"列 {c.column} 不存在，可用列：{sorted(all_cols)}"
-                    return _fail_or_retry(
-                        ctx, "query_result", args, msg,
-                        {"resultIds": rids, "ok": False, "error": msg, "total": 0, "rows": []},
-                    )
-            if orderBy and orderBy.column not in all_cols:
-                msg = f"排序列 {orderBy.column} 不存在，可用列：{sorted(all_cols)}"
-                return _fail_or_retry(
-                    ctx, "query_result", args, msg,
-                    {"resultIds": rids, "ok": False, "error": msg, "total": 0, "rows": []},
-                )
-            if columns:
-                bad_cols = [col for col in columns if col not in all_cols]
-                if bad_cols:
-                    msg = f"投影列 {', '.join(bad_cols)} 不存在，可用列：{sorted(all_cols)}"
-                    return _fail_or_retry(
-                        ctx, "query_result", args, msg,
-                        {"resultIds": rids, "ok": False, "error": msg, "total": 0, "rows": []},
-                    )
-
-        merged_rows: list[tuple[str, int, dict[str, Any]]] = []
-        for res in results_list:
-            for i, rec in enumerate(res.records):
-                if not all(_match(_cell_text(rec, c.column), c) for c in where_list):
-                    continue
-                if any_list and not any(_match(_cell_text(rec, c.column), c) for c in any_list):
-                    continue
-                merged_rows.append((res.result_id, i, rec))
-        if orderBy:
-            merged_rows.sort(key=lambda x: _cell_text(x[2], orderBy.column), reverse=orderBy.desc)
+        col_err = _validate_query_columns(results_list, where_list, any_list, orderBy, columns)
+        if col_err:
+            return _fail_or_retry(ctx, "query_result", args, col_err, _err_payload(col_err))
+        merged_rows = _filter_and_sort_records(results_list, where_list, any_list, orderBy)
         out_rows = [
             {
-                **({k: v for k, v in rec.items() if k in columns} if columns else rec),
+                **({k: v for k, v in rec.items() if k in proj_cols} if proj_cols else rec),
                 "resultId": rid,
                 "row": i,
             }
@@ -496,49 +534,25 @@ async def query_result(
 
     if not resultId:
         msg = f"resultId 不能为空（或传入非空 resultIds），可用：{list(deps.workspace.results)}"
-        return _fail_or_retry(
-            ctx, "query_result", args, msg,
-            {"resultId": resultId, "ok": False, "error": msg, "total": 0, "rows": []},
-        )
+        return _fail_or_retry(ctx, "query_result", args, msg, _err_payload(msg))
     res = deps.workspace.results.get(resultId)
     if res is None:
         msg = f"resultId {resultId} 不存在，可用：{list(deps.workspace.results)}"
-        return _fail_or_retry(ctx, "query_result", args, msg,
-                              {"resultId": resultId, "ok": False, "error": msg, "total": 0, "rows": []})
+        return _fail_or_retry(ctx, "query_result", args, msg, _err_payload(msg))
     if not res.ok:
         call_id = _record(ctx, "query_result", args, {"ok": False, "error": res.error, "total": 0, "rows": []}, ok=False)
         return {"callId": call_id, "resultId": resultId, "ok": False, "error": res.error, "total": 0, "rows": [],
                 "note": "该接口调用失败，没有可筛选的记录"}
-    all_cols = set(res.columns.keys())
-    for r in res.records:
-        all_cols.update(r.keys())
-    if all_cols:
-        for c in [*where_list, *any_list]:
-            if c.column not in all_cols:
-                msg = f"列 {c.column} 不存在，可用列：{sorted(all_cols)}"
-                return _fail_or_retry(ctx, "query_result", args, msg,
-                                      {"resultId": resultId, "ok": False, "error": msg, "total": 0, "rows": []})
-        if orderBy and orderBy.column not in all_cols:
-            msg = f"排序列 {orderBy.column} 不存在，可用列：{sorted(all_cols)}"
-            return _fail_or_retry(ctx, "query_result", args, msg,
-                                  {"resultId": resultId, "ok": False, "error": msg, "total": 0, "rows": []})
-        if columns:
-            bad_cols = [col for col in columns if col not in all_cols]
-            if bad_cols:
-                msg = f"投影列 {', '.join(bad_cols)} 不存在，可用列：{sorted(all_cols)}"
-                return _fail_or_retry(ctx, "query_result", args, msg,
-                                      {"resultId": resultId, "ok": False, "error": msg, "total": 0, "rows": []})
-    rows = [
-        (i, r) for i, r in enumerate(res.records)
-        if all(_match(_cell_text(r, c.column), c) for c in where_list)
-        and (not any_list or any(_match(_cell_text(r, c.column), c) for c in any_list))
+    col_err = _validate_query_columns([res], where_list, any_list, orderBy, columns)
+    if col_err:
+        return _fail_or_retry(ctx, "query_result", args, col_err, _err_payload(col_err))
+    matched_rows = _filter_and_sort_records([res], where_list, any_list, orderBy)
+    out_rows = [
+        {**({k: v for k, v in rec.items() if k in proj_cols} if proj_cols else rec), "row": i}
+        for _, i, rec in matched_rows[:limit]
     ]
-    if orderBy:
-        rows.sort(key=lambda x: _cell_text(x[1], orderBy.column), reverse=orderBy.desc)
-    out_rows = [{**({k: v for k, v in r.items() if k in columns} if columns else r), "row": i}
-                for i, r in rows[:limit]]
-    call_id = _record(ctx, "query_result", args, {"total": len(rows), "rows": [r["row"] for r in out_rows]})
-    return {"callId": call_id, "resultId": resultId, "total": len(rows), "rows": out_rows}
+    call_id = _record(ctx, "query_result", args, {"total": len(matched_rows), "rows": [r["row"] for r in out_rows]})
+    return {"callId": call_id, "resultId": resultId, "total": len(matched_rows), "rows": out_rows}
 
 
 # ============================================================================ 文本与日期
@@ -571,8 +585,8 @@ async def text_contains(ctx: RunContext[RunDeps], target: str, text: str | None 
     extra_s = extraChars or ""
     if normalize:
         effective_extra = extra_s + " \t\r\n\u3000"
-        contains = normalized_contains(source, target_s, effective_extra)
         norm_target = _normalize(target_s, effective_extra)
+        contains = bool(norm_target) and norm_target in _normalize(source, effective_extra)
     else:
         contains = bool(target_s) and target_s in (source or "")
         norm_target = target_s

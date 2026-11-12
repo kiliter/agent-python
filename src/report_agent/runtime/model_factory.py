@@ -19,7 +19,7 @@ def build_model(settings: Settings) -> OpenAIChatModel:
     """按配置创建模型。HTTP 层重试与超时交给 openai SDK。"""
     client = AsyncOpenAI(
         base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key.get_secret_value(),
+        api_key=settings.llm_api_key.get_secret_value() or "EMPTY",
         timeout=settings.llm_timeout_s,
         max_retries=settings.llm_http_retries,
     )

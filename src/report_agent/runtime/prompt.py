@@ -68,12 +68,13 @@ def build_task_instructions(deps: RunDeps) -> str:
     tpl = deps.template.definition
     rs = deps.resources
     declared_keys = {i.key for i in tpl.inputs}
+    raw_inputs = deps.inputs or {}
     input_items = [
-        f"- {i.key}：{deps.inputs.get(i.key, '（未传入）') or '（空）'}"
-        + (f"（{i.description}）" if i.description else "")
+        f"- {i.key}：{'（未传入）' if i.key not in raw_inputs else (str(raw_inputs[i.key]).strip() if raw_inputs[i.key] is not None else '') or '（空）'}"
+        + (f"（{i.description.strip()}）" if i.description.strip() else "")
         for i in tpl.inputs
     ]
-    for k, v in (deps.inputs or {}).items():
+    for k, v in raw_inputs.items():
         if k not in declared_keys and v is not None and str(v).strip():
             input_items.append(f"- {k}：{str(v).strip()}")
     input_lines = "\n".join(input_items) or "（无）"
@@ -86,8 +87,9 @@ def build_task_instructions(deps: RunDeps) -> str:
     ) or "（无）"
     fields = "\n\n".join(_field_line(f) for f in tpl.fields) or "（无）"
     document = deps.document.strip() or "（上游没有提供单据）"
+    tpl_desc = tpl.description.strip()
     return f"""## 本次任务
-- 模板：{tpl.name}{f"（{tpl.description.strip()}）" if tpl.description else ""}
+- 模板：{tpl.name}{f"（{tpl_desc}）" if tpl_desc else ""}
 - 入参：
 {input_lines}
 - 可用 Skill（只能加载这些）：

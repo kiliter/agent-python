@@ -7,11 +7,132 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 import re
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
+
+MAX_REGEX_LENGTH = 2000
+
+
+def _subpattern_can_match_empty(subpattern: Any) -> bool:
+    """判断正则语法树子表达式是否可能匹配空串（显式栈迭代，防范超深括号栈溢出）。#Created By AiCoding(codex)"""
+    memo: dict[int, bool] = {}
+    stack: list[tuple[Any, bool]] = [(subpattern, False)]
+    while stack:
+        cur, children_ready = stack.pop()
+        cid = id(cur)
+        if cid in memo:
+            continue
+        if not children_ready:
+            stack.append((cur, True))
+            for op, av in cur.data:
+                name = str(op)
+                if name in ("MAX_REPEAT", "MIN_REPEAT"):
+                    lo, _, body = av
+                    if lo > 0 and id(body) not in memo:
+                        stack.append((body, False))
+                elif name == "SUBPATTERN":
+                    _, _, _, body = av
+                    if id(body) not in memo:
+                        stack.append((body, False))
+                elif name == "BRANCH":
+                    _, branches = av
+                    for b in branches:
+                        if id(b) not in memo:
+                            stack.append((b, False))
+            continue
+
+        can_empty = True
+        for op, av in cur.data:
+            name = str(op)
+            if name in ("MAX_REPEAT", "MIN_REPEAT"):
+                lo, _, body = av
+                if lo == 0 or memo.get(id(body), False):
+                    continue
+                can_empty = False
+                break
+            if name == "SUBPATTERN":
+                _, _, _, body = av
+                if not memo.get(id(body), False):
+                    can_empty = False
+                    break
+            elif name == "BRANCH":
+                _, branches = av
+                if not any(memo.get(id(b), False) for b in branches):
+                    can_empty = False
+                    break
+            elif name in ("AT", "ASSERT", "ASSERT_NOT"):
+                continue
+            else:
+                can_empty = False
+                break
+        memo[cid] = can_empty
+    return memo.get(id(subpattern), False)
+
+
+def _has_nested_repeat(subpattern: Any) -> bool:
+    """使用标准库 re._parser 语法树检测重复量词内部嵌套重复量词的高危回溯模式。#Created By AiCoding(codex)"""
+    stack: list[tuple[Any, bool]] = [(subpattern, False)]
+    while stack:
+        cur, in_repeat = stack.pop()
+        for op, av in cur.data:
+            name = str(op)
+            if name in ("MAX_REPEAT", "MIN_REPEAT"):
+                lo, hi, body = av
+                is_variable_multi = hi > 1 and lo != hi
+                is_multi = hi > 1
+                if in_repeat and (is_variable_multi or (lo == 0 and hi == 1 and _subpattern_can_match_empty(body))):
+                    return True
+                if is_multi and _subpattern_can_match_empty(body):
+                    return True
+                stack.append((body, in_repeat or is_multi))
+            elif name == "SUBPATTERN":
+                _, _, _, body = av
+                stack.append((body, in_repeat))
+            elif name == "BRANCH":
+                _, branches = av
+                for b in branches:
+                    stack.append((b, in_repeat))
+            elif name in ("ASSERT", "ASSERT_NOT"):
+                _, body = av
+                stack.append((body, in_repeat))
+    return False
+
+
+@lru_cache(maxsize=512)
+def _compile_safe_regex_cached(pattern: str) -> re.Pattern[str]:
+    try:
+        parsed = re._parser.parse(pattern)  # type: ignore[attr-defined]
+    except RecursionError as exc:
+        raise ValueError("正则表达式括号嵌套层级过深") from exc
+    except re.error as exc:
+        raise ValueError(f"正则表达式不合法：{exc}") from exc
+    if _has_nested_repeat(parsed):
+        raise ValueError("正则表达式包含嵌套重复量词，存在回溯风险")
+    try:
+        return re.compile(pattern)
+    except RecursionError as exc:
+        raise ValueError("正则表达式括号嵌套层级过深") from exc
+    except re.error as exc:
+        raise ValueError(f"正则表达式不合法：{exc}") from exc
+
+
+def safe_regex_compile(pattern: str) -> re.Pattern[str]:
+    """安全编译正则表达式，非法语法、超长或高危嵌套量词模式统一抛出 ValueError。#Created By AiCoding(codex)"""
+    if not isinstance(pattern, str) or not pattern:
+        raise ValueError("正则表达式不能为空")
+    if len(pattern) > MAX_REGEX_LENGTH:
+        raise ValueError(f"正则表达式长度超过上限（{MAX_REGEX_LENGTH}）")
+    return _compile_safe_regex_cached(pattern)
+
+
+def safe_regex_fullmatch(pattern: str, value: str) -> bool:
+    """安全执行整串正则匹配；正则本身非法时抛出 ValueError。#Created By AiCoding(codex)"""
+    compiled = safe_regex_compile(pattern)
+    return compiled.fullmatch(value or "") is not None
 
 FieldType = Literal["string", "enum", "date", "list"]
 ColumnType = Literal["string", "enum"]

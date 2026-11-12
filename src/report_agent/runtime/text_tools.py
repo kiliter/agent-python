@@ -8,14 +8,20 @@ normalize_text 与 Java StringCharCleaner 规则一致：NFKC 归一化后删除
 from __future__ import annotations
 
 import calendar
-import re
-import unicodedata
 from datetime import date as _date, datetime, timedelta
+from functools import lru_cache
+import re
 from typing import Any
+import unicodedata
+
+from ..domain.template import (
+    MAX_REGEX_LENGTH as MAX_REGEX_LENGTH,
+    safe_regex_compile as safe_regex_compile,
+    safe_regex_fullmatch as safe_regex_fullmatch,
+)
 
 FIXED_CHARS_TO_REMOVE = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~！\"#$%&'（）*+，-。/：；<=>？@[\\]^_`{|}~"
 _ZERO_WIDTH_CHARS = "\ufeff\u200b\u200c\u200d"
-MAX_REGEX_LENGTH = 2000
 MAX_REGEX_TEXT_LENGTH = 200_000
 MAX_PERIOD_MONTHS = 36
 
@@ -30,6 +36,7 @@ _YM_CN_SCAN_RE = re.compile(r"(?<![A-Za-z0-9])(19\d{2}|20\d{2})\s*年\s*(\d{1,2}
 _YM_SEP_SCAN_RE = re.compile(r"(?<![A-Za-z0-9])(19\d{2}|20\d{2})([-/.])(\d{1,2})(?![-\d/.])")
 _YM_COMPACT_SCAN_RE = re.compile(r"(?<![A-Za-z0-9])(19\d{2}|20\d{2})(0[1-9]|1[0-2])(?![A-Za-z0-9])")
 _DATE_RULE4_MD_RE = re.compile(r"(?<!\d)(?<!年)(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]")
+_TRAILING_DIGIT_OR_YEAR_RE = re.compile(r"(?:\d|年)\s*$")
 _LEADING_YEAR_RE = re.compile(r"^(19\d{2}|20\d{2})(?!\d)")
 _INDEPENDENT_YEAR_RE = re.compile(r"(?<![A-Za-z0-9])(19\d{2}|20\d{2})(?!\d)")
 
@@ -55,81 +62,11 @@ _CN_TIMESTAMP_RE = re.compile(
 )
 
 
-def _subpattern_can_match_empty(subpattern: Any) -> bool:
-    """判断正则语法树子表达式是否可能匹配空串。#Created By AiCoding(codex)"""
-    for op, av in subpattern.data:
-        name = str(op)
-        if name in ("MAX_REPEAT", "MIN_REPEAT"):
-            lo, _, body = av
-            if lo == 0 or _subpattern_can_match_empty(body):
-                continue
-            return False
-        if name == "SUBPATTERN":
-            _, _, _, body = av
-            if not _subpattern_can_match_empty(body):
-                return False
-        elif name == "BRANCH":
-            _, branches = av
-            if not any(_subpattern_can_match_empty(b) for b in branches):
-                return False
-        elif name in ("AT", "ASSERT", "ASSERT_NOT"):
-            continue
-        else:
-            return False
-    return True
-
-
-def _has_nested_repeat(subpattern: Any, *, in_repeat: bool = False) -> bool:
-    """使用标准库 re._parser 语法树检测重复量词内部嵌套重复量词的高危回溯模式。#Created By AiCoding(codex)"""
-    for op, av in subpattern.data:
-        name = str(op)
-        if name in ("MAX_REPEAT", "MIN_REPEAT"):
-            lo, hi, body = av
-            is_variable_multi = hi > 1 and lo != hi
-            is_multi = hi > 1
-            if in_repeat and (is_variable_multi or (lo == 0 and hi == 1 and _subpattern_can_match_empty(body))):
-                return True
-            if is_multi and _subpattern_can_match_empty(body):
-                return True
-            if _has_nested_repeat(body, in_repeat=in_repeat or is_multi):
-                return True
-        elif name == "SUBPATTERN":
-            _, _, _, body = av
-            if _has_nested_repeat(body, in_repeat=in_repeat):
-                return True
-        elif name == "BRANCH":
-            _, branches = av
-            if any(_has_nested_repeat(b, in_repeat=in_repeat) for b in branches):
-                return True
-        elif name in ("ASSERT", "ASSERT_NOT"):
-            _, body = av
-            if _has_nested_repeat(body, in_repeat=in_repeat):
-                return True
-    return False
-
-
-def safe_regex_compile(pattern: str) -> re.Pattern[str]:
-    """安全编译正则表达式，非法语法、超长或高危嵌套量词模式统一抛出 ValueError。"""
-    if not isinstance(pattern, str) or not pattern:
-        raise ValueError("正则表达式不能为空")
-    if len(pattern) > MAX_REGEX_LENGTH:
-        raise ValueError(f"正则表达式长度超过上限（{MAX_REGEX_LENGTH}）")
-    try:
-        parsed = re._parser.parse(pattern)  # type: ignore[attr-defined]
-    except re.error as exc:
-        raise ValueError(f"正则表达式不合法：{exc}") from exc
-    if _has_nested_repeat(parsed):
-        raise ValueError("正则表达式包含嵌套重复量词，存在回溯风险")
-    try:
-        return re.compile(pattern)
-    except re.error as exc:
-        raise ValueError(f"正则表达式不合法：{exc}") from exc
-
-
-def safe_regex_fullmatch(pattern: str, value: str) -> bool:
-    """安全执行整串正则匹配；正则本身非法时抛出 ValueError。"""
-    compiled = safe_regex_compile(pattern)
-    return compiled.fullmatch(value or "") is not None
+@lru_cache(maxsize=64)
+def _build_remove_table(extra_chars: str) -> dict[int, None]:
+    """缓存 NFKC 归一化后的标点与附加字符删除转换表，避免逐行过滤时重复构造集合。#Created By AiCoding(codex)"""
+    chars = unicodedata.normalize("NFKC", FIXED_CHARS_TO_REMOVE + _ZERO_WIDTH_CHARS + extra_chars)
+    return str.maketrans("", "", chars)
 
 
 def normalize_text(text: str | None, extra_chars: str = "") -> str:
@@ -139,9 +76,7 @@ def normalize_text(text: str | None, extra_chars: str = "") -> str:
     raw = str(text)
     if not raw or not raw.strip():
         return ""
-    normalized = unicodedata.normalize("NFKC", raw)
-    remove = set(unicodedata.normalize("NFKC", FIXED_CHARS_TO_REMOVE + _ZERO_WIDTH_CHARS + (extra_chars or "")))
-    return "".join(ch for ch in normalized if ch not in remove)
+    return unicodedata.normalize("NFKC", raw).translate(_build_remove_table(extra_chars or ""))
 
 
 def normalized_contains(content: str | None, target: str | None, extra_chars: str = "") -> bool:
@@ -156,9 +91,8 @@ _TOKEN_REGEX = {"yyyy": r"(?P<y>\d{4})", "MM": r"(?P<mo>\d{2})", "M": r"(?P<mo>\
                 "mm": r"(?P<mi>\d{2})", "m": r"(?P<mi>\d{1,2})", "ss": r"(?P<s>\d{2})", "s": r"(?P<s>\d{1,2})"}
 
 
-def _pattern_regex(pattern: str) -> re.Pattern[str]:
-    if not isinstance(pattern, str) or not pattern.strip():
-        raise ValueError("日期格式不能为空")
+@lru_cache(maxsize=128)
+def _compile_date_pattern(pattern: str) -> re.Pattern[str]:
     out, pos, used = [], 0, set()
     for m in _TOKEN_RE.finditer(pattern):
         out.append(re.escape(pattern[pos:m.start()]))
@@ -175,9 +109,15 @@ def _pattern_regex(pattern: str) -> re.Pattern[str]:
     return re.compile("^" + "".join(out) + "$")
 
 
+def _pattern_regex(pattern: str) -> re.Pattern[str]:
+    if not isinstance(pattern, str) or not pattern.strip():
+        raise ValueError("日期格式不能为空")
+    return _compile_date_pattern(pattern)
+
+
 def parse_date(value: str, pattern: str) -> datetime:
     """按 Java 风格格式解析日期。"""
-    if value is None or not str(value).strip():
+    if value is None or isinstance(value, bool) or not str(value).strip():
         raise ValueError("待解析的日期值不能为空")
     raw = str(value).strip()
     m = _pattern_regex(pattern).match(raw)
@@ -209,14 +149,19 @@ def _extract_date_from_text(raw: str) -> _date | None:
         return _parse_calendar_date(raw)
     except ValueError:
         pass
+    best: tuple[int, int, _date] | None = None
     for regex, is_sep in ((_DATE_RULE1_CN_RE, False), (_DATE_RULE2_SEP_RE, True), (_DATE_COMPACT_OPT_TIME_SCAN_RE, False)):
-        m = regex.search(raw)
-        if m:
+        for m in regex.finditer(raw):
             y = int(m.group(1))
             mo = int(m.group(3)) if is_sep else int(m.group(2))
             d = int(m.group(4)) if is_sep else int(m.group(3))
-            return _date(y, mo, d)
-    return None
+            dt = _try_make_date(y, mo, d)
+            if dt is None:
+                continue
+            cand = (m.start(), m.end(), dt)
+            if best is None or cand[:2] < best[:2]:
+                best = cand
+    return best[2] if best is not None else None
 
 
 def _extract_year_month_from_text(raw: str) -> tuple[int, int] | None:
@@ -224,17 +169,24 @@ def _extract_year_month_from_text(raw: str) -> tuple[int, int] | None:
     ym = _try_parse_pure_year_month(raw)
     if ym is not None:
         return ym
-    dt = _extract_date_from_text(raw)
-    if dt is not None:
-        return dt.year, dt.month
+    candidates: list[tuple[int, int, int, int]] = []
+    for regex, is_sep in ((_DATE_RULE1_CN_RE, False), (_DATE_RULE2_SEP_RE, True), (_DATE_COMPACT_OPT_TIME_SCAN_RE, False)):
+        for m in regex.finditer(raw):
+            y = int(m.group(1))
+            mo = int(m.group(3)) if is_sep else int(m.group(2))
+            d = int(m.group(4)) if is_sep else int(m.group(3))
+            dt = _try_make_date(y, mo, d)
+            if dt is not None:
+                candidates.append((m.start(), m.end(), dt.year, dt.month))
     for regex, m_group in ((_YM_CN_SCAN_RE, 2), (_YM_SEP_SCAN_RE, 3), (_YM_COMPACT_SCAN_RE, 2)):
-        m = regex.search(raw)
-        if m:
+        for m in regex.finditer(raw):
             year, month = int(m.group(1)), int(m.group(m_group))
-            if not (1900 <= year <= 2099) or not (1 <= month <= 12):
-                raise ValueError(f"时间年月不合法：{raw}")
-            return year, month
-    return None
+            if 1900 <= year <= 2099 and 1 <= month <= 12:
+                candidates.append((m.start(), m.end(), year, month))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    return candidates[0][2], candidates[0][3]
 
 
 def date_range(time_value: str, unit: str) -> tuple[str, str]:
@@ -328,7 +280,7 @@ def extract_dates(
             start, end = m.span()
             if any(not (end <= cs or start >= ce) for cs, ce in covered_spans):
                 continue
-            if re.search(r"(?:\d|年)\s*$", source[:start]):
+            if _TRAILING_DIGIT_OR_YEAR_RE.search(source, 0, start):
                 continue
             dt = _try_make_date(year_fallback, int(m.group(1)), int(m.group(2)))
             if dt is not None:

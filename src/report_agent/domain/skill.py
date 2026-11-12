@@ -10,10 +10,10 @@ from __future__ import annotations
 import re
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 SKILL_FILE = "SKILL.md"
-_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+_FRONTMATTER_RE = re.compile(r"^---[ \t]*\n(?:(.*?)\n)?---[ \t]*(?:\n|$)", re.DOTALL)
 
 
 class SkillMeta(BaseModel):
@@ -49,25 +49,53 @@ class SkillParseError(ValueError):
 
 def parse_skill_markdown(markdown: str) -> Skill:
     """解析 SKILL.md 全文。"""
-    normalized = (markdown or "").lstrip("\ufeff").replace("\r\n", "\n")
+    normalized = (markdown or "").lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
     m = _FRONTMATTER_RE.match(normalized)
     if not m:
         raise SkillParseError("SKILL.md 必须以 --- 包裹的 YAML frontmatter 开头")
     try:
-        data = yaml.safe_load(m.group(1)) or {}
+        raw_front = m.group(1)
+        data = yaml.safe_load(raw_front) if raw_front is not None else {}
     except yaml.YAMLError as exc:
         raise SkillParseError(f"frontmatter 不是合法的 YAML：{exc}") from exc
-    if not isinstance(data, dict) or not str(data.get("name") or "").strip():
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise SkillParseError("frontmatter 顶层必须是键值对象")
+    raw_name = data.get("name")
+    if not isinstance(raw_name, str) or not raw_name.strip():
         raise SkillParseError("frontmatter 缺少 name")
-    apis = data.get("apis") or []
-    if isinstance(apis, str):
-        apis = [a.strip() for a in apis.split(",") if a.strip()]
-    elif isinstance(apis, list):
-        apis = [str(a).strip() for a in apis if a is not None and str(a).strip()]
+    clean_data: dict[str, object] = {**data, "name": raw_name.strip()}
+    for text_key in ("title", "description"):
+        val = clean_data.get(text_key)
+        if val is None:
+            clean_data[text_key] = ""
+        elif isinstance(val, bool) or not isinstance(val, (str, int, float)):
+            raise SkillParseError(f"frontmatter 中 {text_key} 必须是字符串")
+        else:
+            clean_data[text_key] = str(val)
+    apis_raw = clean_data.get("apis")
+    if apis_raw is None or apis_raw == "":
+        apis: list[str] = []
+    elif isinstance(apis_raw, str):
+        apis = list(dict.fromkeys(a.strip() for a in apis_raw.split(",") if a.strip()))
+    elif isinstance(apis_raw, list):
+        parsed_apis: list[str] = []
+        for a in apis_raw:
+            if a is None:
+                continue
+            if not isinstance(a, str):
+                raise SkillParseError("frontmatter 中 apis 列表元素必须是字符串")
+            if a.strip():
+                parsed_apis.append(a.strip())
+        apis = list(dict.fromkeys(parsed_apis))
     else:
         raise SkillParseError("frontmatter 中 apis 必须是列表或逗号分隔字符串")
-    data["apis"] = apis
-    meta = SkillMeta.model_validate(data)
+    clean_data["apis"] = apis
+    try:
+        meta = SkillMeta.model_validate(clean_data)
+    except ValidationError as exc:
+        raise SkillParseError(f"frontmatter 字段不合法：{exc}") from exc
     return Skill(meta=meta, body=normalized[m.end():].strip(), markdown=markdown)
 
 
