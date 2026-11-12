@@ -22,9 +22,9 @@ from pydantic_ai.exceptions import AgentRunError, ModelAPIError
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 
 from ..config import Settings
-from ..domain.jinja_env import TrackedValue, render_body
+from ..domain.jinja_env import render_body
 from ..domain.resources import ResourceSet
-from ..domain.template import FieldDef, Template
+from ..domain.template import Template
 from ..gateway.base import GatewayClient
 from ..store.releases import ReleaseStore
 from ..store.runs import RunStore, new_run_id
@@ -34,6 +34,7 @@ from .evidence import EvidenceChecker, FieldIssue, format_issues, locate_quote_i
 from .model_factory import build_model, build_model_settings
 from .output_model import build_report_model, report_to_dict
 from .prompt import USER_PROMPT, build_task_instructions
+from .render import field_render
 from .text_tools import safe_regex_fullmatch
 from .tools import build_tools
 from .workspace import EventSink, ProcessEvent, Workspace
@@ -194,7 +195,9 @@ def _salvage_partial_report(candidate: dict[str, Any], report_model: type[BaseMo
                                 "reasoning": f"{msg}，已自动降级"}
             continue
         raw_ans = candidate[f.name]
-        if isinstance(raw_ans, dict) and raw_ans.get("value") is not None and not isinstance(raw_ans.get("value"), str):
+        # #Created By AiCoding(codex) 列表字段的 value 是行数组，不能转成文本
+        if (not f.is_list and isinstance(raw_ans, dict) and raw_ans.get("value") is not None
+                and not isinstance(raw_ans.get("value"), str)):
             raw_ans = {**raw_ans, "value": scalar_to_str(raw_ans.get("value"))}
         fi = by_alias.get(f.name)
         try:
@@ -460,23 +463,24 @@ class AgentRunner:
             ans = raw_ans if isinstance(raw_ans, dict) else {
                 "status": "not_found", "value": None, "evidence": [], "reasoning": error or "没有结论",
             }
-            raw_val = ans.get("value")
-            val_str = scalar_to_str(raw_val)
-            found = ans.get("status") == "found" and raw_val is not None and val_str.strip() != ""
-            value = val_str if found else None
-            rendered = value if found else _missing_value(f)
-            context[f.name] = TrackedValue(rendered, f.name, missing=not found)
             raw_ev = ans.get("evidence")
             ev_list = [e for e in raw_ev if isinstance(e, dict)] if isinstance(raw_ev, list) else []
-            label, target = _evidence_label(ev_list, ws, deps.document, value=value, report=report)
-            fields_out.append({
+            # #Created By AiCoding(codex) 渲染值统一由 render.field_render 计算（与 build_render_context 同一路径）：
+            # 列表字段上下文为 TrackedList，生效分支执行 {% for %} 遍历即记为已展示（found: [] 为 SUCCESS，not_found 为 PARTIAL）。
+            fr = field_render(f, ans)
+            context[f.name] = fr.context_value
+            label, target = _evidence_label(ev_list, ws, deps.document, value=_value_hint(fr.value), report=report)
+            fo = {
                 "name": f.name, "visible": f.visible, "type": f.type, "evidenceType": f.evidence,
-                "whenMissing": f.whenMissing, "status": "found" if found else "not_found", "value": value,
-                "renderedValue": rendered, "evidence": ev_list,
+                "whenMissing": f.whenMissing, "status": "found" if fr.found else "not_found", "value": fr.value,
+                "renderedValue": fr.rendered, "evidence": ev_list,
                 "reasoning": str(ans.get("reasoning") or ""), "retried": f.name in retried,
                 "validationFailed": f.name in degraded_fields or missing_in_report,
                 "evidenceLabel": label, "evidenceTarget": target,
-            })
+            }
+            if f.is_list:
+                fo["columns"] = [c.model_dump() for c in f.columns]
+            fields_out.append(fo)
         report_text = ""
         used: set[str] = set()
         render_error = None
@@ -534,13 +538,11 @@ class AgentRunner:
         }
 
 
-def _missing_value(f: FieldDef) -> str:
-    """找不到时渲染的值。"""
-    if f.whenMissing == "empty":
-        return ""
-    if f.whenMissing == "value":
-        return f.defaultValue
-    return "{{" + f.name + "}}"
+def _value_hint(value: Any) -> str | None:
+    """证据定位时用于缩小匹配范围的文本值；列表/对象值不参与定位。#Created By AiCoding(codex)"""
+    if value is None or isinstance(value, (list, dict)):
+        return None
+    return scalar_to_str(value) or None
 
 
 def _evidence_label(evidence: list[dict[str, Any]], ws: Workspace, document: str,
@@ -557,9 +559,15 @@ def _evidence_label(evidence: list[dict[str, Any]], ws: Workspace, document: str
         if t == "api":
             res = ws.results.get(str(e.get("resultId") or ""))
             api = res.api if res else "?"
-            labels.append(f"接口 {api} · {e.get('resultId')} 第 {e.get('row')} 行 · {e.get('column')}")
+            col_name = e.get("column")
+            if res is not None and len(res.records) == 0:
+                labels.append(f"接口 {api} · {e.get('resultId')}（无返回记录）")
+            elif col_name:
+                labels.append(f"接口 {api} · {e.get('resultId')} 第 {e.get('row')} 行 · {col_name}")
+            else:
+                labels.append(f"接口 {api} · {e.get('resultId')} 第 {e.get('row')} 行")
             target = target or {"tab": "api", "resultId": e.get("resultId"), "row": e.get("row"),
-                                "column": e.get("column")}
+                                "column": col_name}
         elif t == "document":
             quote = scalar_to_str(e.get("quote"))
             locs = locate_quote_in_document(document, quote, value=value)
@@ -601,7 +609,7 @@ def _evidence_label(evidence: list[dict[str, Any]], ws: Workspace, document: str
                     if isinstance(ref_ans, dict) and isinstance(ref_ans.get("evidence"), list) and ref_ans["evidence"]:
                         _, sub_target = _evidence_label(
                             ref_ans["evidence"], ws, document,
-                            value=scalar_to_str(ref_ans.get("value")) or None, report=report, _seen=seen,
+                            value=_value_hint(ref_ans.get("value")), report=report, _seen=seen,
                         )
                         target = sub_target
     return (" + ".join(labels), target or {"tab": "doc"})

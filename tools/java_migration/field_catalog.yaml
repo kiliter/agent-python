@@ -1,0 +1,316 @@
+# #Created By AiCoding(codex)
+# Java 模板字段 → Python 字段定义的映射表（迁移生成器 generate.py 的输入，可人工审查）。
+#
+# 生成规则（generate.py）：
+#   - 每个模板的字段集合 = Java 正文中出现的全部变量（输出、条件判断、for 循环），一个不多一个不少；
+#   - visible 自动计算：正文直接输出的为 true，只在条件中出现的为 false；
+#   - description = 本表的 guide（迁移后的取值方法）+ “原规则（Java）：<rule 原文>”（该模板有 rule 时逐字附上）；
+#   - whenMissing 默认 placeholder：Java 中字段缺失或为空时一律渲染占位符，保持一致；
+#     只有 Java 链路保证一定有值的字段（Skill 默认值、系统策略、rule 明确的兜底值）才用 value；
+#   - skills = 字段 skill + Skill 依赖（Java SKILL.md dependencies）的并集。
+# 字段键说明：type / values / columns / evidence / quoteWhole / whenMissing / defaultValue / guide / skills
+# overrides：按 Java 模板编码（首行“服务争议点1:”后的名称）覆盖个别属性。
+
+fields:
+  受理日期:
+    evidence: derive
+    guide: >-
+      受理渠道（字段「受理渠道」）为“热线”或“掌上营业厅”时，必须取入参「业务月份」（yyyyMMdd），用 format_date 转为
+      “yyyy年M月d号”（如 20261005 → 2026年10月5号），value 直接使用工具输出并引用其 callId；业务月份缺失或不是合法的
+      8 位日期时提交 not_found。其他受理渠道只能从属于本次业务的单据（单据经清洗后包含入参「业务名称」）中摘取受理日期，
+      保持单据原样，单据不属于本次业务或没有受理日期时提交 not_found。任何情况下都不得使用短信发送时间、创建时间或其他日期代替。
+  受理方式:
+    evidence: derive
+    guide: >-
+      单据（属于本次业务的单据）中有受理网点/营业厅名称时，填该受理网点（引用单据原文）；没有受理网点时，填字段「受理渠道」的值
+      （引用 {"type":"field","name":"受理渠道"}）。
+  鉴权方式:
+    evidence: quote
+    guide: 从属于本次业务的单据中摘取客户身份鉴权方式（如“服务密码”“短信验证码”“身份证”），逐字引用。
+  商品名称:
+    evidence: input
+    guide: 等于入参「业务名称」。
+  业务名称:
+    evidence: input
+    guide: 等于入参「业务名称」。
+  订购短信:
+    evidence: quote
+    quoteWhole: true
+    skills: [business-sms]
+    guide: 按 Skill business-sms 查询，取命中本次业务名称的最新一条订购短信正文，整条原样引用，不得删改任何字符。
+  二次确认短信:
+    evidence: quote
+    quoteWhole: true
+    skills: [second-confirmation-sms]
+    guide: 按 Skill second-confirmation-sms 查询本次业务的二次确认短信正文，整条原样引用。
+  验证码短信:
+    evidence: quote
+    quoteWhole: true
+    skills: [verification-sms]
+    guide: 按 Skill verification-sms 查询本次业务的验证码短信正文，整条原样引用。
+  受理渠道:
+    type: enum
+    values: [热线, 掌上营业厅, 其他]
+    evidence: derive
+    whenMissing: value
+    defaultValue: 其他
+    skills: [accept-type, business-sms]
+    guide: >-
+      按 Skill accept-type 从字段「订购短信」判断：短信正文包含“热线渠道”为“热线”；包含“线上渠道”为“掌上营业厅”；
+      其他情况（含订购短信找不到）为“其他”。Java 中该字段以 Skill 结果为准，rule 中“否则填充营业厅”的写法不生效。
+  是否录音:
+    type: enum
+    values: ['|录音', '|其他']
+    evidence: derive
+    whenMissing: value
+    defaultValue: '|其他'
+    guide: 字段「受理渠道」为“热线”时填“|录音”，否则填“|其他”（引用 {"type":"field","name":"受理渠道"}）。
+  活动时间:
+    evidence: derive
+    guide: >-
+      从属于本次业务的单据中，取业务名称对应的活动时间（不要取活动生效时间）；没有活动时间时，取业务名称对应的“生效时间”和
+      “失效时间”：两者均有时按“生效时间到失效时间”拼接，只有一个时取该值；不得跨业务记录拼接。evidence 引用单据原文片段。
+  活动内容:
+    evidence: quote
+    guide: 从属于本次业务的单据中取业务名称对应的活动内容，有多条时取与业务名称匹配的一条；单据中找不到时从字段「订购短信」对应的短信中摘取活动内容。逐字引用。
+  客户承诺:
+    evidence: quote
+    guide: 从属于本次业务的单据中取业务名称对应的客户承诺，有多条时取与业务名称匹配的一条；单据中找不到时从字段「订购短信」对应的短信中摘取客户承诺。逐字引用。
+  标准资费:
+    evidence: quote
+    guide: 从属于本次业务的单据中摘取标准资费，取到“xx元/月”；单据中没有时从字段「订购短信」对应的短信中摘取。逐字引用，不得跨业务取值。
+  业务套餐内容:
+    evidence: quote
+    guide: 从属于本次业务的单据中摘取本业务或套餐包含的内容，逐字引用。
+  争议类型:
+    type: enum
+    values: [业务, 营销活动]
+    evidence: derive
+    guide: >-
+      单据或订购短信表明本次办理的是营销活动、优惠活动（有活动时间、活动内容、违约责任等）时为“营销活动”，办理的是普通业务或套餐时为“业务”。
+      模板据此选择正文段落；无法判断时提交 not_found（与 Java 一致：两个段落都不显示）。
+  客户号码:
+    evidence: quote
+    guide: 从单据中摘取客户号码（11 位手机号），逐字引用。
+  提醒日期:
+    evidence: derive
+    skills: [reminder-sms, business-sms]
+    guide: 按 Skill reminder-sms 查询，取所选提醒短信的发送日期（格式见 Skill），引用该短信记录。
+  提醒短信:
+    evidence: quote
+    quoteWhole: true
+    skills: [reminder-sms, business-sms]
+    guide: 按 Skill reminder-sms 查询活动到期提醒短信正文，整条原样引用。
+  违约责任:
+    evidence: quote
+    guide: 从属于本次业务的单据中摘取违约责任条款，逐字引用。
+  充值流水:
+    type: list
+    columns:
+      - {name: 充值时间, description: 充值时间（格式见 Skill qry-balance）}
+      - {name: 支付方式, description: 支付方式/充值渠道}
+      - {name: 充值金额, description: 充值金额（元，格式见 Skill qry-balance）}
+      - {name: 流水号, description: 充值订单号/流水号}
+    evidence: quote
+    whenMissing: empty
+    skills: [qry-balance]
+    guide: >-
+      按 Skill qry-balance 查询充值号码/手机号码在充值时间所属账期的余额流水，每条充值记录一行，单元格原样取自接口记录，
+      evidence 引用每一行对应的接口记录；各账期接口调用成功但匹配 0 条流水时，必须提交 status="found"、value=[] 并附上查询工具或接口证据；
+      仅在缺少必要入参或任一账期接口报错时提交 not_found。
+  未操作行为:
+    type: enum
+    values: [未申请取消, 未办理变更]
+    evidence: derive
+    guide: 仅根据材料明确内容填写“未申请取消”或“未办理变更”；材料无法判断时提交 not_found（保留占位符），不得臆造。
+  客户手机号:
+    evidence: derive
+    guide: 优先取入参「extraInfo」中的手机号，其次取入参「手机号码」。
+  月度流量:
+    evidence: quote
+    guide: 从属于本次业务的单据中摘取套餐包含的当月国内移动数据流量（GB 数值），逐字引用。
+  靓号等级:
+    evidence: quote
+    skills: [pretty-number-info]
+    guide: 按 Skill pretty-number-info 查询匹配当前手机号码的记录，取接口返回的靓号等级原值，不做翻译、格式化或前后缀处理；非靓号或 grade 为空时提交 not_found。
+  靓号活动名称:
+    evidence: derive
+    skills: [pretty-number-info]
+    guide: >-
+      按 Skill pretty-number-info 查询匹配当前手机号码且 grade 非空的记录，提取其靓号活动名称（单档次原样取自 level_info.event_name，
+      多档次 JSON 数组文本提取非空活动名称按“、”拼接），不做其它改写；非靓号或活动名称为空时提交 not_found。
+  续约条款:
+    evidence: quote
+    guide: 从属于本次业务的单据中摘取续约条款，逐字引用。
+  到期续约提醒时间:
+    evidence: derive
+    skills: [renewal-reminder-sms, business-sms]
+    guide: 按 Skill renewal-reminder-sms 取到期续约/到期结束提醒短信的发送时间（格式见 Skill）。
+  到期续约提醒短信内容:
+    evidence: quote
+    quoteWhole: true
+    skills: [renewal-reminder-sms, business-sms]
+    guide: 按 Skill renewal-reminder-sms 取到期续约/到期结束提醒短信正文，整条原样引用。
+  续约期限:
+    evidence: quote
+    guide: 从属于本次业务的单据中摘取活动自动延续的期限，逐字引用。
+  续约成功提醒时间:
+    evidence: derive
+    skills: [renewal-reminder-sms, business-sms]
+    guide: 按 Skill renewal-reminder-sms 取续约成功提醒短信的发送时间（格式见 Skill）。
+  续约成功提醒短信内容:
+    evidence: quote
+    quoteWhole: true
+    skills: [renewal-reminder-sms, business-sms]
+    guide: 按 Skill renewal-reminder-sms 取续约成功提醒短信正文，整条原样引用。
+  续约提醒类型:
+    type: enum
+    values: [到期延续, 到期结束]
+    evidence: derive
+    skills: [renewal-reminder-sms, business-sms]
+    guide: 按 Skill renewal-reminder-sms 判断提醒类型（到期延续 / 到期结束）。
+  是否续约成功:
+    type: enum
+    values: [是, 否]
+    evidence: derive
+    skills: [renewal-reminder-sms, business-sms]
+    guide: 按 Skill renewal-reminder-sms 判断：查到续约成功提醒短信时填“是”，未查到时提交 not_found（不得推断为“否”）。
+  机卡匹配要求:
+    evidence: quote
+    whenMissing: value
+    defaultValue: 无
+    guide: 从属于本次业务的单据中取业务名称对应的机卡匹配要求，有多条时取与业务名称匹配的一条，逐字引用；没有时提交 not_found（报告中显示“无”）。
+  终端型号:
+    evidence: quote
+    guide: 仅当单据原文连续包含“终端信息”四个字时，从“终端信息”所在内容区域摘取终端型号；否则提交 not_found，不得根据商品名称或活动内容推断。
+  设备串号:
+    evidence: quote
+    guide: 仅当单据原文连续包含“终端信息”四个字时，从“终端信息”所在内容区域摘取设备串号；否则提交 not_found，不得将手机号码、订单号或其他编号作为设备串号。
+  违约行为:
+    evidence: quote
+    guide: 从属于本次业务的单据中摘取客户的违约行为，逐字引用。
+  违约时间:
+    evidence: quote
+    guide: 从属于本次业务的单据中摘取违约时间，逐字引用。
+  有终端捆绑:
+    type: enum
+    values: ['true', 'false']
+    evidence: derive
+    whenMissing: value
+    defaultValue: 'false'
+    guide: >-
+      只检查单据原文是否连续包含“终端信息”四个字：包含时为 true（evidence 引用单据片段“终端信息”），不包含时为 false
+      （与 Java 系统策略一致）；不得根据商品名称、活动内容、终端型号或其他业务语义推断。
+  原套餐名称:
+    evidence: quote
+    skills: [original-package-name, business-sms]
+    guide: 按 Skill original-package-name 从与订购短信同日、内容包含“退订提醒”的短信中取原套餐名称，逐字引用。
+  账期:
+    evidence: quote
+    guide: 从单据（账单）中摘取争议账期，逐字引用。
+  总金额:
+    evidence: quote
+    guide: 从单据（账单）中摘取该账期总费用（元，数值），逐字引用。
+  争议金额:
+    evidence: quote
+    guide: 从单据中摘取争议费用（元，数值），逐字引用。
+  金额:
+    evidence: quote
+    guide: 从单据（账单明细）中摘取费用项金额（元，数值），逐字引用。
+  计费周期:
+    evidence: quote
+    guide: 从单据（账单明细）中摘取费用项的计费周期，逐字引用。
+  开始日期:
+    evidence: quote
+    guide: 字段「是否有套餐外扣费」为“是”时，填写套餐外费用发生期间的开始日期，逐字引用；否则提交 not_found。
+  结束日期:
+    evidence: quote
+    guide: 字段「是否有套餐外扣费」为“是”时，填写套餐外费用发生期间的结束日期，逐字引用；否则提交 not_found。
+  套餐外费用类型:
+    evidence: derive
+    guide: 字段「是否有套餐外扣费」为“是”时，根据材料填写“上网”“通话”“短彩信”“5G消息”或实际存在的组合，不包含“套餐外”和“费”；否则提交 not_found。
+  超额扣费:
+    evidence: quote
+    guide: 字段「是否有套餐外扣费」为“是”时，填写对应套餐外费用金额，仅填写数值，不包含“元”；否则提交 not_found。
+  是否有套餐外扣费:
+    type: enum
+    values: [是, 否]
+    evidence: derive
+    whenMissing: value
+    defaultValue: 否
+    guide: 账单或详单明确存在非零套餐外费用时填“是”，否则填“否”。
+  账期短信提醒列表:
+    type: list
+    columns:
+      - {name: 提醒类型, type: enum, values: [活动到期套餐资费变更, 语音超额提醒, 流量超额提醒], description: 提醒类型}
+      - {name: 账期月, description: 提醒所属账期月（格式见 Skill billing-cycle-sms）}
+      - {name: 提醒时间, description: 提醒短信发送时间（格式见 Skill billing-cycle-sms）}
+      - {name: 提醒次数, description: 同类提醒短信的条数}
+      - {name: 短信内容, description: 提醒短信正文（整条原样）}
+    evidence: derive
+    whenMissing: empty
+    skills: [billing-cycle-sms]
+    guide: >-
+      按 Skill billing-cycle-sms 按入参「账单」起止月份逐月查询短信，聚合为提醒列表，evidence 引用对应的接口记录及工具调用；
+      各月接口调用成功但无符合条件的提醒短信时，必须提交 status="found"、value=[] 并附上查询工具或接口证据；
+      仅在缺少合法入参或任一月份接口报错时提交 not_found。
+  宽带套餐名称:
+    evidence: derive
+    guide: 从属于本次业务的单据中摘取宽带套餐名称；没有时填字段「商品名称」的值。
+  安装地址:
+    evidence: quote
+    whenMissing: value
+    defaultValue: 无
+    guide: 从单据中摘取宽带安装地址，没有时取用户的安装地址，逐字引用；都没有时提交 not_found（报告中显示“无”）。
+  发送日期:
+    evidence: derive
+    skills: [number-portability-sms]
+    guide: 按 Skill number-portability-sms 取客户发送携转资格查询短信的日期（格式见 Skill）。
+  携转资格回复短信:
+    evidence: quote
+    quoteWhole: true
+    skills: [number-portability-sms]
+    guide: 按 Skill number-portability-sms 取我公司回复的携转资格短信正文，整条原样引用。
+  定向流量:
+    evidence: quote
+    guide: 从属于本次业务的单据中摘取定向流量（GB 数值），逐字引用。
+  沟通日期:
+    evidence: quote
+    guide: 从单据中摘取与客户电话沟通（录音）的日期，逐字引用。
+  时间段:
+    evidence: quote
+    guide: 从单据中摘取电话录音中告知相关条款的时间段，逐字引用。
+  手机号类别:
+    type: enum
+    values: [靓号, 非靓号]
+    evidence: derive
+    whenMissing: value
+    defaultValue: 非靓号
+    skills: [pretty-number-info]
+    guide: 按 Skill pretty-number-info 查询匹配当前手机号码的记录：命中且 grade 非空时为“靓号”；无匹配记录、grade 为空或非靓号时提交 not_found（由模板默认值输出“非靓号”）或填“非靓号”。
+  有设备押金:
+    evidence: derive
+    whenMissing: empty
+    guide: >-
+      属于本次业务的单据中有设备押金记录时提取或派生非空标识（如“有”），并引用单据原文片段；
+      单据中无设备押金记录或没有依据时提交 not_found（whenMissing=empty 置空，使模板自动走 {% else %} 分支输出“- 无{{商品名称}}设备押金记录。”）。
+
+overrides:
+  # 客户号码：不同模板的 rule 不同
+  过户业务受阻类:
+    客户号码: {evidence: derive, guide: 优先取入参「手机号码」；没有时从单据中摘取 11 位手机号。}
+  靓号协议争议类:
+    客户号码: {evidence: derive, guide: 优先取入参「手机号码」；没有时从单据中摘取 11 位手机号。}
+  充值争议处理通用模板:
+    客户号码: {evidence: derive, guide: 优先取入参「extraInfo」中的充值号码（或入参「充值号码」），其次取入参「手机号码」。}
+  充值错号处理类:
+    客户号码: {evidence: derive, guide: 优先从单据中摘取充值的客户号码，或依次取入参「充值号码」（含 extraInfo 中的充值号码）、「手机号码」（Java 该模板没有 rule，按字段名从单据/入参抽取）。}
+  套餐费用争议类:
+    业务名称:
+      evidence: input
+      guide: 等于入参「业务名称」（正文中账单明细与附件说明共用该字段，与 Java 一致）。
+  合约延续争议类:
+    未操作行为:
+      type: string
+      evidence: derive
+      guide: 根据材料填写客户未进行的操作（如“未申请取消”“未办理变更”），材料无法判断时提交 not_found，不得臆造（Java 该模板无 rule）。

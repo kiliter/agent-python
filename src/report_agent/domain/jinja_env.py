@@ -7,14 +7,53 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextvars import ContextVar
 from typing import Any
 
-from jinja2 import Environment, StrictUndefined, TemplateSyntaxError, Undefined, meta, nodes
+from jinja2 import Environment, StrictUndefined, Template as JinjaTemplate, TemplateSyntaxError, Undefined, meta, nodes
 from jinja2.compiler import CodeGenerator, Frame
 from jinja2.exceptions import SecurityError
+from jinja2.ext import Extension
+from jinja2.lexer import TOKEN_DATA, TOKEN_VARIABLE_END, Token, TokenStream
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 from jinja2.utils import missing as _jinja_missing
+
+_ACTIVE_USED: ContextVar[set[str] | None] = ContextVar("_ACTIVE_USED", default=None)
+
+
+class TrackedList(list):
+    """带字段名与缺失标记的列表值，仅在实际迭代（{% for %}）或直接输出时将字段名记入 used。
+
+    #Created By AiCoding(codex)
+    {% if 列表字段 %} 调用 bool(TrackedList)（走 __len__），不会触发 __iter__，因此不会误记为已展示；
+    只有进入生效分支执行 {% for item in 列表字段 %}（或 {{ 列表字段 }} 输出）时才记录字段名。
+    """
+
+    field_name: str
+    missing: bool
+
+    def __init__(
+        self,
+        iterable: Iterable[Any] = (),
+        field_name: str = "",
+        missing: bool = False,
+        *,
+        on_iter: Callable[[str], None] | None = None,
+    ) -> None:
+        super().__init__(iterable)
+        self.field_name = field_name
+        self.missing = missing
+        self._on_iter = on_iter
+
+    def __iter__(self) -> Iterator[Any]:
+        if self.field_name:
+            if self._on_iter is not None:
+                self._on_iter(self.field_name)
+            active_used = _ACTIVE_USED.get()
+            if active_used is not None:
+                active_used.add(self.field_name)
+        return super().__iter__()
 
 
 class TrackedValue(str):
@@ -146,9 +185,34 @@ class _TrackedCodeGenerator(CodeGenerator):
         self.write(")")
 
 
+class _TrackedTemplate(JinjaTemplate):
+    """在模板渲染期间绑定当前环境的 used 集合，使 TrackedList.__iter__ 能准确记录被遍历的列表字段。
+
+    #Created By AiCoding(codex)
+    """
+
+    def render(self, *args: Any, **kwargs: Any) -> str:
+        used_set = getattr(self.environment, "_used", None)
+        token = _ACTIVE_USED.set(used_set)
+        try:
+            return super().render(*args, **kwargs)
+        finally:
+            _ACTIVE_USED.reset(token)
+
+    async def render_async(self, *args: Any, **kwargs: Any) -> str:
+        used_set = getattr(self.environment, "_used", None)
+        token = _ACTIVE_USED.set(used_set)
+        try:
+            return await super().render_async(*args, **kwargs)
+        finally:
+            _ACTIVE_USED.reset(token)
+
+
 class _TrackedSandboxEnvironment(ImmutableSandboxedEnvironment):
     code_generator_class = _TrackedCodeGenerator
+    template_class = _TrackedTemplate
     _strict_undefined: bool = False
+    _used: set[str] | None = None
 
     def _tracked_concat(self, seq: Iterable[Any]) -> str:
         parts: list[str] = []
@@ -198,8 +262,49 @@ class _TrackedSandboxEnvironment(ImmutableSandboxedEnvironment):
         return left + right
 
 
+def _test_has_digit(value: Any) -> bool:
+    """Jinja 测试 hasDigit：值存在且文本中至少含一个 Unicode 数字字符（对齐 Java Character::isDigit）。
+
+    #Created By AiCoding(codex)
+    None 与任何 Undefined（含渲染为 {{字段}} 占位符的缺失字段）一律返回 False，不抛异常；
+    缺失字段的占位文本 {{标准资费}} 本身不含数字，因此同样为 False。
+    """
+    if value is None or isinstance(value, Undefined):
+        return False
+    text = str.__str__(value) if isinstance(value, str) else str(value)
+    return any(ch.isdigit() for ch in text)
+
+
+class _PebbleNewlineTrimExtension(Extension):
+    """模拟 Pebble 3.2.2 默认 newLineTrimming 对 {{ }} 输出标签的处理。
+
+    #Created By AiCoding(codex)
+    Pebble 会去掉每个标签（{% %}、{# #}、{{ }}）后紧跟的一个换行；Jinja 的 trim_blocks 只覆盖前两种，
+    这里在词法流中把紧跟 variable_end 的 data 记号开头的一个换行去掉（词法器已把 \\r\\n 统一为 \\n）。
+    不使用 -}} 写法，因为那会吞掉全部空白；纯文本中的字面 }} 不是 variable_end 记号，不受影响。
+    """
+
+    def filter_stream(self, stream: TokenStream) -> Iterable[Token]:
+        prev_variable_end = False
+        for token in stream:
+            if prev_variable_end and token.type == TOKEN_DATA and token.value.startswith("\n"):
+                prev_variable_end = False
+                rest = token.value[1:]
+                if not rest:
+                    continue
+                token = Token(token.lineno, TOKEN_DATA, rest)
+            prev_variable_end = token.type == TOKEN_VARIABLE_END
+            yield token
+
+
 def make_environment(used: set[str] | None = None, *, strict_undefined: bool = False) -> Environment:
-    """创建沙箱化的 Jinja2 环境。传入 used 集合时，记录被输出的字段名。"""
+    """创建沙箱化的 Jinja2 环境。传入 used 集合时，记录被输出的字段名。
+
+    #Created By AiCoding(codex)
+    换行处理对齐 Pebble 3.2.2 默认值：trim_blocks=True 去掉 {% %} / {# #} 后的一个换行，
+    _PebbleNewlineTrimExtension 去掉 {{ }} 后的一个换行；不开启 lstrip_blocks。
+    另注册 Pebble 迁移模板使用的 hasDigit 测试。
+    """
 
     def finalize(value: Any) -> Any:
         if isinstance(value, Undefined):
@@ -209,19 +314,26 @@ def make_environment(used: set[str] | None = None, *, strict_undefined: bool = F
             if used is not None:
                 used.add(name)
             return "{{" + name + "}}"
-        if used is not None and isinstance(value, TrackedValue):
-            used.update(value.field_names)
+        if used is not None:
+            if isinstance(value, TrackedValue):
+                used.update(value.field_names)
+            elif isinstance(value, TrackedList) and value.field_name:
+                used.add(value.field_name)
         return "" if value is None else value
 
     env = _TrackedSandboxEnvironment(
         autoescape=False,
         keep_trailing_newline=True,
+        trim_blocks=True,
+        extensions=[_PebbleNewlineTrimExtension],
         undefined=StrictUndefined if strict_undefined else _PlaceholderUndefined,
         finalize=finalize,
     )
     env._strict_undefined = strict_undefined
+    env._used = used
     for unsafe_global in ("cycler", "joiner", "lipsum", "namespace"):
         env.globals.pop(unsafe_global, None)
+    env.tests["hasDigit"] = _test_has_digit
     return env
 
 
@@ -250,7 +362,7 @@ def body_variables(body: str) -> set[str]:
 
 
 def printed_variables(body: str) -> set[str]:
-    """正文中直接输出（{{ 变量 }}）的变量。"""
+    """正文中直接输出（{{ 变量 }}）或在循环内输出单元格的变量。#Created By AiCoding(codex)"""
     tree = parse_body(body)
     undeclared = set(meta.find_undeclared_variables(tree))
     names: set[str] = set()
@@ -258,6 +370,10 @@ def printed_variables(body: str) -> set[str]:
         for node in output.find_all(nodes.Name):
             if node.ctx == "load" and node.name in undeclared:
                 names.add(node.name)
+    for loop in tree.find_all(nodes.For):
+        if isinstance(loop.iter, nodes.Name) and loop.iter.ctx == "load" and loop.iter.name in undeclared:
+            if any(True for _ in loop.find_all(nodes.Output)):
+                names.add(loop.iter.name)
     return names
 
 

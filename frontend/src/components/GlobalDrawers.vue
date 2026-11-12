@@ -3,6 +3,7 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { usePlatformStore } from '@/stores/platform'
 import type { EvidenceType, MissingStrategy, RegressionCase, TemplateField } from '@/types/platform'
+import { formatListColumns, parseListColumns } from '@/utils/listColumns'
 
 const store = usePlatformStore()
 
@@ -17,6 +18,8 @@ const editField = ref<TemplateField | null>(null)
 const originalFieldName = ref<string | undefined>(undefined)
 /** 枚举值编辑框文本（逗号或换行分隔） */
 const enumText = ref('')
+// #Created By AiCoding(codex) 列表字段的列定义编辑文本（每行：列名|类型|可选值|说明）
+const columnsText = ref('')
 const saving = ref(false)
 
 const isCreatingField = computed(() => store.editingFieldIndex < 0)
@@ -50,6 +53,7 @@ function initFieldForm() {
   const f = editField.value
   if (!Array.isArray(f.enumValues)) f.enumValues = []
   enumText.value = f.enumValues.join('\n')
+  columnsText.value = formatListColumns(f.columns)
 }
 
 /** 保存字段：校验后交给 Store 写入本地草稿（保存草稿时整包提交后端） */
@@ -66,6 +70,18 @@ function saveFieldFromDrawer() {
     store.showToast('枚举类型字段请至少配置一个可选值', 'warning')
     return
   }
+  // #Created By AiCoding(codex) 列表字段：解析列定义；证据只能是原文引用或推导，缺失固定按空列表（置空）处理
+  const isList = f.type === '列表'
+  const parsedColumns = isList ? parseListColumns(columnsText.value) : { columns: [], error: '' }
+  if (isList && parsedColumns.error) {
+    store.showToast(parsedColumns.error, 'warning')
+    return
+  }
+  if (isList && f.evidenceType === 'input') {
+    store.showToast('列表字段的取证来源只能是原文引用或推导', 'warning')
+    return
+  }
+  if (isList) f.whenMissing = '置空'
   const defaultValue = f.whenMissing === '默认值' ? (f.defaultValue || '').trim() : ''
   if (f.whenMissing === '默认值' && !defaultValue) {
     store.showToast('请填写找不到时使用的默认值', 'warning')
@@ -79,8 +95,9 @@ function saveFieldFromDrawer() {
     ...f,
     name,
     enumValues: enums,
+    columns: parsedColumns.columns,
     format: f.type === '日期' ? (f.format || '').trim() || null : null,
-    quoteWhole: f.evidenceType === 'quote' ? !!f.quoteWhole : false,
+    quoteWhole: f.evidenceType === 'quote' && !isList ? !!f.quoteWhole : false,
     defaultValue,
     description: (f.description || '').trim(),
   }
@@ -177,6 +194,38 @@ watch(
 // ======================================================================== 3. 回归差异详情
 const currentRegDiff = computed(() => store.regressionDiffs[store.editingRegDiffIndex] ?? null)
 
+/** 当前试运行中某字段的快照（用于在回归用例抽屉与差异对比中区分空列表与缺失列表） #Created By AiCoding(codex) */
+const dryRunFieldMap = computed(() => {
+  const map = new Map<string, TemplateField>()
+  ;(store.dryRunResult?.fields ?? []).forEach(f => map.set(f.name, f))
+  return map
+})
+
+/** 格式化列表或普通字段在抽屉中的简短状态提示 #Created By AiCoding(codex) */
+function formatDryRunFieldHint(fieldName: string): string {
+  const rf = dryRunFieldMap.value.get(fieldName)
+  if (!rf) return ''
+  if (rf.type === '列表') {
+    if (rf.runStatus === 'found') {
+      const n = Array.isArray(rf.runRows) ? rf.runRows.length : (rf.runValue || '').trim() === '[]' ? 0 : -1
+      return n === 0 ? '当前试运行：无记录（0 行）' : n > 0 ? `当前试运行：共 ${n} 行` : '当前试运行：已命中'
+    }
+    return '当前试运行：缺失（未取到结果）'
+  }
+  return rf.runStatus === 'found' ? `当前试运行：${rf.runValue || '已命中'}` : '当前试运行：缺失'
+}
+
+/** 格式化回归差异抽屉中的字段输出值（区分合法空列表 [] 与缺失空值） #Created By AiCoding(codex) */
+function formatDiffFieldVal(fieldName: string, rawVal?: string): string {
+  const isList = store.templateFields.find(f => f.name === fieldName)?.type === '列表'
+  const trimmed = (rawVal ?? '').trim()
+  if (isList) {
+    if (trimmed === '[]') return '无记录（0 行） []'
+    if (!trimmed || trimmed === '（置空）') return '缺失（未取到结果·置空）'
+  }
+  return trimmed || '—'
+}
+
 /** 抽屉内 Ctrl/⌘+S 快捷保存 */
 function onDrawerKeydown(e: KeyboardEvent) {
   if (!store.activeDrawer || store.activeModal) return
@@ -243,6 +292,7 @@ onBeforeUnmount(() => {
               <option value="文本">文本</option>
               <option value="枚举">枚举</option>
               <option value="日期">日期</option>
+              <option value="列表">列表</option>
             </select>
           </div>
         </div>
@@ -255,6 +305,17 @@ onBeforeUnmount(() => {
             rows="4"
             style="width: 100%"
             placeholder="每行填写一个可选值"
+          ></textarea>
+        </div>
+
+        <div v-if="editField.type === '列表'">
+          <label class="g-field-label">列定义（每行一列：列名|文本或枚举|可选值用/分隔|说明） *</label>
+          <textarea
+            v-model="columnsText"
+            class="textarea mono"
+            rows="4"
+            style="width: 100%"
+            placeholder="如：充值时间|文本||充值时间&#10;提醒类型|枚举|语音超额提醒/流量超额提醒|提醒类别"
           ></textarea>
         </div>
 
@@ -278,14 +339,26 @@ onBeforeUnmount(() => {
           </div>
           <div>
             <label class="g-field-label">未找到证据时的处理</label>
-            <select v-model="editField.whenMissing" class="select" style="width: 100%">
+            <select
+              v-model="editField.whenMissing"
+              class="select"
+              style="width: 100%"
+              :disabled="editField.type === '列表'"
+            >
               <option v-for="m in missingOptions" :key="m" :value="m">{{ m }}</option>
             </select>
           </div>
         </div>
 
+        <div
+          v-if="editField.type === '列表'"
+          style="font-size: 11.5px; color: var(--text-secondary); line-height: 1.5"
+        >
+          列表字段语义：接口/单据查询成功但匹配 0 条时记为“找到·无记录（0 行）”（运行状态 SUCCESS）；仅当缺少必要入参或接口失败时记为“未找到·缺失”（正文实际执行 &#123;% for %&#125; 遍历时运行状态计为 PARTIAL）。
+        </div>
+
         <label
-          v-if="editField.evidenceType === 'quote'"
+          v-if="editField.evidenceType === 'quote' && editField.type !== '列表'"
           style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; cursor: pointer"
         >
           <input v-model="editField.quoteWhole" type="checkbox" />
@@ -433,13 +506,25 @@ onBeforeUnmount(() => {
                 <td colspan="2" style="text-align: center; color: var(--text-secondary)">本模板尚未定义字段</td>
               </tr>
               <tr v-for="f in store.templateFields" :key="f.name">
-                <td style="font-weight: 600">{{ f.name }}</td>
+                <td>
+                  <div style="font-weight: 600">{{ f.name }}</div>
+                  <div
+                    v-if="formatDryRunFieldHint(f.name)"
+                    style="font-size: 10.5px; color: var(--text-secondary); margin-top: 2px"
+                  >
+                    {{ formatDryRunFieldHint(f.name) }}
+                  </div>
+                </td>
                 <td>
                   <input
                     v-model="editCase.expectedValues[f.name]"
                     class="input mono"
                     style="width: 100%"
-                    placeholder="选填期望值…"
+                    :placeholder="
+                      f.type === '列表'
+                        ? '选填期望 JSON（如 [] 表示合法无记录 0 行）…'
+                        : '选填期望值…'
+                    "
                   />
                 </td>
               </tr>
@@ -481,14 +566,14 @@ onBeforeUnmount(() => {
           回归用例：{{ currentRegDiff.caseName }}
         </div>
         <div v-if="currentRegDiff.expected" style="font-size: 12px; color: var(--text-regular)">
-          基准期望值：<span class="mono">{{ currentRegDiff.expected }}</span>
+          基准期望值：<span class="mono">{{ formatDiffFieldVal(currentRegDiff.field, currentRegDiff.expected) }}</span>
         </div>
         <div class="diff-grid">
           <div class="g-ver-card ver-a">
             <div class="g-ver-head">版本 A 取值结果</div>
             <div class="g-ver-body">
               <div style="color: var(--text-secondary)">字段【{{ currentRegDiff.field }}】输出值：</div>
-              <div class="g-ver-val mono">{{ currentRegDiff.valA || '—' }}</div>
+              <div class="g-ver-val mono">{{ formatDiffFieldVal(currentRegDiff.field, currentRegDiff.valA) }}</div>
               <div style="color: var(--text-secondary)">证据与推导：</div>
               <div style="font-size: 12px">{{ currentRegDiff.evA || '—' }}</div>
             </div>
@@ -498,7 +583,7 @@ onBeforeUnmount(() => {
             <div class="g-ver-head">版本 B 取值结果</div>
             <div class="g-ver-body">
               <div style="color: var(--text-secondary)">字段【{{ currentRegDiff.field }}】输出值：</div>
-              <div class="g-ver-val mono">{{ currentRegDiff.valB || '—' }}</div>
+              <div class="g-ver-val mono">{{ formatDiffFieldVal(currentRegDiff.field, currentRegDiff.valB) }}</div>
               <div style="color: var(--text-secondary)">证据与推导：</div>
               <div style="font-size: 12px">{{ currentRegDiff.evB || '—' }}</div>
             </div>

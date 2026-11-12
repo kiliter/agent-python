@@ -1,0 +1,194 @@
+# #Created By AiCoding(codex) 由 tools/java_migration/generate.py 从 Java 模板生成，请勿手工修改后再重新生成
+id: 119
+name: 套餐费用争议类
+description: 迁移自 Java 模板「套餐费用争议类」（资源库模板 ID 119），正文与规则以 Java 为准。
+skills:
+- accept-type
+- business-sms
+- second-confirmation-sms
+- verification-sms
+- billing-cycle-sms
+inputs:
+- key: 手机号码
+  required: false
+  description: 客户手机号，11 位
+  sample: '13900001234'
+- key: 业务名称
+  required: false
+  description: 本次争议的业务、套餐或活动名称
+  sample: 5G智享套餐（个人版）
+- key: 创建时间
+  required: false
+  description: 工单创建时间 yyyyMMddHHmmss，短信类 Skill 以它为查询基准
+  sample: '20261105103012'
+- key: 业务月份
+  required: false
+  description: 业务办理日期 yyyyMMdd；受理渠道为热线、掌上营业厅时用作受理日期
+  sample: '20261105'
+- key: 账单
+  required: false
+  description: 账单起止月份，格式 yyyyMM$yyyyMM，起止月份均包含在查询范围内
+  sample: 202610$202610
+fields:
+- name: 客户号码
+  evidence: quote
+  description: 从单据中摘取客户号码（11 位手机号），逐字引用。
+- name: 账期
+  evidence: quote
+  description: 从单据（账单）中摘取争议账期，逐字引用。
+- name: 总金额
+  evidence: quote
+  description: 从单据（账单）中摘取该账期总费用（元，数值），逐字引用。
+- name: 争议金额
+  evidence: quote
+  description: 从单据中摘取争议费用（元，数值），逐字引用。
+- name: 业务名称
+  evidence: input
+  description: 等于入参「业务名称」（正文中账单明细与附件说明共用该字段，与 Java 一致）。
+- name: 金额
+  evidence: quote
+  description: 从单据（账单明细）中摘取费用项金额（元，数值），逐字引用。
+- name: 计费周期
+  evidence: quote
+  description: 从单据（账单明细）中摘取费用项的计费周期，逐字引用。
+- name: 争议类型
+  visible: false
+  type: enum
+  values:
+  - 业务
+  - 营销活动
+  evidence: derive
+  description: 单据或订购短信表明本次办理的是营销活动、优惠活动（有活动时间、活动内容、违约责任等）时为“营销活动”，办理的是普通业务或套餐时为“业务”。模板据此选择正文段落；无法判断时提交 not_found（与 Java 一致：两个段落都不显示）。
+- name: 受理日期
+  evidence: derive
+  description: '受理渠道（字段「受理渠道」）为“热线”或“掌上营业厅”时，必须取入参「业务月份」（yyyyMMdd），用 format_date 转为“yyyy年M月d号”（如 20261005 → 2026年10月5号），value 直接使用工具输出并引用其 callId；业务月份缺失或不是合法的 8 位日期时提交 not_found。其他受理渠道只能从属于本次业务的单据（单据经清洗后包含入参「业务名称」）中摘取受理日期，保持单据原样，单据不属于本次业务或没有受理日期时提交 not_found。任何情况下都不得使用短信发送时间、创建时间或其他日期代替。
+
+    原规则（Java）：当{{受理渠道}}为“热线”或“掌上营业厅”时，必须取请求参数中的“业务月份”（yyyyMMdd）并格式化为“yyyy年M月d号”，例如20261005输出2026年10月5号；其他受理渠道仅从与当前业务名称匹配的PDF单据中提取受理日期，不得使用订购短信发送时间、创建时间或其他日期回退。'
+- name: 受理方式
+  evidence: derive
+  description: '单据（属于本次业务的单据）中有受理网点/营业厅名称时，填该受理网点（引用单据原文）；没有受理网点时，填字段「受理渠道」的值（引用 {"type":"field","name":"受理渠道"}）。
+
+    原规则（Java）：如果{{受理网点}}为空就填充{{受理渠道}}否则就填充受理网点'
+- name: 鉴权方式
+  evidence: quote
+  description: 从属于本次业务的单据中摘取客户身份鉴权方式（如“服务密码”“短信验证码”“身份证”），逐字引用。
+- name: 商品名称
+  evidence: input
+  description: '等于入参「业务名称」。
+
+    原规则（Java）：取请求参数中的业务名称'
+- name: 标准资费
+  evidence: quote
+  description: '从属于本次业务的单据中摘取标准资费，取到“xx元/月”；单据中没有时从字段「订购短信」对应的短信中摘取。逐字引用，不得跨业务取值。
+
+    原规则（Java）：从PDF文本中提取标准资费，取到xx元/月；若无从订购短信中提取标准资费'
+- name: 业务套餐内容
+  evidence: quote
+  description: 从属于本次业务的单据中摘取本业务或套餐包含的内容，逐字引用。
+- name: 活动时间
+  evidence: derive
+  description: 从属于本次业务的单据中，取业务名称对应的活动时间（不要取活动生效时间）；没有活动时间时，取业务名称对应的“生效时间”和“失效时间”：两者均有时按“生效时间到失效时间”拼接，只有一个时取该值；不得跨业务记录拼接。evidence 引用单据原文片段。
+- name: 活动内容
+  evidence: quote
+  description: 从属于本次业务的单据中取业务名称对应的活动内容，有多条时取与业务名称匹配的一条；单据中找不到时从字段「订购短信」对应的短信中摘取活动内容。逐字引用。
+- name: 客户承诺
+  evidence: quote
+  description: 从属于本次业务的单据中取业务名称对应的客户承诺，有多条时取与业务名称匹配的一条；单据中找不到时从字段「订购短信」对应的短信中摘取客户承诺。逐字引用。
+- name: 是否录音
+  type: enum
+  values:
+  - '|录音'
+  - '|其他'
+  evidence: derive
+  whenMissing: value
+  defaultValue: '|其他'
+  description: '字段「受理渠道」为“热线”时填“|录音”，否则填“|其他”（引用 {"type":"field","name":"受理渠道"}）。
+
+    原规则（Java）：如果{{受理渠道}}为热线则填''|录音''，否则填''|其他'''
+- name: 受理渠道
+  visible: false
+  type: enum
+  values:
+  - 热线
+  - 掌上营业厅
+  - 其他
+  evidence: derive
+  whenMissing: value
+  defaultValue: 其他
+  description: '按 Skill accept-type 从字段「订购短信」判断：短信正文包含“热线渠道”为“热线”；包含“线上渠道”为“掌上营业厅”；其他情况（含订购短信找不到）为“其他”。Java 中该字段以 Skill 结果为准，rule 中“否则填充营业厅”的写法不生效。
+
+    原规则（Java）：如果短信内容包含线上渠道就填充 ''掌上营业厅'';如果短信内容包含热线渠道就填充''热线'';否则填充营业厅'
+- name: 二次确认短信
+  evidence: quote
+  quoteWhole: true
+  description: 按 Skill second-confirmation-sms 查询本次业务的二次确认短信正文，整条原样引用。
+- name: 验证码短信
+  evidence: quote
+  quoteWhole: true
+  description: 按 Skill verification-sms 查询本次业务的验证码短信正文，整条原样引用。
+- name: 订购短信
+  evidence: quote
+  quoteWhole: true
+  description: 按 Skill business-sms 查询，取命中本次业务名称的最新一条订购短信正文，整条原样引用，不得删改任何字符。
+- name: 账期短信提醒列表
+  type: list
+  columns:
+  - name: 提醒类型
+    type: enum
+    values:
+    - 活动到期套餐资费变更
+    - 语音超额提醒
+    - 流量超额提醒
+    description: 提醒类型
+  - name: 账期月
+    description: 提醒所属账期月（格式见 Skill billing-cycle-sms）
+  - name: 提醒时间
+    description: 提醒短信发送时间（格式见 Skill billing-cycle-sms）
+  - name: 提醒次数
+    description: 同类提醒短信的条数
+  - name: 短信内容
+    description: 提醒短信正文（整条原样）
+  evidence: derive
+  whenMissing: empty
+  description: 按 Skill billing-cycle-sms 按入参「账单」起止月份逐月查询短信，聚合为提醒列表，evidence 引用对应的接口记录及工具调用；各月接口调用成功但无符合条件的提醒短信时，必须提交 status="found"、value=[] 并附上查询工具或接口证据；仅在缺少合法入参或任一月份接口报错时提交 not_found。
+- name: 未操作行为
+  type: enum
+  values:
+  - 未申请取消
+  - 未办理变更
+  evidence: derive
+  description: '仅根据材料明确内容填写“未申请取消”或“未办理变更”；材料无法判断时提交 not_found（保留占位符），不得臆造。
+
+    原规则（Java）：仅根据材料明确内容填写“未申请取消”或“未办理变更”；材料无法判断时保留占位符，不得臆造。'
+- name: 是否有套餐外扣费
+  visible: false
+  type: enum
+  values:
+  - 是
+  - 否
+  evidence: derive
+  whenMissing: value
+  defaultValue: 否
+  description: '账单或详单明确存在非零套餐外费用时填“是”，否则填“否”。
+
+    原规则（Java）：账单或详单明确存在非零套餐外费用时填“是”，否则填“否”。'
+- name: 开始日期
+  evidence: quote
+  description: '字段「是否有套餐外扣费」为“是”时，填写套餐外费用发生期间的开始日期，逐字引用；否则提交 not_found。
+
+    原规则（Java）：当{{是否有套餐外扣费}}为“是”时，填写套餐外费用发生期间的开始日期。'
+- name: 结束日期
+  evidence: quote
+  description: '字段「是否有套餐外扣费」为“是”时，填写套餐外费用发生期间的结束日期，逐字引用；否则提交 not_found。
+
+    原规则（Java）：当{{是否有套餐外扣费}}为“是”时，填写套餐外费用发生期间的结束日期。'
+- name: 套餐外费用类型
+  evidence: derive
+  description: '字段「是否有套餐外扣费」为“是”时，根据材料填写“上网”“通话”“短彩信”“5G消息”或实际存在的组合，不包含“套餐外”和“费”；否则提交 not_found。
+
+    原规则（Java）：当{{是否有套餐外扣费}}为“是”时，根据材料填写“上网”“通话”“短彩信”“5G消息”或实际存在的组合，不包含“套餐外”和“费”。'
+- name: 超额扣费
+  evidence: quote
+  description: '字段「是否有套餐外扣费」为“是”时，填写对应套餐外费用金额，仅填写数值，不包含“元”；否则提交 not_found。
+
+    原规则（Java）：当{{是否有套餐外扣费}}为“是”时，填写对应套餐外费用金额，仅填写数值，不包含“元”。'

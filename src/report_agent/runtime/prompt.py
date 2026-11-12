@@ -9,7 +9,7 @@ from ..domain.template import FieldDef
 from .deps import RunDeps
 from .output_model import EVIDENCE_LABEL
 
-TYPE_LABEL = {"string": "文本", "enum": "枚举", "date": "日期"}
+TYPE_LABEL = {"string": "文本", "enum": "枚举", "date": "日期", "list": "列表"}
 MISSING_LABEL = {"placeholder": "保留占位", "empty": "置空", "value": "默认值"}
 
 EVIDENCE_RULES = """## 证据填写规则（平台会逐条核对，不通过会退回重填）
@@ -18,15 +18,37 @@ EVIDENCE_RULES = """## 证据填写规则（平台会逐条核对，不通过会
 - 入参（input）：evidence 写 {"type":"input","key":"入参名"}，value 必须与入参完全相同。
 - 推导（derive）：evidence 列出全部依据（api / document / input / tool / field），reasoning 写明推导过程；
   用 format_date 得到的值必须引用它的 callId（{"type":"tool","callId":"t5"}），value 直接使用工具输出。
+- 列表字段（类型为列表）：value 是行对象数组，如 [{"列名1":"值","列名2":"值"}]，每行必须包含且只包含该字段列出的全部列，枚举列只能填可选值；
+  有匹配记录时，evidence 要覆盖每一行的出处（每条接口记录写一个 {"type":"api","resultId":"r1","row":3,"column":"该记录的任一列"}，或单据片段），
+  原文引用的列表字段每个非空文本单元格都必须逐字出现在被引用的某条接口记录（任一列）或单据片段中。
+  接口调用成功且确无匹配记录时，应提交 status="found"、value=[]，并在 evidence 中附上查询证据（如 call_api 或 query_result 的 {"type":"tool","callId":"t2"}，或 {"type":"api","resultId":"r1","row":0,"column":""}）；
+  仅当缺少必要入参、前置依赖缺失或接口调用失败无法获知结果时，才提交 status="not_found"、value=null。
 - 找不到：status 填 not_found，value 填 null，reasoning 写明查过什么、为什么找不到。不要为了“填满”而编造或退而求其次。"""
+
+
+def _list_columns_line(f: FieldDef) -> str:
+    """列表字段的列说明（给模型看）。#Created By AiCoding(codex)"""
+    lines = ["- 列（value 中每行对象的键，全部必填）："]
+    for c in f.columns:
+        line = f"  - {c.name}：{'枚举' if c.type == 'enum' else '文本'}"
+        if c.type == "enum" and c.values:
+            line += f"（可选值：{'、'.join(c.values)}）"
+        if c.description.strip():
+            line += f"；{c.description.strip()}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _field_line(f: FieldDef) -> str:
     parts = [f"### {f.name}",
              f"- {'显示在报告中' if f.visible else '中间字段（不直接显示，供正文条件或其它字段使用）'}；类型：{TYPE_LABEL[f.type]}"
              + (f"（可选值：{'、'.join(f.values)}）" if f.type == "enum" else "")
+             + ("（value 为行对象数组；接口调用成功确无记录时提交 status=found, value=[] 并附查询证据；缺少入参或接口失败时提交 not_found）"
+                if f.is_list else "")
              + (f"；格式：{f.format}" if f.format else ""),
              f"- 证据类型：{EVIDENCE_LABEL[f.evidence]}" + ("（整条原样引用）" if f.quoteWhole else "")]
+    if f.is_list:
+        parts.append(_list_columns_line(f))
     if f.description:
         parts.append(f"- 说明：{f.description.strip()}")
     return "\n".join(parts)

@@ -12,7 +12,7 @@ import httpx
 import pytest
 from jinja2.exceptions import SecurityError, UndefinedError
 
-from report_agent.container import SEED_DIR
+from fixture_paths import SEED_DIR
 from report_agent.domain.api_contract import parse_api_yaml
 from report_agent.domain.jinja_env import TrackedValue, render_body
 from report_agent.domain.resources import load_resource_dir

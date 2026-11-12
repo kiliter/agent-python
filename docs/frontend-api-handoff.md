@@ -152,7 +152,8 @@
 
 ```ts
 interface TemplateField {
-  name: string; visible: boolean; type: '文本'|'枚举'|'日期'; enumValues: string[]
+  name: string; visible: boolean; type: '文本'|'枚举'|'日期'|'列表'; enumValues: string[]
+  columns?: { name: string; type: '文本'|'枚举'; enumValues: string[]; description: string }[]  // 新增：列表字段的列定义
   evidenceType: 'quote'|'input'|'derive'; whenMissing: '保留占位'|'置空'|'默认值'; defaultValue: string
   description: string
   format?: string | null          // 新增：日期展示格式，如 yyyy年M月d号
@@ -162,6 +163,7 @@ interface TemplateField {
   fromTemplate?: string           // 仅跨模板字段
   // 以下只在试运行 / 运行详情中有值
   runStatus: 'found'|'not_found'; runValue: string; evidenceLabel: string; reasoning: string
+  runRows?: Record<string, string>[] // 新增：列表字段的运行结果行（runValue 为其 JSON 文本）
   evidenceTarget: { tab: 'api'|'doc'|'input'; resultId?: string; row?: number; column?: string; line?: number; key?: string }
   retried?: boolean               // 证据校验退回过、模型重填过
   validationFailed?: boolean      // 重试用完仍不通过，被按“找不到”处理

@@ -457,9 +457,26 @@ function fallbackSegmentize(
 ): ReportSegment[] {
   const candidates: Array<{ value: string; field: TemplateField; kind: ReportSegmentKind }> = []
 
+  const seenCandidateVals = new Set<string>()
   for (const f of fields) {
     if (f.visible === false) continue
     if (hasRunResult && f.shown === false) continue
+
+    if (f.type === '列表') {
+      // #Created By AiCoding(codex) 列表字段通过 {% for %} 渲染单元格，不直接匹配 JSON 文本（如 []），仅将非空单元格纳入高亮候选
+      if (hasRunResult && f.runStatus === 'found' && Array.isArray(f.runRows) && f.runRows.length > 0) {
+        for (const row of f.runRows) {
+          for (const rawCell of Object.values(row || {})) {
+            const cellStr = typeof rawCell === 'string' ? rawCell : String(rawCell ?? '')
+            if (cellStr.trim() && !seenCandidateVals.has(`${f.name}::${cellStr}`)) {
+              seenCandidateVals.add(`${f.name}::${cellStr}`)
+              candidates.push({ value: cellStr, field: f, kind: 'found' })
+            }
+          }
+        }
+      }
+      continue
+    }
 
     if (hasRunResult && f.runStatus === 'found' && (f.runValue || '').trim()) {
       candidates.push({ value: f.runValue, field: f, kind: 'found' })

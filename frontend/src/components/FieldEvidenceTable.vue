@@ -26,6 +26,18 @@ const runFields = computed<TemplateField[]>(() => store.activeRun?.fields ?? [])
 /** 展开状态键带上运行编号，避免不同运行之间互相影响 */
 const foldPrefix = computed(() => `field_${store.activeRun?.runId ?? ''}_`)
 
+/** 判断列表字段是否为“已查证但无记录（0 行）”的合法空列表 #Created By AiCoding(codex) */
+function isEmptyFoundList(f: TemplateField): boolean {
+  if (f.type !== '列表' || f.runStatus !== 'found') return false
+  if (Array.isArray(f.runRows)) return f.runRows.length === 0
+  return (f.runValue || '').trim() === '[]'
+}
+
+/** 列表字段命中行数 #Created By AiCoding(codex) */
+function listRowCount(f: TemplateField): number {
+  return Array.isArray(f.runRows) ? f.runRows.length : 0
+}
+
 /** 按状态筛选与关键字（字段名 / 值）过滤字段 */
 const filteredFields = computed(() => {
   const kw = props.search.trim().toLowerCase()
@@ -34,7 +46,11 @@ const filteredFields = computed(() => {
     if (props.filter === 'not_found' && f.runStatus !== 'not_found') return false
     if (props.filter === 'retried' && !f.retried) return false
     if (kw) {
-      const hit = f.name.toLowerCase().includes(kw) || (f.runValue || '').toLowerCase().includes(kw)
+      const displayExtra = isEmptyFoundList(f) ? '无记录（0 行）' : ''
+      const hit =
+        f.name.toLowerCase().includes(kw) ||
+        (f.runValue || '').toLowerCase().includes(kw) ||
+        displayExtra.toLowerCase().includes(kw)
       if (!hit) return false
     }
     return true
@@ -111,7 +127,39 @@ function locateField(f: TemplateField) {
             </div>
           </td>
           <td>
-            <div v-if="(f.runValue || '').length > 42" class="foldable-text">
+            <!-- #Created By AiCoding(codex) 列表字段清晰区分“无记录（0 行）”、有记录行数组与“缺失”状态 -->
+            <template v-if="f.type === '列表'">
+              <span v-if="isEmptyFoundList(f)" class="ev-empty-list-val">
+                无记录（0 行）
+              </span>
+              <div v-else-if="f.runStatus === 'found'" class="foldable-text">
+                <div style="margin-bottom: 3px">
+                  <span class="ev-list-count-chip">共 {{ listRowCount(f) }} 行</span>
+                </div>
+                <div
+                  class="foldable-content mono"
+                  :class="{ collapsed: !store.expandedTexts[foldPrefix + f.name] }"
+                >
+                  {{ f.runValue }}
+                </div>
+                <div class="foldable-actions">
+                  <button type="button" class="btn-link" @click.stop="store.toggleFold(foldPrefix + f.name)">
+                    {{ store.expandedTexts[foldPrefix + f.name] ? '收起' : '展开明细' }}
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-link"
+                    @click.stop="store.copyText(f.runValue, `已复制列表字段【${f.name}】的值`)"
+                  >
+                    复制
+                  </button>
+                </div>
+              </div>
+              <span v-else class="ev-unfound-val">
+                缺失（未取到结果·置空）
+              </span>
+            </template>
+            <div v-else-if="(f.runValue || '').length > 42" class="foldable-text">
               <div
                 class="foldable-content"
                 :class="{ collapsed: !store.expandedTexts[foldPrefix + f.name] }"
@@ -233,6 +281,29 @@ function locateField(f: TemplateField) {
 .ev-found-val {
   font-weight: 500;
   color: var(--text-primary);
+}
+
+.ev-empty-list-val {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 11.5px;
+  font-weight: 500;
+  background-color: var(--bg-subtle);
+  border: 1px solid var(--border-light);
+  color: var(--text-regular);
+}
+
+.ev-list-count-chip {
+  display: inline-block;
+  padding: 0 6px;
+  line-height: 17px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  background-color: var(--primary-bg);
+  border: 1px solid var(--primary-border);
+  color: var(--primary);
 }
 
 .ev-unfound-val {

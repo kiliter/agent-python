@@ -1,0 +1,45 @@
+# #Created By AiCoding(codex) 由 tools/java_migration/generate.py 从 Java 模板生成，请勿手工修改后再重新生成
+id: 106
+name: 充值争议处理通用模板
+description: 迁移自 Java 模板「充值争议处理通用模板」（资源库模板 ID 106），正文与规则以 Java 为准。
+skills:
+- qry-balance
+inputs:
+- key: 手机号码
+  required: false
+  description: 客户手机号，11 位
+  sample: '13900001234'
+- key: 充值号码
+  required: false
+  description: 充值的手机号码，11 位
+  sample: '13900001234'
+- key: 充值时间
+  required: false
+  description: 充值时间：支持 yyyyMMdd、yyyyMM（整月）或日期/账期范围（如 yyyyMMdd-yyyyMMdd）
+  sample: '20260705'
+- key: extraInfo
+  required: false
+  description: 上游附加信息（JSON 文本），可能包含充值号码、办理日期、手机号等
+  sample: '{"充值号码":"13900001234","办理日期":"20260705"}'
+fields:
+- name: 充值流水
+  type: list
+  columns:
+  - name: 充值时间
+    description: 充值时间（格式见 Skill qry-balance）
+  - name: 支付方式
+    description: 支付方式/充值渠道
+  - name: 充值金额
+    description: 充值金额（元，格式见 Skill qry-balance）
+  - name: 流水号
+    description: 充值订单号/流水号
+  evidence: quote
+  whenMissing: empty
+  description: '按 Skill qry-balance 查询充值号码/手机号码在充值时间所属账期的余额流水，每条充值记录一行，单元格原样取自接口记录， evidence 引用每一行对应的接口记录；各账期接口调用成功但匹配 0 条流水时，必须提交 status="found"、value=[] 并附上查询工具或接口证据；仅在缺少必要入参或任一账期接口报错时提交 not_found。
+
+    原规则（Java）：调用qry-balance skill查询客户号码在充值时间所属账期的余额流水，返回可用于模板for循环的JSON数组；每条记录字段为充值时间、支付方式、充值金额、流水号'
+- name: 客户号码
+  evidence: derive
+  description: '优先取入参「extraInfo」中的充值号码（或入参「充值号码」），其次取入参「手机号码」。
+
+    原规则（Java）：优先取extraInfo中的充值号码，其次取用户的手机号'

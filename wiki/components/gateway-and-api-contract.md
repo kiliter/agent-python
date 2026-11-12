@@ -1,0 +1,73 @@
+---
+title: 网关契约与连接器组件剖析
+type: component
+tags: [component, gateway, api-contract, xml, json, mock, hot-reload]
+sources:
+  - src/report_agent/domain/api_contract.py
+  - src/report_agent/gateway/base.py
+  - src/report_agent/gateway/unified_xml.py
+  - src/report_agent/gateway/mock.py
+  - src/report_agent/gateway/reloadable.py
+updated: 2026-11-12
+---
+
+# 网关契约与连接器组件剖析
+
+<!-- #Created By AiCoding(codex) -->
+
+外部业务系统取数能力由声明式领域模型 `src/report_agent/domain/api_contract.py` 与连接器实现层 `src/report_agent/gateway/` 共同承载，无需编写业务接口专属代码即可对接统一网关 XML/JSON 协议。
+
+## 1. 声明式接口契约（`domain/api_contract.py#ApiContract`）
+
+每个 `apis/<name>.yaml` 解析为一个不可变 `ApiContract` 实例，包含四大核心段落：
+
+1. **连接器与治理策略**：
+   - `connector`：`unified-gateway-xml`（默认）或 `unified-gateway-json`；
+   - `processCode`：统一网关业务编码（如 `querySMSSendInfo`）；
+   - `timeoutMs`（100～120,000 ms）、`retry.maxAttempts`（1～5 次，网络/5xx 指数退避重试）与 `idempotent`。
+2. **入参 Schema（`input`）**：标准 JSON Schema（`type: object`），调用前由 `Draft202012Validator` 严格拦截非法入参。
+3. **请求报文构造（`request` + `build_request`）**：
+   - 自动填充统一网关公共头默认值（`request_type="1"`、`organ_id="1"`、`request_source="1"`、`sysfunc_id=processCode` 等），允许契约按需覆盖（如 `BOSS_QryBalanceFlowLog` 覆盖 `organ_id="3001"`、`verify_code="1002"`）；
+   - 支持 `${入参名}` 字符串插值，以及平台内置动态占位符 **`${$now}`**（定义在 `BUILTIN_PLACEHOLDERS`，每次组包时动态注入当前本地时间 `yyyyMMddHHmmss`）。
+4. **响应判定与多模式记录抽取（`response`）**：
+   - **判定顺序**：**先判 `noData`（如 `resp_desc` 含“无短信记录”或靓号 `ret_code == "1"`），命中即视为 `ok=True, count=0, noData=True`**；未命中时再判 `success`（`equals` + `missingAs: "success" | "failure"`）。
+   - **记录抽取（`RecordsSpec`）**：
+     - `mode` 支持 5 种形态：`auto`（默认，兼容列表与单对象）、`list`、`object`、`scalar`、`none`；
+     - 支持点分深层列路径（如靓号接口的 `level_info.event_name`，遇到多档次列表时自动序列化为 JSON 数组文本以便后续解析）与嵌套对象扁平化 `flatten: true`。
+
+## 2. 统一网关客户端（`gateway/unified_xml.py#UnifiedGatewayClient`）
+
+### 2.1 Jackson 3 字节级兼容 XML 序列化（`build_request_xml`）
+
+前代 Java 版的 `CommonRequestToolService#toXmlRequest` 使用 Jackson 3 `XmlMapper` 序列化 `XmlBaseRequest` POJO，具有鲜明特征。`build_request_xml` 提供两种 `GATEWAY_XML_STYLE`：
+- **`style="java"`（默认）**：顶层字段严格按字母序排列（`_JAVA_FIELD_ORDER`），契约未显式设置的公共字段输出 `<operator_id xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:nil="true"/>`，空字符串输出普通空标签 `<sendPort/>`，不带 `<?xml ...?>` 声明头。经 `tools/java_migration/check_skills.py` 对拍，与 Java 编译产物生成的真实报文**逐字节完全一致**。
+- **`style="clean"`**：带 UTF-8 XML 声明头，省略值为 `None` 的公共字段标签。
+
+### 2.2 防 XXE 安全的 XML 解析（`parse_xml`）
+
+标准库 `xml.etree.ElementTree` 默认允许内部实体扩展（存在 Billion Laughs 内存放大风险）。`parse_xml` 自定义 `_SafeXMLTreeBuilder`，在底层 `expat` 解析器上挂载 `EntityDeclHandler` 与 `StartDoctypeDeclHandler` 钩子，一旦响应报文包含任何 `<!DOCTYPE` 或 `<!ENTITY` 声明立即抛出 `DefusedXmlException` 拒绝解析，并在解析后统一剥离 XML Namespace 前缀以简化路径寻址。
+
+### 2.3 JSON 连接器支持
+
+当 `contract.connector == "unified-gateway-json"` 时，`UnifiedGatewayClient` 自动将构造好的 `operation_in` 报文以 `application/json` 发送，并用 `json.loads` 解析响应树，复用同一套 `extract_from_parsed` 判定与列抽取逻辑。
+
+## 3. 本地 Mock 网关（`gateway/mock.py#MockGatewayClient`）
+
+当 `GATEWAY_MODE=mock` 时启用，无需连接企业内网网关即可本地开发、跑单测与工作台试运行：
+- **双目录查找优先级**：先查 `DATA_DIR/mock-gateway/`（方便运维放临时案例报文），未命中再回退 `SEED_DIR/mock-gateway/`；
+- **按路由值匹配特定案例**：优先查找 `{api_name}.{route_value}.{xml|json}`（如 `querySMSSendInfo.13900000000.xml` 模拟无短信空结果），未命中再回退通用正例 `{api_name}.{xml|json}`；
+- 解析走与线上完全相同的 `parse_xml` + `extract_from_parsed`，确保契约路径配置在 Mock 阶段即可得到真实检验。
+
+## 4. 零中断热重载包装器（`gateway/reloadable.py#ReloadableGatewayClient`）
+
+管理员在工作台切换 `mock` / `live` 模式或修改网关地址、超时与 XML 风格时，不能直接 `aclose()` 正在处理线上并发请求的 `httpx.AsyncClient`。`ReloadableGatewayClient` 采用**引用计数槽位（`_Slot`）**机制：
+1. 每次 `call()` 在锁内将当前活跃 `_Slot.inflight` 计数 `+1`，释放锁后执行异步网络 I/O；
+2. `reload(new_client)` 原子替换活跃 `_Slot` 并将旧槽位标记为 `retired = True`；
+3. 若替换瞬间旧槽位 `inflight == 0` 则立即关闭旧客户端；若有在途请求，则由最后一个在 `finally` 中把 `inflight` 减至 `0` 的请求协程负责异步关闭旧客户端。
+
+## 相关页面
+
+- [文件化资源存储与 Git 原子发布机制](../architecture/resource-release-and-store.md)
+- [3 个内置网关接口契约速查](../reference/apis-catalog.md)
+- [新增纯文本 Skill 与声明式网关接口契约指南](../guides/add-skill-and-api.md)
+- [Java 资源迁移与一致性对拍指南](../guides/java-migration-and-verification.md)

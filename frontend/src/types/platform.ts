@@ -3,7 +3,9 @@
 export type ResourceStatus = 'DRAFT' | 'PUBLISHED' | 'PUBLISHED_DRAFT' | 'OFFLINE'
 export type RunStatus = 'SUCCESS' | 'PARTIAL' | 'FAILED'
 export type EvidenceType = 'quote' | 'input' | 'derive'
-export type FieldType = '文本' | '枚举' | '日期'
+export type FieldType = '文本' | '枚举' | '日期' | '列表'
+// #Created By AiCoding(codex) 列表字段（type=列表）的列类型
+export type ColumnType = '文本' | '枚举'
 export type MissingStrategy = '保留占位' | '置空' | '默认值'
 export type ApiConnector = 'unified-gateway-xml' | 'unified-gateway-json'
 export type ApiEditMode = 'form' | 'split' | 'yaml'
@@ -71,12 +73,22 @@ export interface TemplateItem {
   draftRevision?: number | null
 }
 
+// #Created By AiCoding(codex) 列表字段的一列（value 为行对象数组，每行以列名为键）
+export interface TemplateFieldColumn {
+  name: string
+  type: ColumnType
+  enumValues: string[]
+  description: string
+}
+
 export interface TemplateField {
   name: string
   fromTemplate?: string
   visible: boolean
   type: FieldType
   enumValues: string[]
+  /** 列表字段的列定义（非列表字段为空数组） */
+  columns?: TemplateFieldColumn[]
   evidenceType: EvidenceType
   whenMissing: MissingStrategy
   defaultValue: string
@@ -88,6 +100,8 @@ export interface TemplateField {
   // 以下为运行结果（试运行 / 运行详情中有值）
   runStatus: 'found' | 'not_found'
   runValue: string
+  /** 列表字段的运行结果行（runValue 为其 JSON 文本） */
+  runRows?: Record<string, string>[]
   evidenceLabel: string
   evidenceTarget: EvidenceTarget
   reasoning: string

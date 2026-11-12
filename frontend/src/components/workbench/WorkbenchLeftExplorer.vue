@@ -253,9 +253,19 @@ function fieldDotMeta(field: TemplateField): { cls: string; title: string } {
   const rf = runFieldMap.value.get(field.name)
   if (rf) {
     if (rf.runStatus === 'found') {
+      if (rf.type === '列表') {
+        const n = Array.isArray(rf.runRows) ? rf.runRows.length : (rf.runValue || '').trim() === '[]' ? 0 : -1
+        return {
+          cls: 'ok',
+          title: n === 0 ? '当前快照已查证：无记录（0 行）' : n > 0 ? `当前快照已命中：共 ${n} 行` : '当前快照已命中',
+        }
+      }
       return { cls: 'ok', title: `当前快照已命中：${rf.runValue || '有效值'}` }
     }
-    return { cls: 'warn', title: '当前快照未取到证据，按缺失兜底策略处理' }
+    return {
+      cls: 'warn',
+      title: rf.type === '列表' ? '当前快照缺失：未取到列表结果' : '当前快照未取到证据，按缺失兜底策略处理',
+    }
   }
   if ((field.bodyUsageCount ?? 0) > 0) {
     return { cls: 'ok', title: `已在模板正文中引用 ${field.bodyUsageCount} 次` }
@@ -270,6 +280,9 @@ function fieldSubtitle(field: TemplateField): string {
     typeText = `日期 (${field.format})`
   } else if (field.type === '枚举' && field.enumValues?.length) {
     typeText = `枚举 (${field.enumValues.length}项)`
+  } else if (field.type === '列表' && field.columns?.length) {
+    // #Created By AiCoding(codex) 列表字段显示列名
+    typeText = `列表 (${field.columns.map(c => c.name).join('/')})`
   }
   return `${typeText} · 引用 ${field.bodyUsageCount ?? 0} 次`
 }

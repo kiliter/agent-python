@@ -1,4 +1,14 @@
 # #Created By AiCoding(codex) 短信发送记录查询（统一网关 XML）
+# 迁移自 Java：business-sms / second-confirmation-sms / verification-sms / original-package-name /
+# reminder-sms / renewal-reminder-sms / number-portability-sms / billing-cycle-sms 的 assembly.groovy。
+# 与 seed 版本相比的修正：
+#   1. 结束时间说明去掉“跨度不超过 31 天”——Java 的 renewal-reminder-sms 一次查询到期基准日前后各 31 天（共 63 天），
+#      billing-cycle-sms 按自然月查询；契约本身从不限制跨度。
+#   2. records.columns 补齐真实响应中的 smsSendStatus / remark / staffId / userMobile。
+#   3. retry 改为 1：Java xml-nytool（WebClient）不做任何重试。
+# 请求报文与 Java 一致：route_type=2、route_value=手机号；content 按 userMobile、startDate、endDate、
+# sendType=0、sendPort=空串（输出普通空标签）、busiType=0 的顺序输出；其余公共字段走 XmlBaseRequest 默认值
+# （request_type=1、organ_id=1、request_source=1，operator_id/request_seq/request_time/verify_code 为 xsi:nil）。
 name: querySMSSendInfo
 title: 短信发送记录查询
 description: 按手机号和时间范围，查询系统下发给客户的短信记录（含发送时间、正文）。
@@ -6,7 +16,7 @@ connector: unified-gateway-xml
 processCode: querySMSSendInfo
 timeoutMs: 10000
 retry:
-  maxAttempts: 2
+  maxAttempts: 1
 idempotent: true
 input:
   type: object
@@ -20,11 +30,11 @@ input:
     开始时间:
       type: string
       pattern: '^\d{14}$'
-      description: yyyyMMddHHmmss
+      description: yyyyMMddHHmmss，通常为某天的 000000
     结束时间:
       type: string
       pattern: '^\d{14}$'
-      description: yyyyMMddHHmmss，不早于开始时间，跨度不超过 31 天
+      description: yyyyMMddHHmmss，通常为某天的 235959，不早于开始时间
 request:
   route_type: '2'
   route_value: ${手机号码}
@@ -41,15 +51,20 @@ response:
     equals: '0000'
     missingAs: success
   noData:
+    # 现网无短信时返回 resp_code=1、resp_desc=“号码不存在或该时间段内无短信记录!”，Java 各短信 Skill 均按正常空结果处理
     - path: operation_out.response.resp_desc
       contains: 无短信记录
   records:
     path: operation_out.content.smsList
     columns:
       smsSendTime: 发送时间 yyyyMMddHHmmss
-      smsContent: 短信正文
+      smsContent: 短信正文（原文，可能含换行）
       sendPort: 发送端口，如 10086
       sendType: 上行/下行
-      busiType: 短信业务类型
+      busiType: 短信业务类型，如 业务通知
+      smsSendStatus: 发送状态
+      userMobile: 接收号码
+      remark: 备注
+      staffId: 操作员
   summary:
     maxPreviewChars: 60

@@ -162,8 +162,13 @@ def build_container(settings: Settings, model=None, gateway: GatewayClient | Non
     )
 
 
-def seed(layout: DataLayout, publisher: Publisher, cases: CaseStore, seed_dir: Path = SEED_DIR) -> None:
-    """数据目录为空时，用内置示例资源生成第一个版本，并放入示例用例和 mock 网关响应。"""
+def seed(layout: DataLayout, publisher: Publisher, cases: CaseStore, seed_dir: Path | None = None) -> None:
+    """数据目录为空时，用内置示例资源生成第一个版本，并放入示例用例和 mock 网关响应。
+
+    seed_dir 为空时在调用时刻读取模块级 SEED_DIR（而不是定义时绑定），便于测试替换为测试夹具目录。
+    #Created By AiCoding(codex)
+    """
+    seed_dir = seed_dir or SEED_DIR
     rs = load_resource_dir(seed_dir)
     changes: list[Change] = [Change(ResourceRef("system-prompt", SYSTEM_PROMPT_KEY), "publish", "系统提示词",
                                     source="tree", source_dir=seed_dir)]

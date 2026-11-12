@@ -13,7 +13,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
-FieldType = Literal["string", "enum", "date"]
+FieldType = Literal["string", "enum", "date", "list"]
+ColumnType = Literal["string", "enum"]
 EvidenceType = Literal["quote", "input", "derive"]
 WhenMissing = Literal["placeholder", "empty", "value"]
 
@@ -34,6 +35,18 @@ class InputDef(_Base):
     sample: str = ""
 
 
+class ColumnDef(_Base):
+    """列表字段（type=list）的一列。#Created By AiCoding(codex)
+
+    每行是一个对象，键为列名；列只支持文本（string）与枚举（enum）两种类型。
+    """
+
+    name: str
+    type: ColumnType = "string"
+    values: list[str] = Field(default_factory=list, description="枚举列的可选值")
+    description: str = ""
+
+
 class FieldDef(_Base):
     """模板字段：报告中要填的值，或只参与判断的中间字段。"""
 
@@ -41,12 +54,23 @@ class FieldDef(_Base):
     visible: bool = True
     type: FieldType = "string"
     values: list[str] = Field(default_factory=list, description="枚举可选值")
+    # #Created By AiCoding(codex) 列表字段的列定义；仅 type=list 时允许填写
+    columns: list[ColumnDef] = Field(default_factory=list, description="列表字段（type=list）的列定义")
     format: str | None = Field(default=None, description="日期字段的展示格式，如 yyyy年M月d号")
     evidence: EvidenceType = "quote"
     quoteWhole: bool = Field(default=False, description="quote 字段的值必须与引用的整列/整段原文完全一致")
     whenMissing: WhenMissing = "placeholder"
     defaultValue: str = ""
     description: str = ""
+
+    @property
+    def is_list(self) -> bool:
+        """是否为列表字段。#Created By AiCoding(codex)"""
+        return self.type == "list"
+
+    def column_names(self) -> list[str]:
+        """列表字段的列名（保持声明顺序）。#Created By AiCoding(codex)"""
+        return [c.name for c in self.columns]
 
 
 class TemplateDef(_Base):

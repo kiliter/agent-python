@@ -30,7 +30,15 @@ def detail_view(o: dict[str, Any], with_messages: bool = False) -> dict[str, Any
         fname = str(fo["name"])
         fd = by_name.get(fname)
         if fd is None:
-            fd = FieldDef(name=fname, visible=bool(fo.get("visible", True)))
+            is_list = fo.get("type") == "list" or isinstance(fo.get("columns"), list)
+            cols = [c for c in (fo.get("columns") or []) if isinstance(c, dict)] if is_list else []
+            fd = FieldDef(
+                name=fname,
+                visible=bool(fo.get("visible", True)),
+                type="list" if is_list else "string",
+                columns=cols,
+                whenMissing="empty" if is_list else "placeholder",
+            )
         fields.append(field_to_dto(fd, run=fo))
     inputs = o.get("inputs") if isinstance(o.get("inputs"), dict) else {}
     found_count = int(o.get("foundCount") if o.get("foundCount") is not None
@@ -80,7 +88,9 @@ def report_view(o: dict[str, Any]) -> dict[str, Any]:
         "fields": [{"name": f["name"], "visible": bool(f.get("visible", True)), "shown": bool(f.get("shown", False)),
                     "status": f.get("status") or f.get("runStatus") or "not_found", "value": f.get("value"),
                     "source": _source(f),
-                    "reason": f.get("reasoning") if (f.get("status") or f.get("runStatus")) != "found" else None}
+                    "reason": f.get("reasoning") if (f.get("status") or f.get("runStatus")) != "found" else None,
+                    # #Created By AiCoding(codex) 列表字段附带列定义（value 为行对象数组）
+                    **({"columns": f["columns"]} if isinstance(f.get("columns"), list) else {})}
                    for f in raw_fields],
         "missingShown": o.get("missingShown") or [], "durationMs": int(o.get("durationMs") or 0),
     }

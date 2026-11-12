@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -15,12 +16,14 @@ from ..domain.api_contract import ApiContract, fixed_params
 from ..domain.jinja_env import BodySyntaxError, parse_body
 from ..domain.resources import ResourceSet, _RESERVED_FIELD_NAMES
 from ..domain.skill import Skill
-from ..domain.template import FieldDef, InputDef, Template
+from ..domain.template import ColumnDef, FieldDef, InputDef, Template
 from ..store.fsutil import fmt_time
 from ..store.service import ResourceState
 
-TYPE_TO_LABEL = {"string": "文本", "enum": "枚举", "date": "日期"}
+TYPE_TO_LABEL = {"string": "文本", "enum": "枚举", "date": "日期", "list": "列表"}
 LABEL_TO_TYPE = {v: k for k, v in TYPE_TO_LABEL.items()}
+COLUMN_TYPE_TO_LABEL = {"string": "文本", "enum": "枚举"}
+LABEL_TO_COLUMN_TYPE = {v: k for k, v in COLUMN_TYPE_TO_LABEL.items()}
 MISSING_TO_LABEL = {"placeholder": "保留占位", "empty": "置空", "value": "默认值"}
 LABEL_TO_MISSING = {v: k for k, v in MISSING_TO_LABEL.items()}
 PRESETS = {r"^1\d{10}$": "手机号 (^1\\d{10}$)", r"^\d{14}$": "yyyyMMddHHmmss (^\\d{14}$)",
@@ -87,11 +90,38 @@ def ref_by_fields(tpl: Template) -> dict[str, list[str]]:
     return result
 
 
+def column_to_dto(c: ColumnDef) -> dict[str, Any]:
+    """ColumnDef → 前端 TemplateFieldColumn。#Created By AiCoding(codex)"""
+    return {"name": c.name, "type": COLUMN_TYPE_TO_LABEL.get(c.type, "文本"), "enumValues": list(c.values),
+            "description": c.description}
+
+
+def dto_to_column(d: dict[str, Any]) -> dict[str, Any]:
+    """前端 TemplateFieldColumn → ColumnDef 字典（类型兼容中文标签与英文枚举）。#Created By AiCoding(codex)"""
+    ctype = LABEL_TO_COLUMN_TYPE.get(d.get("type", ""), d.get("type") or "string")
+    raw_vals = d.get("enumValues") if d.get("enumValues") is not None else (d.get("values") or [])
+    return {
+        "name": str(d.get("name", "")).strip(), "type": ctype,
+        "values": [str(v) for v in raw_vals if v is not None] if ctype == "enum" and isinstance(raw_vals, list) else [],
+        "description": "" if d.get("description") is None else str(d["description"]),
+    }
+
+
+def _run_value_text(value: Any) -> str:
+    """运行值转为前端展示文本：列表/对象转 JSON，其余转字符串。#Created By AiCoding(codex)"""
+    if value is None:
+        return ""
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
 def field_to_dto(f: FieldDef, usage: dict[str, int] | None = None, ref_by: list[str] | None = None,
                  run: dict[str, Any] | None = None, from_template: str | None = None) -> dict[str, Any]:
     """FieldDef → 前端 TemplateField。run 为某次运行中该字段的结果。"""
     dto: dict[str, Any] = {
         "name": f.name, "visible": f.visible, "type": TYPE_TO_LABEL.get(f.type, "文本"), "enumValues": list(f.values),
+        "columns": [column_to_dto(c) for c in f.columns],
         "evidenceType": f.evidence, "whenMissing": MISSING_TO_LABEL.get(f.whenMissing, "保留占位"),
         "defaultValue": f.defaultValue, "description": f.description, "format": f.format, "quoteWhole": f.quoteWhole,
         "bodyUsageCount": (usage or {}).get(f.name, 0), "refByFields": ref_by or [],
@@ -103,9 +133,9 @@ def field_to_dto(f: FieldDef, usage: dict[str, int] | None = None, ref_by: list[
     if run:
         run_status = run.get("status") or run.get("runStatus") or "not_found"
         raw_val = run.get("value") if "value" in run else run.get("runValue")
-        run_val = "" if raw_val is None else str(raw_val)
+        run_val = _run_value_text(raw_val)
         raw_rendered = run.get("renderedValue")
-        rendered_val = "" if raw_rendered is None else str(raw_rendered)
+        rendered_val = _run_value_text(raw_rendered)
         dto.update({
             "runStatus": run_status,
             "runValue": run_val if run_status == "found" else (
@@ -115,6 +145,9 @@ def field_to_dto(f: FieldDef, usage: dict[str, int] | None = None, ref_by: list[
             "validationFailed": bool(run.get("validationFailed", False)), "shown": bool(run.get("shown", False)),
             "evidence": run.get("evidence") or [],
         })
+        if f.is_list:
+            # #Created By AiCoding(codex) 列表字段额外返回行数组，便于前端以表格展示
+            dto["runRows"] = raw_val if run_status == "found" and isinstance(raw_val, list) else []
     return dto
 
 
@@ -123,9 +156,12 @@ def dto_to_field(d: dict[str, Any]) -> dict[str, Any]:
     ftype = LABEL_TO_TYPE.get(d.get("type", ""), d.get("type") or "string")
     missing = LABEL_TO_MISSING.get(d.get("whenMissing", ""), d.get("whenMissing") or "placeholder")
     raw_vals = d.get("enumValues") if d.get("enumValues") is not None else (d.get("values") or [])
+    raw_cols = d.get("columns") if isinstance(d.get("columns"), list) else []
     out = {
         "name": str(d.get("name", "")).strip(), "visible": bool(d.get("visible", True)), "type": ftype,
         "values": [str(v) for v in raw_vals if v is not None] if ftype == "enum" and isinstance(raw_vals, list) else [],
+        # #Created By AiCoding(codex) 列表字段的列定义；非列表字段忽略
+        "columns": [dto_to_column(c) for c in raw_cols if isinstance(c, dict)] if ftype == "list" else [],
         "evidence": d.get("evidenceType") or d.get("evidence") or "quote", "whenMissing": missing,
         "defaultValue": "" if d.get("defaultValue") is None else str(d["defaultValue"]),
         "description": "" if d.get("description") is None else str(d["description"]),

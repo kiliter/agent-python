@@ -12,6 +12,7 @@ import { usePlatformStore } from '@/stores/platform'
 import { platformApi, errorMessage } from '@/api/platformApi'
 import { resolveEvidenceInspectorTab } from '@/utils/reportSegments'
 import { sanitizeHtml } from '@/utils/sanitizeHtml'
+import { formatListColumns, parseListColumns } from '@/utils/listColumns'
 import type {
   EvidenceType,
   FieldType,
@@ -78,8 +79,10 @@ function switchRightMode(mode: 'inspector' | 'evidence') {
 const fieldForm = ref<TemplateField | null>(null)
 const originalFieldName = ref<string | undefined>(undefined)
 const enumText = ref('')
+// #Created By AiCoding(codex) 列表字段的列定义编辑文本（每行：列名|类型|可选值|说明）
+const columnsText = ref('')
 
-const fieldTypes: FieldType[] = ['文本', '枚举', '日期']
+const fieldTypes: FieldType[] = ['文本', '枚举', '日期', '列表']
 const evidenceOptions: Array<{ value: EvidenceType; label: string }> = [
   { value: 'quote', label: '原文引用（单据/报文摘取）' },
   { value: 'input', label: '调用入参（直接读取入参）' },
@@ -111,6 +114,7 @@ function syncFieldFormFromStore() {
     fieldForm.value = fresh
     originalFieldName.value = undefined
     enumText.value = ''
+    columnsText.value = ''
     return
   }
   const src = store.templateFields[store.ideSelectedFieldIdx]
@@ -118,6 +122,7 @@ function syncFieldFormFromStore() {
     fieldForm.value = null
     originalFieldName.value = undefined
     enumText.value = ''
+    columnsText.value = ''
     return
   }
   const copy = deepClone(src)
@@ -125,6 +130,7 @@ function syncFieldFormFromStore() {
   fieldForm.value = copy
   originalFieldName.value = src.name
   enumText.value = copy.enumValues.join('\n')
+  columnsText.value = formatListColumns(copy.columns)
 }
 
 watch(
@@ -188,6 +194,18 @@ function handleApplyField() {
     store.showToast('枚举类型字段请至少配置一个可选值', 'warning')
     return
   }
+  // #Created By AiCoding(codex) 列表字段：解析列定义；证据只能是原文引用或推导，缺失固定按空列表（置空）处理
+  const isList = f.type === '列表'
+  const parsedColumns = isList ? parseListColumns(columnsText.value) : { columns: [], error: '' }
+  if (isList && parsedColumns.error) {
+    store.showToast(parsedColumns.error, 'warning')
+    return
+  }
+  if (isList && f.evidenceType === 'input') {
+    store.showToast('列表字段的取证来源只能是原文引用或逻辑推导', 'warning')
+    return
+  }
+  if (isList) f.whenMissing = '置空'
   const defaultValue = f.whenMissing === '默认值' ? (f.defaultValue || '').trim() : ''
   if (f.whenMissing === '默认值' && !defaultValue) {
     store.showToast('请填写未找到证据时使用的默认值', 'warning')
@@ -203,8 +221,9 @@ function handleApplyField() {
     ...f,
     name,
     enumValues: enums,
+    columns: parsedColumns.columns,
     format: f.type === '日期' ? (f.format || '').trim() || null : null,
-    quoteWhole: f.evidenceType === 'quote' ? Boolean(f.quoteWhole) : false,
+    quoteWhole: f.evidenceType === 'quote' && !isList ? Boolean(f.quoteWhole) : false,
     defaultValue,
     description: (f.description || '').trim(),
   }
@@ -684,6 +703,18 @@ function handleOpenRollbackModal() {
 // ======================================================================== 6. 证据溯源快捷栏联动
 const evidenceFields = computed<TemplateField[]>(() => store.dryRunResult?.fields || [])
 
+/** 证据快捷下拉栏中的字段状态摘要（区分合法空列表 0 行与缺失列表） #Created By AiCoding(codex) */
+function formatRunFieldBrief(rf: TemplateField): string {
+  if (rf.type === '列表') {
+    if (rf.runStatus === 'found') {
+      const n = Array.isArray(rf.runRows) ? rf.runRows.length : (rf.runValue || '').trim() === '[]' ? 0 : -1
+      return n === 0 ? '无记录（0 行）' : n > 0 ? `共 ${n} 行` : rf.runValue || '已命中'
+    }
+    return '缺失（未命中）'
+  }
+  return rf.runStatus === 'found' ? rf.runValue || '已命中' : '未命中'
+}
+
 function onEvidenceFieldChange(e: Event) {
   const val = (e.target as HTMLSelectElement).value
   if (!val) {
@@ -868,6 +899,19 @@ function handleExpandDebugPanel() {
             ></textarea>
           </div>
 
+          <div v-if="fieldForm.type === '列表'" class="form-block">
+            <label class="field-lbl">
+              列定义（每行一列：列名|文本或枚举|可选值用/分隔|说明；正文用 &#123;% for item in 字段 %&#125; 逐行输出 &#123;&#123;item.列名&#125;&#125;）
+              <span class="req-star">*</span>
+            </label>
+            <textarea
+              v-model="columnsText"
+              rows="4"
+              class="ide-textarea mono"
+              placeholder="如：充值时间|文本||充值时间&#10;提醒类型|枚举|语音超额提醒/流量超额提醒|提醒类别"
+            ></textarea>
+          </div>
+
           <div v-if="fieldForm.type === '日期'" class="form-block">
             <label class="field-lbl">日期输出格式</label>
             <input
@@ -890,13 +934,17 @@ function handleExpandDebugPanel() {
             </div>
             <div class="form-block">
               <label class="field-lbl">缺失兜底策略</label>
-              <select v-model="fieldForm.whenMissing" class="ide-select">
+              <select
+                v-model="fieldForm.whenMissing"
+                class="ide-select"
+                :disabled="fieldForm.type === '列表'"
+              >
                 <option v-for="ms in missingStrategies" :key="ms" :value="ms">{{ ms }}</option>
               </select>
             </div>
           </div>
 
-          <label v-if="fieldForm.evidenceType === 'quote'" class="check-row">
+          <label v-if="fieldForm.evidenceType === 'quote' && fieldForm.type !== '列表'" class="check-row">
             <input v-model="fieldForm.quoteWhole" type="checkbox" />
             <span>强制整条原样引用（适用于二次确认短信回执等）</span>
           </label>
@@ -1318,7 +1366,7 @@ function handleExpandDebugPanel() {
                   v-model="caseForm.expectedValues[f.name]"
                   type="text"
                   class="ide-input mono"
-                  placeholder="留空不强制断言"
+                  :placeholder="f.type === '列表' ? '留空不强制断言（[] 表示无记录 0 行）' : '留空不强制断言'"
                 />
               </div>
             </div>
@@ -1483,7 +1531,7 @@ function handleExpandDebugPanel() {
               :key="rf.name"
               :value="rf.name"
             >
-              &#123;&#123;{{ rf.name }}&#125;&#125; · {{ rf.runStatus === 'found' ? rf.runValue || '已命中' : '未命中' }}
+              &#123;&#123;{{ rf.name }}&#125;&#125; · {{ formatRunFieldBrief(rf) }}
             </option>
           </select>
 

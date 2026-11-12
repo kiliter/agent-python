@@ -1,0 +1,63 @@
+# #Created By AiCoding(codex) 预付费充值余额流水查询（统一网关 XML）
+# 迁移自 Java qry-balance/scripts/assembly.groovy + extract.groovy，接口文档《BOSS_QryBalanceFlowLog 预付费充值记录查询--协议.docx》。
+# 请求公共字段与 Java 一致：request_type=1、organ_id=3001、operator_id=空串、route_type=2、route_value=手机号、
+# request_seq=空串、request_source=1、verify_code=1002；content 按 userMobile、cycle 的顺序输出。
+# request_time 与 Java 一致取“当前时间 yyyyMMddHHmmss”，使用平台内置占位符 ${$now}（每次组包取一次）。
+# 每次调用只查一个账期；跨月由模型按账期逐月调用（Java 用 requests 批量顺序调用后聚合）。
+name: BOSS_QryBalanceFlowLog
+title: 预付费充值余额流水查询
+description: 按手机号和账期（yyyyMM）查询客户预付费充值流水（充值时间、支付方式、金额、流水号）。一次只查一个账期。
+connector: unified-gateway-xml
+processCode: BOSS_QryBalanceFlowLog
+timeoutMs: 10000
+retry:
+  maxAttempts: 1
+idempotent: true
+input:
+  type: object
+  required: [手机号码, 账期]
+  additionalProperties: false
+  properties:
+    手机号码:
+      type: string
+      pattern: '^\d{11}$'
+      description: 11 位客户号码（只含数字）
+    账期:
+      type: string
+      pattern: '^\d{4}(0[1-9]|1[0-2])$'
+      description: 账期 yyyyMM，如 202607
+request:
+  request_type: '1'
+  organ_id: '3001'
+  operator_id: ''
+  route_type: '2'
+  route_value: ${手机号码}
+  request_seq: ''
+  request_time: ${$now}
+  request_source: '1'
+  verify_code: '1002'
+  content:
+    userMobile: ${手机号码}
+    cycle: ${账期}
+response:
+  success:
+    # Java：缺少 resp_code 或 resp_code≠0000（如 7003 能力编排执行错误）一律视为失败，不得当作无流水
+    path: operation_out.response.resp_code
+    equals: '0000'
+    missingAs: failure
+  records:
+    # 业务成功但没有 listBusiRec 时为 0 条记录（Java 返回 []）
+    path: operation_out.content.listBusiRec
+    columns:
+      payDatetime: 充值时间 yyyyMMddHHmmss（模板“充值时间”原样取此列）
+      payTypeName: 支付方式名称（模板“支付方式”原样取此列）
+      amount: 充值金额，接口原值（单位以接口为准，Java 不做分转元，模板“充值金额”原样取此列）
+      soNbr: 流水号（模板“流水号”原样取此列）
+      svcNum: 充值号码
+      channelId: 充值渠道
+      acctbookType: 账本类型
+      charFrom: 资金来源，如 现金
+      paidMonth: 缴费账期 yyyyMM
+      tradeOpId: 交易操作员
+  summary:
+    maxPreviewChars: 60

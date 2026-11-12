@@ -20,7 +20,7 @@ ADMIN_BOOTSTRAP_PASSWORD=change-me uv run report-agent serve    # http://127.0.0
 uv run pytest                              # 运行测试（不调用真实模型）
 ```
 
-- 第一次启动时，如果数据目录（`DATA_DIR`，默认 `./data`）为空，会用内置示例资源生成第一个版本 `r1`。示例资源包括模板 1001、两个 Skill、短信查询接口和系统提示词，同时放入一条示例用例和一份 mock 网关响应。
+- 第一次启动时，如果数据目录（`DATA_DIR`，默认 `./data`）为空，会用内置资源生成第一个版本 `r1`。内置资源从 Java 版（`/Users/zhangjialin/IdeaProjects/agent`）全量迁移而来：33 个模板（ID 100–132，与 Java 资源库一致）、11 个 Skill、3 个接口契约（`querySMSSendInfo`、`BOSS_QryBalanceFlowLog`、`cc_pretty_num_info_query`）、系统提示词和 mock 网关响应。迁移工具与一致性校验见 [tools/java_migration/README.md](tools/java_migration/README.md)。测试专用的示例模板 1001 在 `tests/fixtures/seed/`。
 - 默认 `GATEWAY_MODE=mock`，接口调用读取 `data/mock-gateway/<接口名>.xml`。对接真实统一网关时，改为 `live` 并配置 `GATEWAY_URL`、`GATEWAY_APP_ID`、`GATEWAY_ACCESS_TOKEN`。
 - 接口文档：`http://127.0.0.1:8000/docs`。
 
@@ -57,6 +57,31 @@ POST /api/v1/reports {templateId, params, document}
 | `quote` | 引用的接口记录（`resultId`、`row`、`column`）或单据片段必须真实存在，值必须逐字出现在原文中。字段设置了 `quoteWhole` 时，值必须与原文完全一致 |
 | `input` | 值必须等于引用的入参 |
 | `derive` | 引用的来源都必须存在。引用了 `format_date` 时，值必须等于工具输出 |
+
+<!-- #Created By AiCoding(codex) 列表字段与 Pebble 对齐说明 -->
+列表字段（`type: list`）：值是行对象数组，正文用 `{% for item in 字段 %}…{{item.列名}}…{% endfor %}` 逐行输出。
+
+```yaml
+- name: 充值流水
+  type: list
+  evidence: quote          # 只能是 quote 或 derive
+  whenMissing: empty       # 必须为 empty：找不到时按空列表渲染，循环不输出任何内容
+  description: 客户的充值记录
+  columns:                 # 至少一列；列名规则同字段名
+    - name: 充值时间
+      description: 充值时间
+    - name: 提醒类型
+      type: enum           # 列类型只能是 string（默认）或 enum
+      values: [语音超额提醒, 流量超额提醒]
+```
+
+- 交卷时 `value` 为 `[{"充值时间": "...", "提醒类型": "..."}]`，每行必须且只能包含声明的列，枚举列只能填可选值。
+- `quote` 列表字段：每个非空的文本列单元格都必须逐字出现在某条被引用的接口记录（整条记录任一列）或单据片段中；枚举列是归类结论，不做逐字核对。
+- 发布校验会检查：循环变量的 `item.列名` 必须是已声明的列；`for` 只能遍历列表字段。
+
+正文渲染与 Pebble 3.2.2 默认行为对齐：每个标签（`{% %}`、`{# #}`、`{{ }}`）后紧跟的一个换行会被去掉（不去掉标签前的缩进）；
+另提供 `hasDigit` 测试（`{% if 标准资费 is hasDigit %}`），值中含有任意数字字符时为真，缺失字段为假。
+渲染上下文统一由 `runtime/render.py` 的 `build_render_context` 生成。
 
 ## 文件存储（PVC）
 
@@ -123,7 +148,7 @@ src/report_agent/
 ├── gateway/             统一网关 XML 连接器、mock 网关
 ├── runtime/             智能体：工具、交卷结构、证据校验、提示词、运行编排
 ├── api/                 HTTP 接口、认证、前端数据结构转换
-└── seed/                内置示例资源
+└── seed/                内置资源（由 tools/java_migration 从 Java 版迁移生成）
 tests/                   单元测试与接口测试（scripted_model.py 是按演示脚本行动的假模型）
 ```
 

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- #Created By AiCoding(codex) cc_pretty_num_info_query 非靓号/号码不存在响应（ret_code=1，按接口文档字段说明编写），手机号 13900000000 时返回。 -->
+<operation_out>
+    <process_code>cc_pretty_num_info_query</process_code>
+    <content>
+        <ret_code>1</ret_code>
+        <ret_msg>13900000000号码不存在</ret_msg>
+    </content>
+</operation_out>

@@ -12,8 +12,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from report_agent.container import SEED_DIR
-from report_agent.domain.api_contract import ApiContract, ConnectorType, fixed_params, parse_api_yaml
+from fixture_paths import SEED_DIR
+from report_agent.domain.api_contract import ConnectorType, fixed_params, parse_api_yaml
 from report_agent.gateway.base import MAX_JSON_CHARS, extract_json_records, parse_json_body
 from report_agent.gateway.mock import MockGatewayClient
 from report_agent.gateway.unified_xml import (UnifiedGatewayXmlClient, build_request_json, build_request_preview,

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- #Created By AiCoding(codex) querySMSSendInfo 无短信响应（原样取自 Java 仓库 docs/sms/无短信的返回值样式.txt），手机号 13900000000 时返回 -->
+<operation_out>
+<emergency_status>0</emergency_status>
+<request_type>1</request_type>
+<response_time>20260902103230</response_time><process_code>querySMSSendInfo</process_code><request_source>1</request_source>
+<response_seq>1</response_seq>
+<response>
+<resp_result>1</resp_result>
+<resp_code>1</resp_code><resp_desc>号码不存在或该时间段内无短信记录!</resp_desc></response>
+</operation_out>

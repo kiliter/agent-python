@@ -13,9 +13,20 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import report_agent.container as container_module  # noqa: E402
 from report_agent.config import Settings  # noqa: E402
-from report_agent.container import SEED_DIR, build_container  # noqa: E402
+from report_agent.container import build_container  # noqa: E402
+from fixture_paths import SEED_DIR  # noqa: E402
 from scripted_model import scripted_model  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _use_fixture_seed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """所有测试的空库初始化都使用 tests/fixtures/seed，不读取生产内置资源 src/report_agent/seed。
+
+    #Created By AiCoding(codex)
+    """
+    monkeypatch.setattr(container_module, "SEED_DIR", SEED_DIR)
 
 
 @pytest.fixture

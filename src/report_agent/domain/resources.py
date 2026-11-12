@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -181,6 +182,81 @@ def _ast_variable_lines(tree: nodes.Template | None) -> dict[str, list[int]]:
     return out
 
 
+def _bad_identifier(name: str) -> bool:
+    """字段名/列名是否不合法（与字段名规则一致）。#Created By AiCoding(codex)"""
+    return (not name.isidentifier() or name.startswith("_") or name in _RESERVED_FIELD_NAMES
+            or bool(_BAD_NAME_RE.search(name)))
+
+
+def _loop_attr_uses(items: Iterable[nodes.Node], var: str) -> list[tuple[str, int | None]]:
+    """收集 items 及其子树中对循环变量 var 的属性/下标访问（var.列名、var["列名"]），返回 (列名, 行号)。
+
+    #Created By AiCoding(codex)
+    遇到内层 for 重新绑定同名循环变量时，只检查其迭代表达式，不再进入内层循环体，避免误报。
+    """
+    out: list[tuple[str, int | None]] = []
+    for child in items:
+        if isinstance(child, nodes.For) and isinstance(child.target, nodes.Name) and child.target.name == var:
+            out.extend(_loop_attr_uses([child.iter], var))
+            continue
+        if isinstance(child, (nodes.Getattr, nodes.Getitem)) and isinstance(child.node, nodes.Name) \
+                and child.node.name == var:
+            attr: str | None = None
+            if isinstance(child, nodes.Getattr):
+                attr = child.attr
+            elif isinstance(child.arg, nodes.Const) and isinstance(child.arg.value, str):
+                attr = child.arg.value
+            if attr is not None:
+                out.append((attr, child.lineno))
+        out.extend(_loop_attr_uses(child.iter_child_nodes(), var))
+    return out
+
+
+def _list_field_issues(tree: nodes.Template, d: TemplateDef) -> list[tuple[str, str, str, str, int | None]]:
+    """校验正文中列表字段的用法，返回 (level, code, message, field, line)。
+
+    #Created By AiCoding(codex)
+    - {% for x in 字段 %} 只能遍历 type=list 的字段；
+    - 循环体内 x.列名 / x["列名"] 必须是该列表字段声明过的列；
+    - 直接输出整个列表（{{列表字段}}）给出警告。
+    """
+    by_name = {f.name: f for f in d.fields}
+    out: list[tuple[str, str, str, str, int | None]] = []
+    for loop in tree.find_all(nodes.For):
+        it = loop.iter
+        if not isinstance(it, nodes.Name) or it.ctx != "load" or it.name not in by_name:
+            continue
+        fd = by_name[it.name]
+        if not fd.is_list:
+            out.append(("error", "FOR_NON_LIST", f"正文第 {loop.lineno} 行用 for 循环遍历了非列表字段「{fd.name}」，"
+                        "只有 type=list 的字段可以遍历", fd.name, loop.lineno))
+            continue
+        if not isinstance(loop.target, nodes.Name):
+            out.append(("error", "LIST_LOOP_TARGET", f"正文第 {loop.lineno} 行遍历列表字段「{fd.name}」时，"
+                        "循环变量只能是单个名称（如 item）", fd.name, loop.lineno))
+            continue
+        var = loop.target.name
+        cols = set(fd.column_names())
+        scope: list[nodes.Node] = list(loop.body)
+        if loop.test is not None:
+            scope.append(loop.test)
+        seen: set[tuple[str, int | None]] = set()
+        for attr, line in _loop_attr_uses(scope, var):
+            if attr in cols or (attr, line) in seen:
+                continue
+            seen.add((attr, line))
+            out.append(("error", "LIST_COLUMN_UNDEFINED",
+                        f"正文第 {line} 行使用了列表字段「{fd.name}」中未定义的列：{var}.{attr}"
+                        f"（可用列：{'、'.join(fd.column_names()) or '无'}）", fd.name, line))
+    for output in tree.find_all(nodes.Output):
+        for expr in output.nodes:
+            if isinstance(expr, nodes.Name) and expr.ctx == "load" and expr.name in by_name \
+                    and by_name[expr.name].is_list:
+                out.append(("warning", "LIST_PRINTED", f"正文第 {expr.lineno} 行直接输出了列表字段「{expr.name}」，"
+                            "列表字段应使用 {% for item in 字段 %} 逐行输出列", expr.name, expr.lineno))
+    return out
+
+
 def validate_template(tpl: Template, rs: ResourceSet) -> list[Issue]:
     """校验单个模板：字段定义、正文语法与变量引用、Skill 引用。"""
     key = str(tpl.id)
@@ -208,8 +284,7 @@ def validate_template(tpl: Template, rs: ResourceSet) -> list[Issue]:
 
     seen_fields: set[str] = set()
     for f in d.fields:
-        if (not f.name.isidentifier() or f.name.startswith("_") or f.name in _RESERVED_FIELD_NAMES
-                or _BAD_NAME_RE.search(f.name)):
+        if _bad_identifier(f.name):
             add("error", "FIELD_NAME", f"字段名「{f.name}」不合法：只能使用中英文、数字和下划线，不能以下划线或数字开头，且不能为模板保留字", field=f.name)
         if f.name in seen_fields:
             add("error", "FIELD_DUPLICATE", f"字段「{f.name}」重复定义", field=f.name)
@@ -224,6 +299,35 @@ def validate_template(tpl: Template, rs: ResourceSet) -> list[Issue]:
             add("error", "INPUT_EVIDENCE_NO_INPUT", f"字段「{f.name}」证据类型为 input，但模板没有定义入参", field=f.name)
         if not f.description.strip():
             add("warning", "FIELD_NO_DESCRIPTION", f"字段「{f.name}」没有说明，模型无法知道如何取值", field=f.name)
+        # #Created By AiCoding(codex) 列表字段（type=list）的结构校验
+        if f.is_list:
+            if not f.columns:
+                add("error", "LIST_NO_COLUMNS", f"列表字段「{f.name}」至少需要定义一列 columns", field=f.name)
+            seen_cols: set[str] = set()
+            for col in f.columns:
+                if _bad_identifier(col.name) or hasattr(dict, col.name):
+                    add("error", "COLUMN_NAME", f"列表字段「{f.name}」的列名「{col.name}」不合法：只能使用中英文、数字和下划线，"
+                        "不能以下划线或数字开头，不能为模板保留字，也不能与 items、keys、values、get 等内置属性重名",
+                        field=f.name)
+                if col.name in seen_cols:
+                    add("error", "COLUMN_DUPLICATE", f"列表字段「{f.name}」的列「{col.name}」重复定义", field=f.name)
+                seen_cols.add(col.name)
+                if col.type == "enum" and not col.values:
+                    add("error", "COLUMN_ENUM_EMPTY", f"列表字段「{f.name}」的枚举列「{col.name}」没有可选值", field=f.name)
+                if col.type != "enum" and col.values:
+                    add("warning", "COLUMN_VALUES_IGNORED", f"列表字段「{f.name}」的列「{col.name}」不是枚举列，values 将被忽略",
+                        field=f.name)
+            if f.evidence not in ("quote", "derive"):
+                add("error", "LIST_EVIDENCE", f"列表字段「{f.name}」的证据类型只能是 quote 或 derive", field=f.name)
+            if f.whenMissing != "empty":
+                add("error", "LIST_WHEN_MISSING", f"列表字段「{f.name}」的 whenMissing 必须为 empty（找不到时按空列表渲染）",
+                    field=f.name)
+            if f.quoteWhole:
+                add("error", "LIST_QUOTE_WHOLE", f"列表字段「{f.name}」不支持 quoteWhole", field=f.name)
+            if f.values:
+                add("error", "LIST_VALUES", f"列表字段「{f.name}」不能填写 values，枚举值请写在列定义中", field=f.name)
+        elif f.columns:
+            add("error", "COLUMNS_NOT_LIST", f"字段「{f.name}」不是列表字段（type=list），不能定义 columns", field=f.name)
 
     tree: nodes.Template | None = None
     try:
@@ -241,6 +345,9 @@ def validate_template(tpl: Template, rs: ResourceSet) -> list[Issue]:
     for f in d.fields:
         if f.visible and f.name not in used:
             add("warning", "VISIBLE_NOT_IN_BODY", f"字段「{f.name}」标记为显示，但正文没有使用", field=f.name)
+    if tree is not None:
+        for level, code, msg, fname, line in _list_field_issues(tree, d):
+            add(level, code, msg, field=fname, line=line)
 
     for ref in d.skills:
         if ref not in rs.skills:

@@ -3,6 +3,7 @@
 #Created By AiCoding(codex)
 每个模板字段对应一个必填键，键名就是字段名：
   - 枚举字段的 value 限定为可选值；
+  - 列表字段（type=list）的 value 为行对象数组，每列一个必填键，枚举列限定可选值；
   - evidence 只允许该字段证据类型对应的来源（quote → api/document，input → input，derive → 全部）；
   - input 证据的 key、field 证据的 name 限定为本模板的入参名、字段名。
 这样模型照着 Schema 填就不会漏字段、写错字段名或填出范围外的枚举值；
@@ -25,12 +26,12 @@ class _Strict(BaseModel):
 
 
 class ApiEvidence(_Strict):
-    """引用接口结果中的某条记录的某一列。"""
+    """引用接口结果中的某条记录的某一列（列表字段为空数组且接口无命中记录时，row 可填 0、column 可填空串）。"""
 
     type: Literal["api"]
     resultId: str = Field(description="call_api 返回的 resultId，如 r1")
-    row: int = Field(description="query_result 返回的 row")
-    column: str = Field(description="列名，如 smsContent")
+    row: int = Field(default=0, description="query_result 返回的 row；列表字段 value=[] 且接口无命中记录时可填 0")
+    column: str = Field(default="", description="列名，如 smsContent；列表字段 value=[] 且接口无命中记录时可填任意列名或空串")
 
     @field_validator("row", mode="before")
     @classmethod
@@ -48,10 +49,29 @@ class DocumentEvidence(_Strict):
 
 
 class ToolEvidence(_Strict):
-    """引用平台工具的输出（如 format_date）。"""
+    """引用平台工具的输出（如 format_date，或列表字段 value=[] 时引用 call_api / query_result 的 callId）。"""
 
     type: Literal["tool"]
     callId: str = Field(description="工具返回的 callId，如 t3")
+
+
+def _build_row_model(f: FieldDef, model_name: str) -> type[BaseModel]:
+    """生成列表字段一行的模型：每列一个必填键（别名为列名），枚举列限定可选值，禁止多余键。
+
+    #Created By AiCoding(codex)
+    Python 属性名用 c0、c1…，避免中文列名与 BaseModel 内置属性冲突；序列化、Schema 均使用列名。
+    """
+    cols: dict[str, Any] = {}
+    for j, col in enumerate(f.columns):
+        col_type: Any = Literal[tuple(col.values)] if col.type == "enum" and col.values else str  # type: ignore[valid-type]
+        desc = col.description.strip() or col.name
+        if col.type == "enum" and col.values:
+            desc += f"；可选值：{'/'.join(col.values)}"
+        cols[f"c{j}"] = (col_type, Field(alias=col.name, description=desc))
+    return create_model(
+        model_name, __config__=ConfigDict(extra="forbid"),
+        __doc__=f"列表字段「{f.name}」的一行。", **cols,
+    )
 
 
 def build_report_model(template: Template) -> type[BaseModel]:
@@ -78,6 +98,9 @@ def build_report_model(template: Template) -> type[BaseModel]:
 
     def evidence_types(f: FieldDef) -> list[type[BaseModel]]:
         if f.evidence == "quote":
+            # #Created By AiCoding(codex) 列表字段合法为空（value=[]）时允许引用 tool 证据证明已查询数据源；非空时由 EvidenceChecker 拦截 tool
+            if f.is_list:
+                return [ApiEvidence, DocumentEvidence, ToolEvidence]
             return [ApiEvidence, DocumentEvidence]
         if f.evidence == "input":
             return [InputEvidence] if InputEvidence else [DocumentEvidence]
@@ -92,6 +115,34 @@ def build_report_model(template: Template) -> type[BaseModel]:
     model_fields: dict[str, Any] = {}
     for idx, f in enumerate(d.fields):
         kinds = evidence_types(f)
+        if f.is_list:
+            # #Created By AiCoding(codex) 列表字段：支持 status=found 且 value=[] 表示已核查无记录；not_found 表示入参缺失或接口失败
+            cache_key = ("list", idx)
+            row_model = _build_row_model(f, f"Row{suffix}_{idx}")
+            if len(kinds) == 1:
+                list_item_type: Any = kinds[0]
+            else:
+                list_item_type = Annotated[Union[tuple(kinds)], Field(discriminator="type")]  # type: ignore[valid-type]
+            cache[cache_key] = create_model(
+                f"FieldAnswer{suffix}_{len(cache) + 1}", __base__=_Strict,
+                status=(Literal["found", "not_found"], Field(
+                    description="found=已核查数据源并得出确定列表（有记录填行数组，接口调用成功且确无匹配记录填 []）；"
+                                "not_found=缺少必要入参、前置依赖缺失或接口调用失败无法获知结果")),
+                value=(list[row_model] | None, Field(  # type: ignore[valid-type]
+                    default=None,
+                    description="行对象数组，每行包含全部列；接口调用成功且确无匹配记录时 status=found 且填 []；not_found 时为 null")),
+                evidence=(list[list_item_type], Field(
+                    default_factory=list,
+                    description="取值依据（非空列表覆盖所有行的出处；status=found 且 value=[] 时仍须附上查询证据，如 tool/api/document）")),
+                reasoning=(str, Field(default="", description="判断过程；value=[] 或 not_found 时写明核查过程与原因")),
+            )
+            cols_desc = "、".join(
+                c.name + (f"（可选值：{'/'.join(c.values)}）" if c.type == "enum" and c.values else "") for c in f.columns
+            )
+            desc = (f"{EVIDENCE_LABEL[f.evidence]}；列表字段，value 为行对象数组（查过确无匹配记录时提交 status=found, value=[] 并附查询证据；"
+                    f"缺少入参或接口失败时提交 status=not_found, value=null），列：{cols_desc}")
+            model_fields[f"f{idx}"] = (cache[cache_key], Field(alias=f.name, description=desc))
+            continue
         values = tuple(f.values) if f.type == "enum" and f.values else None
         sig = (tuple(k.__name__ for k in kinds), values)
         if sig not in cache:

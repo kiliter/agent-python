@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+from datetime import datetime
 from typing import Any, Literal
 
 import yaml
@@ -25,6 +26,22 @@ _PLACEHOLDER_RE = re.compile(r"\$\{([^}]+)\}")
 _XML_TAG_RE = re.compile(r"^[A-Za-z_][\w.\-]*$")
 _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _PROTECTED_HEADERS = frozenset({"host", "content-length", "transfer-encoding"})
+# #Created By AiCoding(codex) 内置占位符：名称以 $ 开头为平台保留，不来自模型参数，也不能在 input 中声明。
+# ${$now} → 组包时刻的本地时间 yyyyMMddHHmmss（对齐 Java 统一网关公共字段 request_time 的取值）。
+BUILTIN_PLACEHOLDERS: dict[str, str] = {"$now": "组包时刻的本地时间 yyyyMMddHHmmss"}
+
+
+def builtin_values(now: datetime | None = None) -> dict[str, str]:
+    """内置占位符在本次组包时的取值（同一次组包内取同一时刻）。#Created By AiCoding(codex)"""
+    moment = now or datetime.now()
+    return {"$now": moment.strftime("%Y%m%d%H%M%S")}
+
+
+def _with_builtins(args: dict[str, Any] | None) -> dict[str, Any]:
+    """合并模型参数与内置占位符取值；内置值优先，模型参数不能覆盖。#Created By AiCoding(codex)"""
+    merged = {k: v for k, v in (args or {}).items() if not str(k).startswith("$")}
+    merged.update(builtin_values())
+    return merged
 
 
 class _Base(BaseModel):
@@ -171,12 +188,16 @@ class ApiContract(_Base):
                 errors.append("request 中包含空的 JSON 键名")
         errors.extend(_validate_headers_dict(self.headers))
         declared = set((self.input.get("properties") or {}).keys()) if isinstance(self.input, dict) else set()
-        for ref in sorted(_collect_placeholders(self.request)):
-            if ref not in declared:
-                errors.append(f"request 引用了未在 input 中声明的参数 ${{{ref}}}")
-        for ref in sorted(_collect_placeholders(self.headers)):
-            if ref not in declared:
-                errors.append(f"headers 引用了未在 input 中声明的参数 ${{{ref}}}")
+        # #Created By AiCoding(codex) 以 $ 开头的名称是内置占位符：不需要（也不允许）在 input 中声明
+        for key in sorted(k for k in declared if str(k).startswith("$")):
+            errors.append(f"input 参数名 {key!r} 以 $ 开头，$ 开头的名称保留给内置占位符")
+        for where, node in (("request", self.request), ("headers", self.headers)):
+            for ref in sorted(_collect_placeholders(node)):
+                if ref.startswith("$"):
+                    if ref not in BUILTIN_PLACEHOLDERS:
+                        errors.append(f"{where} 引用了未知的内置占位符 ${{{ref}}}（可用：{'、'.join(BUILTIN_PLACEHOLDERS)}）")
+                elif ref not in declared:
+                    errors.append(f"{where} 引用了未在 input 中声明的参数 ${{{ref}}}")
         return errors
 
     def validate_args(self, args: dict[str, Any]) -> list[str]:
@@ -195,18 +216,18 @@ class ApiContract(_Base):
         return errors
 
     def build_request(self, args: dict[str, Any]) -> dict[str, Any]:
-        """把 request 模板中的 ${参数} 替换为实际值（只替换字符串，不执行任何表达式）。"""
-        return _substitute(copy.deepcopy(self.request), args or {})
+        """把 request 模板中的 ${参数} 替换为实际值（只替换字符串，不执行任何表达式）；${$now} 等内置占位符同时替换。"""
+        return _substitute(copy.deepcopy(self.request), _with_builtins(args))
 
     def build_preview_request(self, args: dict[str, Any] | None = None) -> dict[str, Any]:
-        """把已提供的参数替换进 request，未提供的参数保留 ${参数名} 占位符供预览展示。"""
-        return _substitute(copy.deepcopy(self.request), args or {}, keep_unresolved=True)
+        """把已提供的参数替换进 request，未提供的参数保留 ${参数名} 占位符供预览展示；内置占位符按当前时刻渲染。"""
+        return _substitute(copy.deepcopy(self.request), _with_builtins(args), keep_unresolved=True)
 
     def build_headers(self, args: dict[str, Any] | None = None) -> dict[str, str]:
         """渲染并校验自定义安全请求头（拦截 CRLF 注入与受保护请求头覆盖）。"""
         if not self.headers:
             return {}
-        rendered_raw = _substitute(copy.deepcopy(self.headers), args or {})
+        rendered_raw = _substitute(copy.deepcopy(self.headers), _with_builtins(args))
         rendered = {str(k).strip(): ("" if v is None else str(v)) for k, v in rendered_raw.items()}
         errs = _validate_headers_dict(rendered)
         if errs:
@@ -354,6 +375,10 @@ def fixed_params(request: dict[str, Any], prefix: str = "") -> list[dict[str, st
         if isinstance(val, dict):
             result.extend(fixed_params(val, prefix=f"{name}."))
         elif isinstance(val, str) and _PLACEHOLDER_RE.search(val):
+            # #Created By AiCoding(codex) 只引用内置占位符（如 ${$now}）的值不依赖模型参数，按固定值展示原样模板
+            refs = _collect_placeholders(val)
+            if refs and all(r in BUILTIN_PLACEHOLDERS for r in refs):
+                result.append({"name": name, "value": val})
             continue
         elif isinstance(val, list):
             if _collect_placeholders(val):

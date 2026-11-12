@@ -12,7 +12,7 @@ from pydantic_ai.models.function import FunctionModel
 
 from report_agent.domain.resources import load_resource_dir
 from report_agent.domain.template import InputDef, Template, TemplateDef
-from report_agent.container import SEED_DIR
+from fixture_paths import SEED_DIR
 from report_agent.runtime.evidence import EvidenceChecker, _values_equivalent, locate_quote_in_document
 from report_agent.runtime.output_model import build_report_model
 from report_agent.runtime.runner import InputValidationError, RunRequest, _evidence_label, validate_inputs

@@ -1,0 +1,104 @@
+# #Created By AiCoding(codex) 由 tools/java_migration/generate.py 从 Java 模板生成，请勿手工修改后再重新生成
+id: 131
+name: 过户业务受阻类
+description: 迁移自 Java 模板「过户业务受阻类」（资源库模板 ID 131），正文与规则以 Java 为准。
+skills:
+- pretty-number-info
+- business-sms
+- accept-type
+inputs:
+- key: 手机号码
+  required: false
+  description: 客户手机号，11 位
+  sample: '13900001234'
+- key: 业务名称
+  required: false
+  description: 本次争议的业务、套餐或活动名称
+  sample: 5G智享套餐（个人版）
+- key: 创建时间
+  required: false
+  description: 工单创建时间 yyyyMMddHHmmss，短信类 Skill 以它为查询基准
+  sample: '20261105103012'
+- key: 业务月份
+  required: false
+  description: 业务办理日期 yyyyMMdd；受理渠道为热线、掌上营业厅时用作受理日期
+  sample: '20261105'
+fields:
+- name: 手机号类别
+  visible: false
+  type: enum
+  values:
+  - 靓号
+  - 非靓号
+  evidence: derive
+  whenMissing: value
+  defaultValue: 非靓号
+  description: '按 Skill pretty-number-info 查询匹配当前手机号码的记录：命中且 grade 非空时为“靓号”；无匹配记录、grade 为空或非靓号时提交 not_found（由模板默认值输出“非靓号”）或填“非靓号”。
+
+    原规则（Java）：使用已完成的 Skill 结果中{{靓号接口}}的手机号类别值；该值为空时填"非靓号"。'
+- name: 客户号码
+  evidence: derive
+  description: '优先取入参「手机号码」；没有时从单据中摘取 11 位手机号。
+
+    原规则（Java）：优先从请求参数中取手机号码的值，若没有则从 PDF 文本中提取 11 位手机号。'
+- name: 靓号等级
+  evidence: quote
+  description: '按 Skill pretty-number-info 查询匹配当前手机号码的记录，取接口返回的靓号等级原值，不做翻译、格式化或前后缀处理；非靓号或 grade 为空时提交 not_found。
+
+    原规则（Java）：使用已完成的 Skill 结果中{{靓号接口}}的靓号等级值，不做翻译、格式化或前后缀处理；该值为空时填空字符串。'
+- name: 受理日期
+  evidence: derive
+  description: '受理渠道（字段「受理渠道」）为“热线”或“掌上营业厅”时，必须取入参「业务月份」（yyyyMMdd），用 format_date 转为“yyyy年M月d号”（如 20261005 → 2026年10月5号），value 直接使用工具输出并引用其 callId；业务月份缺失或不是合法的 8 位日期时提交 not_found。其他受理渠道只能从属于本次业务的单据（单据经清洗后包含入参「业务名称」）中摘取受理日期，保持单据原样，单据不属于本次业务或没有受理日期时提交 not_found。任何情况下都不得使用短信发送时间、创建时间或其他日期代替。
+
+    原规则（Java）：当{{受理渠道}}为“热线”或“掌上营业厅”时，必须取请求参数中的“业务月份”（yyyyMMdd）并格式化为“yyyy年M月d号”，例如20261005输出2026年10月5号；其他受理渠道仅从与当前业务名称匹配的PDF单据中提取受理日期，不得使用订购短信发送时间、创建时间或其他日期回退。'
+- name: 受理方式
+  evidence: derive
+  description: 单据（属于本次业务的单据）中有受理网点/营业厅名称时，填该受理网点（引用单据原文）；没有受理网点时，填字段「受理渠道」的值（引用 {"type":"field","name":"受理渠道"}）。
+- name: 鉴权方式
+  evidence: quote
+  description: 从属于本次业务的单据中摘取客户身份鉴权方式（如“服务密码”“短信验证码”“身份证”），逐字引用。
+- name: 靓号活动名称
+  evidence: derive
+  description: '按 Skill pretty-number-info 查询匹配当前手机号码且 grade 非空的记录，提取其靓号活动名称（单档次原样取自 level_info.event_name，多档次 JSON 数组文本提取非空活动名称按“、”拼接），不做其它改写；非靓号或活动名称为空时提交 not_found。
+
+    原规则（Java）：使用已完成的 Skill 结果中{{靓号接口}}的靓号活动名称值，不做改写；该值为空时填空字符串。'
+- name: 活动时间
+  evidence: derive
+  description: '从属于本次业务的单据中，取业务名称对应的活动时间（不要取活动生效时间）；没有活动时间时，取业务名称对应的“生效时间”和“失效时间”：两者均有时按“生效时间到失效时间”拼接，只有一个时取该值；不得跨业务记录拼接。evidence 引用单据原文片段。
+
+    原规则（Java）：取请求参数中的业务名称对应的活动时间；不要取活动生效时间；若没有则取请求参数中的业务名称对应的“生效时间”和“失效时间”，两者均非空时按“生效时间到失效时间”拼接，仅有一个非空时返回该值，两者均为空时返回空字符串；不得跨业务记录拼接'
+- name: 活动内容
+  evidence: quote
+  description: '从属于本次业务的单据中取业务名称对应的活动内容，有多条时取与业务名称匹配的一条；单据中找不到时从字段「订购短信」对应的短信中摘取活动内容。逐字引用。
+
+    原规则（Java）：取请求参数中的业务名称对应的活动内容；若有多条，取业务名称匹配项；PDF文本中找不到则取订购短信中的活动内容'
+- name: 客户承诺
+  evidence: quote
+  description: '从属于本次业务的单据中取业务名称对应的客户承诺，有多条时取与业务名称匹配的一条；单据中找不到时从字段「订购短信」对应的短信中摘取客户承诺。逐字引用。
+
+    原规则（Java）：取请求参数中的业务名称对应的客户承诺；若有多条，取业务名称匹配项；PDF文本中找不到则从订购短信中提取客户承诺'
+- name: 商品名称
+  evidence: input
+  description: '等于入参「业务名称」。
+
+    原规则（Java）：取请求参数中的业务名称。'
+- name: 订购短信
+  evidence: quote
+  quoteWhole: true
+  description: 按 Skill business-sms 查询，取命中本次业务名称的最新一条订购短信正文，整条原样引用，不得删改任何字符。
+- name: 业务名称
+  evidence: input
+  description: '等于入参「业务名称」。
+
+    原规则（Java）：取请求参数中的业务名称。'
+- name: 受理渠道
+  visible: false
+  type: enum
+  values:
+  - 热线
+  - 掌上营业厅
+  - 其他
+  evidence: derive
+  whenMissing: value
+  defaultValue: 其他
+  description: 按 Skill accept-type 从字段「订购短信」判断：短信正文包含“热线渠道”为“热线”；包含“线上渠道”为“掌上营业厅”；其他情况（含订购短信找不到）为“其他”。Java 中该字段以 Skill 结果为准，rule 中“否则填充营业厅”的写法不生效。

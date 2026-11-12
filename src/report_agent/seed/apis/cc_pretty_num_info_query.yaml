@@ -1,0 +1,51 @@
+# #Created By AiCoding(codex) 靓号号码信息查询（统一网关 XML）
+# 迁移自 Java pretty-number-info/scripts/assembly.groovy + extract.groovy，接口文档 design_docs/靓号接口.docx。
+# 请求与 Java 一致：route_type=2、route_value=手机号，content.msisdn_list.msisdn=手机号；其余公共字段走 XmlBaseRequest 默认值。
+# 响应：operation_out.content.ret_code=0 成功，1 失败（如“XX号码不存在”）；msisdn_list 为 0 条表示非靓号。
+# 【差异】Java extract 对任何 ret_code≠0（含缺失）都返回 {}（=非靓号）。契约只能把 ret_code=1 声明为“无数据”，
+#   其它非 0 值在 Python 中是“调用失败”，字段按找不到处理；模板中“手机号类别”的默认值必须是“非靓号”，最终展示一致。
+name: cc_pretty_num_info_query
+title: 靓号号码信息查询
+description: 按手机号查询是否为靓号以及靓号等级、价格、默认活动和档次信息（营销活动名称）。没有记录表示非靓号。
+connector: unified-gateway-xml
+processCode: cc_pretty_num_info_query
+timeoutMs: 10000
+retry:
+  maxAttempts: 1
+idempotent: true
+input:
+  type: object
+  required: [手机号码]
+  additionalProperties: false
+  properties:
+    手机号码:
+      type: string
+      pattern: '^\d{11}$'
+      description: 11 位手机号（只含数字）
+request:
+  route_type: '2'
+  route_value: ${手机号码}
+  content:
+    msisdn_list:
+      msisdn: ${手机号码}
+response:
+  noData:
+    - path: operation_out.content.ret_code
+      equals: '1'
+  success:
+    path: operation_out.content.ret_code
+    equals: '0'
+    missingAs: success
+  records:
+    path: operation_out.content.msisdn_list
+    columns:
+      msisdn: 号码
+      grade: 靓号等级原值，如 GRADE_002（模板“靓号等级”原样取此列）
+      price: 价格
+      default_event_code: 默认活动编号
+      level_info.level: 档次
+      level_info.event_code: 营销活动编号
+      level_info.event_name: 营销活动名称（单档次时为文本，多档次时为 JSON 数组文本，按 Skill 提取非空活动名称并用“、”拼接）
+      level_info.event_description: 营销活动档次描述
+  summary:
+    maxPreviewChars: 60

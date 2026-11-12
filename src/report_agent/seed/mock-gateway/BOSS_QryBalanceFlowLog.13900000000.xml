@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- #Created By AiCoding(codex) BOSS_QryBalanceFlowLog 业务失败响应（resp_code=7003，取自 Java SkillScriptsTest#qryBalanceExtractShouldKeepBusinessFailureVisible），
+     手机号 13900000000 时返回；Python 契约应判定为调用失败而不是 0 条流水。 -->
+<operation_out>
+  <response>
+    <resp_code>7003</resp_code>
+    <resp_desc>BOSS_QryBalanceFlowLog能力编排执行错误</resp_desc>
+  </response>
+</operation_out>

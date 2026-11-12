@@ -9,7 +9,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 
 from report_agent.config import Settings
-from report_agent.container import SEED_DIR
+from fixture_paths import SEED_DIR
 from report_agent.domain.api_contract import ApiContract, RecordsSpec, parse_api_yaml
 from report_agent.domain.resources import ResourceSet, load_resource_dir
 from report_agent.domain.template import FieldDef, Template, TemplateDef

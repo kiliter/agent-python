@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- #Created By AiCoding(codex) cc_pretty_num_info_query mock 响应：原样取自 Java 仓库 design_docs/靓号接口.docx 的应答样例（同一号码两条记录）。 -->
+<operation_out>
+    <process_code>cc_pretty_num_info_query</process_code>
+    <content>
+        <ret_code>0</ret_code>
+        <ret_msg>Success</ret_msg>
+        <be_id>23</be_id>
+        <msisdn_list>
+            <msisdn>15252749921</msisdn>
+            <grade>GRADE_002</grade>
+            <price>120000</price>
+            <default_event_code>300004079229</default_event_code>
+            <level_info>
+                <level>8</level>
+                <event_code>300004079229</event_code>
+                <event_name>靓号2（8折-预存1600）</event_name>
+                <event_description>1、活动协议期：120个月 2、活动生效时间：次月 3、标准档次：预存2000元，月最低消费200元。 4、活动内容：标准档次8折，即：预存1600元，480元话费立即到账，客户承诺协议期内达到最低消费160元/月，1120元分24个月释放，自活动生效次月起，每月5日前释放45元，末月释放85元。 具体规则详见协议。</event_description>
+            </level_info>
+        </msisdn_list>
+        <msisdn_list>
+            <msisdn>15252749921</msisdn>
+            <grade>GRADE_006</grade>
+            <price>200000</price>
+            <default_event_code>300004079230</default_event_code>
+            <level_info>
+                <level>8</level>
+                <event_code>300004079230</event_code>
+                <event_name>靓号1（10折-预存2000）</event_name>
+                <event_description>1、活动协议期：120个月 2、活动生效时间：次月 3、标准档次：预存2000元，月最低消费200元。 4、活动内容：标准档次8折，即：预存1600元，480元话费立即到账，客户承诺协议期内达到最低消费160元/月，1120元分24个月释放，自活动生效次月起，每月5日前释放45元，末月释放85元。 具体规则详见协议。</event_description>
+            </level_info>
+        </msisdn_list>
+    </content>
+</operation_out>

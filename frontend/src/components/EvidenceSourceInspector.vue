@@ -23,6 +23,31 @@ const activeEvField = computed<TemplateField | undefined>(
 /** 当前字段提交的证据列表 */
 const evidenceList = computed(() => activeEvField.value?.evidence ?? [])
 
+/** 接口结果中需要高亮的结果块编号（用于在 0 条记录时仍能高亮并定位接口调用块） #Created By AiCoding(codex) */
+const highlightApiResultIds = computed(() => {
+  const ids = new Set<string>()
+  evidenceList.value.forEach(e => {
+    if (e.type === 'api' && e.resultId) ids.add(e.resultId)
+  })
+  const t = activeEvField.value?.evidenceTarget
+  if (t?.tab === 'api' && t.resultId) ids.add(t.resultId)
+  return ids
+})
+
+/** 当前定位字段的值状态简述（区分合法空列表 0 行 vs 缺失列表） #Created By AiCoding(codex) */
+const activeFieldValueSummary = computed(() => {
+  const f = activeEvField.value
+  if (!f) return ''
+  if (f.type === '列表') {
+    if (f.runStatus === 'found') {
+      const n = Array.isArray(f.runRows) ? f.runRows.length : (f.runValue || '').trim() === '[]' ? 0 : -1
+      return n === 0 ? '无记录（0 行）' : n > 0 ? `已命中（共 ${n} 行）` : f.runValue || '已命中'
+    }
+    return '缺失（未取到列表结果）'
+  }
+  return f.runStatus === 'found' ? f.runValue || '已命中' : '未找到'
+})
+
 /** 接口结果中需要高亮的行：键为 resultId#row，值为该行被引用的列 */
 const highlightApiRows = computed(() => {
   const map = new Map<string, Set<string>>()
@@ -205,6 +230,9 @@ watch(
             <strong>字段 Key：<span class="mono">{{ activeEvField.name }}</span></strong>
             <StatusTag kind="evidence" :value="activeEvField.evidenceType" />
           </div>
+          <div v-if="activeEvField.type === '列表'" class="insp-summary-meta">
+            列表结论：<strong>{{ activeFieldValueSummary }}</strong>
+          </div>
           <div class="insp-summary-meta">
             来源坐标：<span class="mono">{{ activeEvField.evidenceLabel || '无证据' }}</span>
           </div>
@@ -226,7 +254,15 @@ watch(
           >
             本次运行未调用外部 API
           </div>
-          <div v-for="res in run.apiResults" :key="res.resultId" class="insp-api-block">
+          <div
+            v-for="res in run.apiResults"
+            :key="res.resultId"
+            class="insp-api-block"
+            :class="{
+              'api-block-highlight row-highlight':
+                res.records.length === 0 && highlightApiResultIds.has(res.resultId),
+            }"
+          >
             <div class="insp-api-meta">
               <strong class="mono insp-res-id">{{ res.resultId }}</strong>
               <span style="font-weight: 600">{{ res.title || res.api }}</span>
@@ -557,6 +593,13 @@ watch(
 
 .insp-api-block {
   margin-bottom: 12px;
+}
+
+.api-block-highlight {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background-color: var(--highlight-bg);
+  border: 1px solid var(--highlight-border);
 }
 
 .insp-api-meta {

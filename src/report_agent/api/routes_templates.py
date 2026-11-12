@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Literal
 
@@ -15,6 +16,7 @@ from pydantic import BaseModel, Field
 from ..domain.jinja_env import BodySyntaxError, TrackedValue, body_variables, render_body
 from ..domain.resources import _RESERVED_FIELD_NAMES
 from ..domain.template import Template, TemplateDef
+from ..runtime.render import field_render
 from ..runtime.runner import RunRequest
 from ..store.cases import CaseStore
 from ..store.fsutil import fmt_time
@@ -381,7 +383,18 @@ def diff(request: Request, tid: int, a: str = "draft", b: str = "online") -> dic
 
 class PreviewBody(BaseModel):
     bodyText: str | None = None
-    values: dict[str, str | None] = Field(default_factory=dict, description="字段名 → 值；不传或为 null 视为找不到")
+    values: dict[str, Any] = Field(default_factory=dict,
+                                   description="字段名 → 值；不传或为 null 视为找不到。列表字段传行对象数组或其 JSON 字符串")
+
+
+def _preview_rows(val: Any) -> Any:
+    """预览用：列表字段的值可以是行数组或 JSON 字符串。#Created By AiCoding(codex)"""
+    if isinstance(val, str) and val.strip():
+        try:
+            return json.loads(val)
+        except ValueError:
+            return None
+    return val
 
 
 @router.post("/templates/{tid}/render-preview")
@@ -392,6 +405,10 @@ def render_preview(request: Request, tid: int, body: PreviewBody) -> dict[str, A
     ctx: dict[str, Any] = {}
     for f in tpl.definition.fields:
         val = body.values.get(f.name)
+        if f.is_list:
+            # #Created By AiCoding(codex) 列表字段与生产渲染走同一路径（找不到时为空列表）
+            ctx[f.name] = field_render(f, {"status": "found", "value": _preview_rows(val)}).context_value
+            continue
         if val not in (None, ""):
             ctx[f.name] = TrackedValue(str(val), f.name)
         else:
@@ -653,7 +670,9 @@ def create_case(request: Request, tid: int, body: dict[str, Any]) -> dict[str, A
         data.setdefault("inputs", run.get("inputs") or {})
         data.setdefault("documentText", run.get("document") or "")
         data.setdefault("expectedValues", {
-            str(f["name"]): ("" if f.get("value") is None else str(f.get("value")))
+            # #Created By AiCoding(codex) 列表字段的值转为 JSON 文本保存
+            str(f["name"]): ("" if f.get("value") is None else json.dumps(f["value"], ensure_ascii=False)
+                             if isinstance(f.get("value"), (list, dict)) else str(f.get("value")))
             for f in (run.get("fields") or [])
             if isinstance(f, dict) and f.get("name") and (f.get("status") or f.get("runStatus")) == "found"
         })

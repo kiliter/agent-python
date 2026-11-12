@@ -4,6 +4,7 @@
   quote  ：引用的接口记录/单据片段必须存在，值必须逐字出现在原文中（quoteWhole 时必须完全相等）；
   input  ：值必须等于引用的入参；
   derive ：引用的来源都必须存在；引用了 format_date 等产出值的工具时，值必须等于工具输出。
+  list   ：列表字段逐行核对列结构；quote 时每个非空文本单元格必须出现在某条被引用的接口记录或单据片段中。
 不通过的字段把原因返回给模型重新提交，超过重试次数后该字段按“找不到”处理。
 """
 
@@ -201,7 +202,7 @@ class EvidenceChecker:
             if status != "found":
                 issues.append(FieldIssue(f.name, f"无效的字段状态 {status!r}，只能是 found 或 not_found"))
                 continue
-            field_msgs = self._check_field(f, ans)
+            field_msgs = self._check_list_field(f, ans) if f.is_list else self._check_field(f, ans)
             issues.extend(FieldIssue(f.name, m) for m in field_msgs)
             raw_ev = ans.get("evidence") or []
             if isinstance(raw_ev, list):
@@ -223,6 +224,139 @@ class EvidenceChecker:
                 for nxt in found_field_refs.get(curr, []):
                     stack.append((nxt, [*path, nxt]))
         return issues
+
+    # ------------------------------------------------------------------
+    def _check_empty_list_evidence(self, f: FieldDef, evidence: list[dict[str, Any]]) -> list[str]:
+        """校验合法空列表（status=found, value=[]）的查询证据。
+
+        #Created By AiCoding(codex)
+        空列表表示已成功查询数据源但确无匹配记录，仍须提供至少一条查询证据：
+        - type=tool：callId 存在且 ok=True（如 call_api 或 query_result 的 callId），即使 f.evidence=quote 也允许；
+        - type=api：resultId 存在且 res.ok=True（res.records 为空也不因行号越界报错）；
+        - type=document：单据片段真实存在。
+        derive 列表字段可额外附带存在的 input/field 证据，但仍至少要有一条 tool/api/document 查询证据。
+        """
+        msgs: list[str] = []
+        has_query_proof = False
+        for e in evidence:
+            t = e.get("type")
+            if t == "tool":
+                has_query_proof = True
+                cid = str(e.get("callId") or "")
+                call = self.ws.tool_calls.get(cid)
+                if call is None:
+                    msgs.append(f"工具调用 {cid} 不存在")
+                elif not call.ok:
+                    msgs.append(f"工具调用 {cid} 执行失败，不能作为证据")
+            elif t == "api":
+                has_query_proof = True
+                if isinstance(e.get("row"), bool):
+                    msgs.append("row 必须是整数行号，不能是布尔值")
+                    continue
+                rid = str(e.get("resultId") or "")
+                res = self.ws.results.get(rid)
+                if res is None:
+                    msgs.append(f"接口结果 {rid} 不存在")
+                elif not res.ok:
+                    msgs.append(f"接口结果 {rid} 调用失败，不能作为证据")
+            elif t == "document":
+                has_query_proof = True
+                quote = scalar_to_str(e.get("quote"))
+                if not (quote.strip() and locate_quote_in_document(self.document, quote)):
+                    msgs.append(f"单据中找不到片段「{_short(quote)}」")
+            elif f.evidence == "derive" and t in ("input", "field"):
+                msgs.extend(self._check_ref_exists(f, e))
+            else:
+                msgs.append(f"空列表（value=[]）不允许使用 {t!r} 类型证据，请引用查询过的 tool、api 或 document 证据")
+        if not has_query_proof and not msgs:
+            msgs.append("空列表（value=[]）必须至少引用一条查询证据（type=tool / api / document）证明已核查数据源；"
+                        "若缺少必要入参未查询请提交 status=not_found")
+        return msgs
+
+    def _check_list_field(self, f: FieldDef, ans: dict[str, Any]) -> list[str]:
+        """校验列表字段（type=list）：支持合法空列表（value=[]）与非空列表逐行核对。
+
+        #Created By AiCoding(codex)
+        - value 必须是列表（list）；查过数据源确无匹配记录时允许 value=[]，但仍须提供合法查询证据；
+        - 非空列表每行恰好包含声明的全部列，枚举列取值必须在可选范围内；
+        - evidence=quote 且列表非空时只允许 api/document 证据，且每个非空的非枚举单元格都必须出现在至少一个引用来源中。
+        """
+        rows = ans.get("value")
+        if not isinstance(rows, list):
+            return ["status=found 时列表字段的 value 必须是数组（查过确无匹配记录请填 []；缺少入参或接口失败请提交 not_found）"]
+        raw_evidence = ans.get("evidence") or []
+        if not isinstance(raw_evidence, list) or not raw_evidence:
+            return ["缺少证据 evidence"]
+        evidence = [e for e in raw_evidence if isinstance(e, dict)]
+        if len(evidence) != len(raw_evidence):
+            return ["evidence 中存在格式不合法的条目"]
+        if len(rows) == 0:
+            return self._check_empty_list_evidence(f, evidence)
+
+        col_names = f.column_names()
+        msgs: list[str] = []
+        for i, row in enumerate(rows):
+            where = f"第 {i + 1} 行（value[{i}]）"
+            if not isinstance(row, dict):
+                msgs.append(f"{where}必须是以列名为键的对象")
+                continue
+            missing = [c for c in col_names if c not in row]
+            extra = [str(k) for k in row if k not in col_names]
+            if missing:
+                msgs.append(f"{where}缺少列：{'、'.join(missing)}")
+            if extra:
+                msgs.append(f"{where}包含未定义的列：{'、'.join(extra)}（可用列：{'、'.join(col_names)}）")
+            cells = {c.name: scalar_to_str(row.get(c.name)) for c in f.columns}
+            for col in f.columns:
+                cell = row.get(col.name)
+                if isinstance(cell, (list, dict)):
+                    msgs.append(f"{where}的列「{col.name}」必须是文本")
+                elif col.type == "enum" and col.values and col.name in row and scalar_to_str(cell) not in col.values:
+                    msgs.append(f"{where}的列「{col.name}」值「{_short(cell)}」不在可选范围 {col.values} 内")
+            if not missing and not any(v.strip() for v in cells.values()):
+                msgs.append(f"{where}所有列都为空")
+        if msgs:
+            return msgs
+
+        if f.evidence == "quote":
+            invalid_types = [e.get("type") for e in evidence if e.get("type") not in ("api", "document")]
+            if invalid_types:
+                msgs.append(f"原文引用字段不允许使用 {invalid_types} 类型证据")
+            quotes = [e for e in evidence if e.get("type") in ("api", "document")]
+            if not quotes:
+                return ["原文引用字段必须引用接口记录（type=api）或单据片段（type=document）"]
+            sources: list[tuple[Any, str]] = []
+            for e in quotes:
+                err = self._check_ref_exists(f, e)
+                if err:
+                    msgs.extend(err)
+                    continue
+                if e.get("type") == "api":
+                    res = self.ws.results[str(e.get("resultId") or "")]
+                    rec = res.records[e["row"]]
+                    sources.extend((v, scalar_to_str(v)) for v in rec.values() if not isinstance(v, (list, dict)))
+                else:
+                    quote = scalar_to_str(e.get("quote"))
+                    sources.append((quote, quote))
+            if msgs:
+                return msgs
+            for i, row in enumerate(rows):
+                for col in f.columns:
+                    if col.type == "enum":
+                        continue
+                    raw_cell = row.get(col.name)
+                    cell = scalar_to_str(raw_cell)
+                    if not cell.strip():
+                        continue
+                    if not any(_contains_with_ws(src, cell) or _values_equivalent(raw_cell, raw_src)
+                               for raw_src, src in sources):
+                        msgs.append(f"第 {i + 1} 行（value[{i}]）列「{col.name}」的值「{_short(cell)}」"
+                                    "没有逐字出现在引用的任何接口记录或单据片段中；请为该行补充出处证据")
+            return msgs
+
+        for e in evidence:
+            msgs.extend(self._check_ref_exists(f, e))
+        return msgs
 
     # ------------------------------------------------------------------
     def _check_field(self, f: FieldDef, ans: dict[str, Any]) -> list[str]:
