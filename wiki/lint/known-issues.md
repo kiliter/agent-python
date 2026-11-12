@@ -19,7 +19,7 @@ updated: 2026-11-12
 ## 1. 单进程运行约束（`workers=1`）
 
 - **现状**：`src/report_agent/cli.py#serve` 硬编码 `workers=1`。这是因为 `Publisher`（Git 工作区写入与版本号递增锁）、`RunStore`（单协程异步写 `index.jsonl` 队列）、`AuthService`（内存登录失败计数与吊销令牌表）以及 `ReloadableGatewayClient`（内存热更新槽位）均为单进程状态模型。
-- **影响与建议**：单进程异步事件循环（`asyncio` + `httpx` 异步 I/O）本身可轻松支撑数十路并发大模型/网关请求（默认 `MAX_CONCURRENT_RUNS=10`）。切勿在同一 `DATA_DIR` 上启动多 Worker 进程；若未来吞吐需求超出单机上限，应拆分为“单主治理工作台实例 + 多无状态只读推理副本”。
+- **影响与建议**：单进程异步事件循环（`asyncio` + `httpx` 异步 I/O）本身可轻松支撑多路并发大模型与网关请求（默认 `AGENT_MAX_CONCURRENT_RUNS=8`、支持运行期动态扩缩的 `_DynamicLimiter`，网关并发上限 `GATEWAY_MAX_CONCURRENCY=32`；同时登录 PBKDF2 校验已卸载至受限线程池，且 `safe_regex_compile` 拦截嵌套量词 ReDoS，防止阻塞事件循环）。切勿在同一 `DATA_DIR` 上启动多 Worker 进程；若未来吞吐需求超出单机上限，应拆分为“单主治理工作台实例 + 多无状态只读推理副本”。
 
 ## 2. 本地 Mock 网关不按时间/账期动态过滤（R15）
 

@@ -19,6 +19,7 @@ export type NavKey =
   | 'regression'
   | 'releases'
   | 'settings'
+  | 'chatSim'
 
 export interface CurrentUser {
   username: string
@@ -532,6 +533,9 @@ export interface RuntimeConfig {
   gatewayAccessTokenMasked: string
   gatewayXmlStyle: string
   gatewayConnectTimeoutS: number
+  hasReportApiKeys?: boolean
+  reportApiKeysMasked?: string
+  reportApiKeyCount?: number
 }
 
 export interface RuntimeConfigUpdatePayload {
@@ -563,6 +567,8 @@ export interface RuntimeConfigUpdatePayload {
   clearGatewayAccessToken?: boolean
   gatewayXmlStyle?: string
   gatewayConnectTimeoutS?: number
+  reportApiKeys?: string
+  clearReportApiKeys?: boolean
   note?: string
 }
 
@@ -573,6 +579,16 @@ export interface RuntimeConfigState {
   source: string
   note: string
   config: RuntimeConfig
+}
+
+export interface ApiKeySettings {
+  configured: boolean
+  apiKeys: string
+  primaryKey: string
+  masked: string
+  count: number
+  activeRev: string
+  runtimeState?: RuntimeConfigState
 }
 
 export interface RuntimeConfigRevision {

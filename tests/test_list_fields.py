@@ -252,8 +252,10 @@ def test_report_model_for_list_fields():
     assert dumped_empty["账期短信提醒列表"]["value"] == []
 
     schema = model.model_json_schema()
-    desc = schema["properties"]["充值流水"]["description"]
+    ref_name = schema["properties"]["充值流水"]["$ref"].rsplit("/", 1)[-1]
+    desc = schema["$defs"][ref_name]["description"]
     assert "列表" in desc and "充值时间" in desc and "支付方式" in desc and "[]" in desc
+    assert "description" not in schema["properties"]["充值流水"]
 
 
 def test_report_model_native_strict_schema():
@@ -263,6 +265,8 @@ def test_report_model_native_strict_schema():
     assert transformer.is_strict_compatible
     text = json.dumps(strict, ensure_ascii=False)
     assert "oneOf" not in text
+    assert "anyOf" not in strict["properties"]["充值流水"]
+    assert "anyOf" not in strict["properties"]["客户号码"]
     rows = [d for d in strict.get("$defs", {}).values() if set(d.get("properties", {})) == {"提醒类型", "账期月", "提醒次数"}]
     assert rows and rows[0]["additionalProperties"] is False
     assert set(rows[0]["required"]) == {"提醒类型", "账期月", "提醒次数"}

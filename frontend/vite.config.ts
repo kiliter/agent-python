@@ -25,6 +25,11 @@ export default defineConfig({
   build: {
     chunkSizeWarningLimit: 900,
     rollupOptions: {
+      // 多页面入口：管理端 index.html + 嵌入式聊天窗口 embed.html（后者不加载管理端外壳）
+      input: {
+        index: fileURLToPath(new URL('./index.html', import.meta.url)),
+        embed: fileURLToPath(new URL('./embed.html', import.meta.url))
+      },
       output: {
         manualChunks(id) {
           if (id.includes('node_modules')) {
@@ -33,6 +38,14 @@ export default defineConfig({
             }
             if (id.includes('@codemirror') || id.includes('@lezer') || id.includes('codemirror')) {
               return 'codemirror'
+            }
+            if (
+              id.includes('/yaml/') ||
+              id.includes('/marked/') ||
+              id.includes('/sortablejs/') ||
+              id.includes('/diff/')
+            ) {
+              return 'workbench-libs'
             }
             if (id.includes('lucide-vue-next')) {
               return 'icons'

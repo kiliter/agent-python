@@ -2,27 +2,19 @@
 // #Created By AiCoding(codex)
 
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router'
-import LoginView from '@/views/LoginView.vue'
-import TemplatesListView from '@/views/TemplatesListView.vue'
-import TemplateWorkbenchView from '@/views/TemplateWorkbenchView.vue'
-import SkillsView from '@/views/SkillsView.vue'
-import ApisView from '@/views/ApisView.vue'
-import RunsView from '@/views/RunsView.vue'
-import RegressionView from '@/views/RegressionView.vue'
-import ReleasesView from '@/views/ReleasesView.vue'
-import SettingsView from '@/views/SettingsView.vue'
 
 const routes: RouteRecordRaw[] = [
   { path: '/', redirect: '/templates' },
-  { path: '/login', name: 'login', component: LoginView },
-  { path: '/templates', name: 'templates', component: TemplatesListView },
-  { path: '/workbench', name: 'workbench', component: TemplateWorkbenchView },
-  { path: '/skills', name: 'skills', component: SkillsView },
-  { path: '/apis', name: 'apis', component: ApisView },
-  { path: '/runs', name: 'runs', component: RunsView },
-  { path: '/regression', name: 'regression', component: RegressionView },
-  { path: '/releases', name: 'releases', component: ReleasesView },
-  { path: '/settings', name: 'settings', component: SettingsView },
+  { path: '/login', name: 'login', component: () => import('@/views/LoginView.vue') },
+  { path: '/templates', name: 'templates', component: () => import('@/views/TemplatesListView.vue') },
+  { path: '/workbench', name: 'workbench', component: () => import('@/views/TemplateWorkbenchView.vue') },
+  { path: '/skills', name: 'skills', component: () => import('@/views/SkillsView.vue') },
+  { path: '/apis', name: 'apis', component: () => import('@/views/ApisView.vue') },
+  { path: '/runs', name: 'runs', component: () => import('@/views/RunsView.vue') },
+  { path: '/regression', name: 'regression', component: () => import('@/views/RegressionView.vue') },
+  { path: '/releases', name: 'releases', component: () => import('@/views/ReleasesView.vue') },
+  { path: '/settings', name: 'settings', component: () => import('@/views/SettingsView.vue') },
+  { path: '/chat-sim', name: 'chatSim', component: () => import('@/views/ChatSimView.vue') },
 ]
 
 const router = createRouter({

@@ -19,8 +19,21 @@ import yaml
 
 from report_agent.container import SEED_DIR as PROD_SEED_DIR
 from report_agent.domain.jinja_env import render_body
-from report_agent.domain.resources import load_resource_dir, validate_all
+from report_agent.domain.resources import (
+    ROUTER_SKILL_ID,
+    _ROUTER_TPL_HEADING_RE,
+    ResourceSet,
+    load_resource_dir,
+    validate_all,
+    validate_skill,
+    validate_template,
+)
+from report_agent.domain.skill import parse_skill_markdown
+from report_agent.domain.template import Template
+from report_agent.gateway.base import extract_records, parse_xml
+from report_agent.runtime.evidence import EvidenceChecker
 from report_agent.runtime.render import build_render_context
+from report_agent.runtime.workspace import ApiResult, Workspace
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools/java_migration"
@@ -36,7 +49,65 @@ def test_prod_seed_loads_and_validates_zero_warnings():
     warnings = [i for i in issues if i.level == "warning"]
     assert errors == []
     assert warnings == []
-    assert len(rs.templates) == 33 and len(rs.skills) == 11 and len(rs.apis) == 3
+    assert len(rs.templates) == 33 and len(rs.skills) == 12 and len(rs.apis) == 3
+
+
+def test_template_router_skill_coverage_and_cross_validation():
+    """验证生产 seed 中 template-router 覆盖全部 33 个在线模板，且交叉校验准确拦截各类违例。#Created By AiCoding(codex)"""
+    rs = load_resource_dir(PROD_SEED_DIR)
+    assert ROUTER_SKILL_ID in rs.skills
+    router = rs.skills[ROUTER_SKILL_ID]
+    assert router.meta.apis == []
+    covered = {int(m.group(1)) for m in _ROUTER_TPL_HEADING_RE.finditer(router.body)}
+    assert covered == set(range(100, 133))
+    assert validate_all(rs) == []
+
+    # 1) 声明业务接口时报错 ROUTER_SKILL_HAS_APIS
+    bad_api_skill = parse_skill_markdown(
+        "---\nname: template-router\ntitle: 模板路由\ndescription: 路由\napis:\n  - querySMSSendInfo\n---\n\n"
+        + router.body
+    )
+    api_issues = validate_skill(bad_api_skill, rs)
+    assert any(i.level == "error" and i.code == "ROUTER_SKILL_HAS_APIS" for i in api_issues)
+
+    # 2) 缺少在线模板（漏 100）+ 引用不存在模板（999）与已下线模板（131）
+    custom_templates = dict(rs.templates)
+    custom_templates[131] = Template(definition=rs.templates[131].definition, body=rs.templates[131].body, offline=True)
+    custom_templates[132] = Template(definition=rs.templates[132].definition, body=rs.templates[132].body, offline=True)
+    custom_rs = ResourceSet(
+        system_prompt=rs.system_prompt,
+        templates=custom_templates,
+        skills=dict(rs.skills),
+        apis=dict(rs.apis),
+    )
+    headings = "\n\n".join(f"### {tid} 模板\n说明" for tid in [*range(101, 132), 999])
+    partial_skill = parse_skill_markdown(
+        f"---\nname: template-router\ntitle: 模板路由\ndescription: 路由\napis: []\n---\n\n{headings}\n"
+    )
+    router_issues = validate_skill(partial_skill, custom_rs)
+    not_found_msgs = [i.message for i in router_issues if i.level == "error" and i.code == "ROUTER_TEMPLATE_NOT_FOUND"]
+    uncovered_msgs = [i.message for i in router_issues if i.level == "warning" and i.code == "ROUTER_TEMPLATE_UNCOVERED"]
+    assert len(not_found_msgs) == 2
+    assert any("999" in m for m in not_found_msgs)
+    assert any("131" in m for m in not_found_msgs)
+    assert len(uncovered_msgs) == 1
+    assert "100（不知情业务办理争议处理类）" in uncovered_msgs[0]
+
+    # 3) 填报模板误关联 template-router 时报 ROUTER_SKILL_IN_TEMPLATE warning
+    tpl100_def = rs.templates[100].definition.model_copy(
+        update={"skills": [*rs.templates[100].definition.skills, ROUTER_SKILL_ID]}
+    )
+    tpl_issues = validate_template(Template(definition=tpl100_def, body=rs.templates[100].body), rs)
+    assert any(i.level == "warning" and i.code == "ROUTER_SKILL_IN_TEMPLATE" for i in tpl_issues)
+
+    # 4) 不含 template-router 的 ResourceSet 不产生任何报错或警告
+    no_router_rs = ResourceSet(
+        system_prompt=rs.system_prompt,
+        templates=dict(rs.templates),
+        skills={k: v for k, v in rs.skills.items() if k != ROUTER_SKILL_ID},
+        apis=dict(rs.apis),
+    )
+    assert validate_all(no_router_rs) == []
 
 
 def test_no_customer_phone_input_collision():
@@ -87,7 +158,7 @@ def test_template_120_deposit_else_branch_fix():
 
 
 def test_pretty_number_fields_config():
-    """验证靓号相关字段配置支持多档活动名称拼接（derive）与非靓号默认值。#Created By AiCoding(codex)"""
+    """验证靓号相关字段配置支持多档活动名称拼接（derive）、非靓号默认值及顶层网关报错拦截。#Created By AiCoding(codex)"""
     rs = load_resource_dir(PROD_SEED_DIR)
     cat_131 = rs.templates[131].definition.field("手机号类别")
     assert cat_131 is not None and cat_131.whenMissing == "value" and cat_131.defaultValue == "非靓号"
@@ -97,6 +168,100 @@ def test_pretty_number_fields_config():
         ev_field = tpl.definition.field("靓号活动名称")
         assert grade_field is not None and grade_field.evidence == "quote"
         assert ev_field is not None and ev_field.evidence == "derive"
+
+    pretty_api = rs.apis["cc_pretty_num_info_query"]
+    assert pretty_api.response.success is not None and pretty_api.response.success.missingAs == "failure"
+    err_res = extract_records(
+        pretty_api,
+        parse_xml("<operation_out><response><resp_code>9999</resp_code><resp_desc>超时</resp_desc></response></operation_out>"),
+    )
+    assert err_res.ok is False and err_res.no_data is False
+    nodata_res = extract_records(
+        pretty_api,
+        parse_xml("<operation_out><content><ret_code>1</ret_code><ret_msg>号码不存在</ret_msg></content></operation_out>"),
+    )
+    assert nodata_res.ok is True and nodata_res.no_data is True and nodata_res.records == []
+
+
+def test_batch2_seed_consistency_fixes():
+    """验证 Batch 2 模板与 Skill 一致性修复：安装地址/标准资费 derive、111/114/115 违约责任分支、deadlineDate 入参等。#Created By AiCoding(codex)"""
+    rs = load_resource_dir(PROD_SEED_DIR)
+
+    # 1) 模板 121 安装地址支持 extraInfo 回退（evidence=derive）
+    tpl121 = rs.templates[121]
+    addr_field = tpl121.definition.field("安装地址")
+    assert addr_field is not None and addr_field.evidence == "derive" and addr_field.defaultValue == "无"
+    rep121 = {f.name: {"status": "not_found", "value": None, "evidence": [], "reasoning": ""} for f in tpl121.definition.fields}
+    rep121["安装地址"] = {
+        "status": "found",
+        "value": "南京市鼓楼区中山北路1号",
+        "evidence": [{"type": "input", "key": "extraInfo"}],
+        "reasoning": "单据无安装地址，从 extraInfo 提取",
+    }
+    issues_121 = EvidenceChecker(
+        tpl121, {"extraInfo": '{"安装地址":"南京市鼓楼区中山北路1号"}'}, "", Workspace()
+    ).check(rep121)
+    assert issues_121 == []
+
+    # 2) 10 个模板的标准资费为 derive，允许将“月费10元”标准化为“10元/月”
+    tariff_tids = (100, 101, 102, 103, 104, 116, 119, 122, 125, 126)
+    for tid in tariff_tids:
+        tf = rs.templates[tid].definition.field("标准资费")
+        assert tf is not None and tf.evidence == "derive", f"模板 {tid} 标准资费应为 derive"
+    tpl100 = rs.templates[100]
+    ws100 = Workspace()
+    ws100.add_result(ApiResult(
+        result_id="r1", api="querySMSSendInfo", title="短信", args={}, ok=True, error=None, columns={},
+        records=[{"smsContent": "您已办理套餐，月费10元。", "smsSendTime": "20261105100000"}], cost_ms=1,
+    ))
+    rep100 = {f.name: {"status": "not_found", "value": None, "evidence": [], "reasoning": ""} for f in tpl100.definition.fields}
+    rep100["标准资费"] = {
+        "status": "found",
+        "value": "10元/月",
+        "evidence": [{"type": "api", "resultId": "r1", "row": 0, "column": "smsContent"}],
+        "reasoning": "月费10元标准化为10元/月",
+    }
+    assert EvidenceChecker(tpl100, {}, "", ws100).check(rep100) == []
+
+    # 3) 模板 111 / 114 / 115 违约责任恒真分支修复
+    for tid in (111, 114):
+        tpl = rs.templates[tid]
+        bf = tpl.definition.field("违约责任")
+        assert bf is not None and bf.visible is False and bf.whenMissing == "empty"
+        miss_rep = {f.name: {"status": "not_found", "value": None, "evidence": [], "reasoning": ""} for f in tpl.definition.fields}
+        rendered_miss, _ = render_body(tpl.body, build_render_context(tpl, miss_rep))
+        assert "支付违约金" not in rendered_miss
+        hit_rep = dict(miss_rep)
+        hit_rep["违约责任"] = {"status": "found", "value": "提前解约需赔付违约金", "evidence": [], "reasoning": ""}
+        rendered_hit, _ = render_body(tpl.body, build_render_context(tpl, hit_rep))
+        assert "支付违约金" in rendered_hit
+
+    tpl115 = rs.templates[115]
+    bf115 = tpl115.definition.field("违约责任")
+    assert bf115 is not None and bf115.visible is True and bf115.whenMissing == "placeholder"
+    miss115 = {f.name: {"status": "not_found", "value": None, "evidence": [], "reasoning": ""} for f in tpl115.definition.fields}
+    rendered115_miss, used115_miss = render_body(tpl115.body, build_render_context(tpl115, miss115))
+    assert "(4)违约责任：{{违约责任}}" in rendered115_miss
+    assert "1. 违约行为：" not in rendered115_miss
+    assert "违约行为" not in used115_miss and "违约时间" not in used115_miss
+    hit115 = dict(miss115)
+    hit115["违约责任"] = {"status": "found", "value": "机卡分离停机", "evidence": [], "reasoning": ""}
+    rendered115_hit, used115_hit = render_body(tpl115.body, build_render_context(tpl115, hit115))
+    assert "(4)违约责任：机卡分离停机" in rendered115_hit
+    assert "1. 违约行为：{{违约行为}}" in rendered115_hit
+    assert "违约行为" in used115_hit and "违约时间" in used115_hit
+
+    # 4) 5 个模板补齐可选入参 deadlineDate；模板 107 客户号码优先级与活动时间说明补全；reminder-sms 不回退办理日
+    for tid in (105, 108, 112, 120, 129):
+        dl_inp = rs.templates[tid].definition.input("deadlineDate")
+        assert dl_inp is not None and dl_inp.required is False, f"模板 {tid} 应包含可选入参 deadlineDate"
+    cust107 = rs.templates[107].definition.field("客户号码")
+    assert cust107 is not None and cust107.description.startswith("优先取入参「extraInfo」中的充值号码")
+    act100 = rs.templates[100].definition.field("活动时间")
+    assert act100 is not None and '"type":"api"' in act100.description and "订购短信" in act100.description
+    rem_skill = rs.skills["reminder-sms"].body
+    assert "绝不用作提醒短信查询日" in rem_skill
+    assert "直接退回入参 `创建时间` 当天日期" not in rem_skill
 
 
 def test_prod_seed_template_ids_match_java_resource_db():

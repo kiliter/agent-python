@@ -183,17 +183,21 @@ async def test_date_shift_formats_windows_and_errors(tmp_path: Path):
 
 # ============================================================================ 3. expand_period
 async def test_expand_period_months_ranges_and_single_values(tmp_path: Path):
-    # 1. $ 与多分隔符账期列表（按出现顺序去重，汇总最小/最大窗口）
+    # 1. $ 闭区间（2 段有序）与多段/多分隔符账期列表（离散去重并统一按月份升序排列）
+    p_dollar_range = pure_expand_period("202607$202610")
+    assert p_dollar_range["months"] == ["202607", "202608", "202609", "202610"]
+    assert p_dollar_range["startDate"] == "20260701" and p_dollar_range["endDate"] == "20261031"
+
     p_dollar = pure_expand_period("202611$202610$202611")
-    assert p_dollar["months"] == ["202611", "202610"]
+    assert p_dollar["months"] == ["202610", "202611"]
     assert p_dollar["startDate"] == "20261001" and p_dollar["endDate"] == "20261130"
     assert p_dollar["startTime"] == "20261001000000" and p_dollar["endTime"] == "20261130235959"
     assert p_dollar["monthRanges"][0] == {
-        "month": "202611",
-        "startDate": "20261101",
-        "endDate": "20261130",
-        "start": "20261101000000",
-        "end": "20261130235959",
+        "month": "202610",
+        "startDate": "20261001",
+        "endDate": "20261031",
+        "start": "20261001000000",
+        "end": "20261031235959",
     }
 
     p_semi = pure_expand_period("2026-09; 2026年10月,202611")
@@ -347,6 +351,7 @@ async def test_query_result_enhanced_operators_anyof_and_multi_results(tmp_path:
         resultIds=["r1", "r2", "r3"],
     )
     assert merged == {
+        "callId": "t1",
         "resultIds": ["r1", "r2", "r3"],
         "total": 2,
         "rows": [
@@ -355,7 +360,7 @@ async def test_query_result_enhanced_operators_anyof_and_multi_results(tmp_path:
         ],
     }
 
-    # 2. 单结果向后兼容 + startsWith + anyOf（OR 条件）
+    # 2. 单结果向后兼容 + startsWith + anyOf（OR 条件）+ 返回 callId
     single = await query_result(
         _ctx(deps),
         "r1",
@@ -366,14 +371,14 @@ async def test_query_result_enhanced_operators_anyof_and_multi_results(tmp_path:
         ],
         orderBy=OrderBy(column="payDatetime", desc=False),
     )
-    assert set(single.keys()) == {"resultId", "total", "rows"}
-    assert single["resultId"] == "r1" and single["total"] == 2
+    assert set(single.keys()) == {"callId", "resultId", "total", "rows"}
+    assert single["callId"] == "t2" and single["resultId"] == "r1" and single["total"] == 2
     assert [r["row"] for r in single["rows"]] == [0, 1]
     assert "resultId" not in single["rows"][0]
 
-    # 3. 多结果中存在 ok=False 的接口结果时返回结构化失败，不静默吞掉失败月份
+    # 3. 多结果中存在 ok=False 的接口结果时返回结构化失败（含 callId），不静默吞掉失败月份
     failed_merge = await query_result(_ctx(deps), resultIds=["r1", "r_fail"])
-    assert failed_merge["ok"] is False and "r_fail" in failed_merge["error"]
+    assert failed_merge["callId"] == "t3" and failed_merge["ok"] is False and "r_fail" in failed_merge["error"]
 
     # 4. 不存在的 resultId 或缺失 endValue 的 between 条件触发 ModelRetry
     with pytest.raises(ModelRetry):

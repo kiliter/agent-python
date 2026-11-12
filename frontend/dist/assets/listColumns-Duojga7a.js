@@ -1,0 +1,3 @@
+function c(r){return(r||[]).map(e=>[e.name,e.type||"文本",(e.enumValues||[]).join("/"),e.description||""].join("|")).join(`
+`)}function d(r){const e=[],i=new Set,l=r.split(`
+`).map(t=>t.trim()).filter(Boolean);for(const[t,m]of l.entries()){const[n="",a="",p="",...f]=m.split("|").map(s=>s.trim());if(!n)return{columns:e,error:`第 ${t+1} 行缺少列名`};if(i.has(n))return{columns:e,error:`列「${n}」重复定义`};i.add(n);const o=a==="枚举"||a==="enum"?"枚举":"文本",u=o==="枚举"?[...new Set(p.split(/[/,，]/).map(s=>s.trim()).filter(Boolean))]:[];if(o==="枚举"&&u.length===0)return{columns:e,error:`枚举列「${n}」请至少配置一个可选值`};e.push({name:n,type:o,enumValues:u,description:f.join("|")})}return e.length===0?{columns:e,error:"列表字段请至少定义一列"}:{columns:e,error:""}}export{c as f,d as p};

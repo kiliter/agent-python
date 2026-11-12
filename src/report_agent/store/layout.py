@@ -127,6 +127,7 @@ class DataLayout:
         self.current = self.releases / "current"
         self.release_index = self.releases / "index.jsonl"
         self.runs = self.root / "runs"
+        self.chats = self.root / "chats"
         self.cases = self.root / "cases"
         self.mock_gateway = self.root / "mock-gateway"
         self.config = self.root / "config"
@@ -134,7 +135,7 @@ class DataLayout:
 
     def ensure(self) -> None:
         """创建基础目录。"""
-        for p in (self.drafts, self.releases, self.runs, self.cases, self.mock_gateway, self.config):
+        for p in (self.drafts, self.releases, self.runs, self.chats, self.cases, self.mock_gateway, self.config):
             p.mkdir(parents=True, exist_ok=True)
 
     def release_dir(self, rev: str) -> Path:

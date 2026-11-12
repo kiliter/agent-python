@@ -1,0 +1,341 @@
+/* #Created By AiCoding(codex) 嵌入式聊天窗口全局样式 · ChatGPT Web PC 端风格纯亮色设计体系（严禁暗色系与左右分栏） */
+
+:root {
+  color-scheme: light;
+
+  /* ChatGPT Web PC 纯亮色核心设计令牌 */
+  --gpt-bg: #ffffff;
+  --gpt-bg-subtle: #fafafa;
+  --gpt-bg-muted: #f4f4f5;
+  --gpt-bg-hover: #f4f4f5;
+
+  --gpt-border: #e4e4e7;
+  --gpt-border-soft: rgba(24, 24, 27, 0.08);
+  --gpt-border-strong: #d4d4d8;
+
+  --gpt-ink: #18181b;
+  --gpt-ink-secondary: #52525b;
+  --gpt-ink-muted: #71717a;
+  --gpt-ink-subtle: #a1a1aa;
+
+  /* 点缀色：克制皇家蓝 + 深石墨黑主操作色 */
+  --gpt-accent: #2563eb;
+  --gpt-accent-hover: #1d4ed8;
+  --gpt-accent-soft: #eff6ff;
+  --gpt-accent-border: #bfdbfe;
+
+  --gpt-btn-dark: #18181b;
+  --gpt-btn-dark-hover: #27272a;
+
+  /* 清爽浅底语义色 */
+  --gpt-emerald: #059669;
+  --gpt-emerald-bg: #ecfdf5;
+  --gpt-emerald-border: #a7f3d0;
+
+  --gpt-amber: #b45309;
+  --gpt-amber-strong: #d97706;
+  --gpt-amber-bg: #fffbeb;
+  --gpt-amber-border: #fde68a;
+
+  --gpt-coral: #dc2626;
+  --gpt-coral-bg: #fef2f2;
+  --gpt-coral-border: #fecaca;
+
+  /* 细腻层级弥散阴影 */
+  --gpt-shadow-xs: 0 1px 2px rgba(24, 24, 27, 0.04);
+  --gpt-shadow-sm: 0 1px 3px rgba(24, 24, 27, 0.05), 0 4px 12px rgba(24, 24, 27, 0.04);
+  --gpt-shadow-composer: 0 2px 8px rgba(24, 24, 27, 0.04), 0 10px 28px -6px rgba(24, 24, 27, 0.07);
+  --gpt-shadow-composer-focus: 0 4px 14px rgba(24, 24, 27, 0.06), 0 14px 34px -8px rgba(24, 24, 27, 0.1);
+  --gpt-shadow-popover: 0 6px 18px -4px rgba(24, 24, 27, 0.08), 0 20px 40px -10px rgba(24, 24, 27, 0.14);
+  --gpt-shadow-modal: 0 8px 24px -4px rgba(24, 24, 27, 0.1), 0 28px 60px -12px rgba(24, 24, 27, 0.2);
+
+  /* 字体栈 */
+  --gpt-font-sans: 'PingFang SC', 'Hiragino Sans GB', -apple-system, BlinkMacSystemFont, 'Microsoft YaHei', 'Segoe UI',
+    sans-serif;
+  --gpt-font-mono: 'JetBrains Mono', 'SFMono-Regular', ui-monospace, Menlo, Consolas, monospace;
+
+  /* 兼容子组件内部引用的令牌映射（全部对齐纯亮色体系） */
+  --eb-bg-canvas: var(--gpt-bg);
+  --eb-bg-surface: var(--gpt-bg);
+  --eb-bg-subtle: var(--gpt-bg-subtle);
+  --eb-bg-muted: var(--gpt-bg-muted);
+  --eb-primary: var(--gpt-accent);
+  --eb-primary-hover: var(--gpt-accent-hover);
+  --eb-primary-tint: var(--gpt-accent-soft);
+  --eb-primary-border: var(--gpt-accent-border);
+  --eb-ink-strong: var(--gpt-ink);
+  --eb-ink-body: var(--gpt-ink-secondary);
+  --eb-ink-muted: var(--gpt-ink-muted);
+  --eb-ink-subtle: var(--gpt-ink-subtle);
+  --eb-emerald: var(--gpt-emerald);
+  --eb-emerald-bg: var(--gpt-emerald-bg);
+  --eb-emerald-border: var(--gpt-emerald-border);
+  --eb-amber: var(--gpt-amber);
+  --eb-amber-bg: var(--gpt-amber-bg);
+  --eb-amber-border: var(--gpt-amber-border);
+  --eb-coral: var(--gpt-coral);
+  --eb-coral-bg: var(--gpt-coral-bg);
+  --eb-coral-border: var(--gpt-coral-border);
+  --eb-slate: var(--gpt-ink-secondary);
+  --eb-slate-bg: var(--gpt-bg-muted);
+  --eb-slate-border: var(--gpt-border);
+  --eb-border: var(--gpt-border);
+  --eb-border-strong: var(--gpt-border-strong);
+  --eb-font-sans: var(--gpt-font-sans);
+  --eb-font-mono: var(--gpt-font-mono);
+
+  /* Element Plus 亮色主题对齐 */
+  --el-color-primary: #2563eb;
+  --el-color-primary-light-3: #60a5fa;
+  --el-color-primary-light-5: #93c5fd;
+  --el-color-primary-light-7: #bfdbfe;
+  --el-color-primary-light-8: #dbeafe;
+  --el-color-primary-light-9: #eff6ff;
+  --el-color-primary-dark-2: #1d4ed8;
+  --el-color-success: #059669;
+  --el-color-success-light-9: #ecfdf5;
+  --el-color-warning: #d97706;
+  --el-color-warning-light-9: #fffbeb;
+  --el-color-danger: #dc2626;
+  --el-color-danger-light-9: #fef2f2;
+  --el-border-radius-base: 10px;
+  --el-text-color-primary: #18181b;
+  --el-text-color-regular: #52525b;
+  --el-text-color-secondary: #71717a;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: #ffffff;
+  color-scheme: light;
+}
+
+body {
+  font-family: var(--gpt-font-sans);
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--gpt-ink);
+  background: #ffffff;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-variant-numeric: tabular-nums;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* 清爽轻盈滚动条 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(113, 113, 122, 0.22);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(113, 113, 122, 0.4);
+}
+
+/* ==================== 舞台内 Element Plus 浮层与弹窗约束（绝不脱离 .embed-stage） ==================== */
+.embed-stage .el-overlay {
+  position: absolute;
+  inset: 0;
+  background-color: rgba(24, 24, 27, 0.28);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  z-index: 2200 !important;
+}
+
+.embed-stage .el-overlay-message-box {
+  position: absolute;
+  inset: 0;
+}
+
+.embed-stage .el-message-box {
+  max-width: min(460px, calc(100% - 32px));
+  border-radius: 16px;
+  border: 1px solid var(--gpt-border);
+  box-shadow: var(--gpt-shadow-modal);
+  background: #ffffff;
+}
+
+.embed-stage .el-message {
+  position: absolute !important;
+  z-index: 2400 !important;
+  border-radius: 999px;
+  padding: 8px 16px;
+  box-shadow: var(--gpt-shadow-popover);
+}
+
+.embed-stage .el-popper {
+  border-radius: 12px;
+  border-color: var(--gpt-border);
+}
+
+/* ==================== 大尺寸舞台内居中弹窗公共骨架（支持页内全屏无缝切换） ==================== */
+.stage-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(24, 24, 27, 0.32);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  transition: padding 0.18s ease;
+}
+.stage-modal-backdrop.is-fullscreen {
+  padding: 0;
+}
+
+.stage-modal-card {
+  background: #ffffff;
+  border: 1px solid var(--gpt-border);
+  border-radius: 18px;
+  box-shadow: var(--gpt-shadow-modal);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  max-width: 100%;
+  max-height: 100%;
+  transition: width 0.18s ease, height 0.18s ease, border-radius 0.18s ease;
+}
+.stage-modal-card.is-fullscreen {
+  width: var(--stage-w, 100%) !important;
+  height: var(--stage-h, 100%) !important;
+  max-width: none !important;
+  max-height: none !important;
+  margin: 0 !important;
+  border-radius: 0 !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+/* ==================== Markdown 正文排版（ChatGPT Web 舒展阅读感） ==================== */
+.md-body {
+  line-height: 1.74;
+  word-break: break-word;
+  color: var(--gpt-ink);
+  font-size: 14.5px;
+}
+.md-body > :first-child {
+  margin-top: 0;
+}
+.md-body > :last-child {
+  margin-bottom: 0;
+}
+.md-body p {
+  margin: 0.55em 0;
+}
+.md-body strong {
+  color: var(--gpt-ink);
+  font-weight: 600;
+}
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4 {
+  margin: 0.95em 0 0.45em;
+  line-height: 1.38;
+  color: var(--gpt-ink);
+  font-weight: 650;
+  letter-spacing: -0.015em;
+}
+.md-body h1 {
+  font-size: 1.34em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--gpt-border);
+}
+.md-body h2 {
+  font-size: 1.18em;
+}
+.md-body h3 {
+  font-size: 1.06em;
+}
+.md-body ul,
+.md-body ol {
+  padding-left: 1.45em;
+  margin: 0.5em 0;
+}
+.md-body li + li {
+  margin-top: 0.25em;
+}
+.md-body table {
+  border-collapse: collapse;
+  margin: 0.75em 0;
+  width: max-content;
+  min-width: 100%;
+  max-width: 100%;
+  display: block;
+  overflow-x: auto;
+  border-radius: 10px;
+}
+.md-body th,
+.md-body td {
+  border: 1px solid var(--gpt-border);
+  padding: 7px 13px;
+  font-size: 13px;
+  text-align: left;
+  vertical-align: top;
+}
+.md-body th {
+  background: var(--gpt-bg-subtle);
+  color: var(--gpt-ink);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.md-body code {
+  font-family: var(--gpt-font-mono);
+  background: var(--gpt-bg-muted);
+  color: #18181b;
+  padding: 1.5px 6px;
+  border-radius: 5px;
+  font-size: 0.88em;
+}
+.md-body pre {
+  background: var(--gpt-bg-subtle);
+  border: 1px solid var(--gpt-border);
+  padding: 12px 15px;
+  border-radius: 10px;
+  overflow-x: auto;
+}
+.md-body pre code {
+  background: none;
+  color: var(--gpt-ink);
+  padding: 0;
+}
+.md-body blockquote {
+  margin: 0.65em 0;
+  padding: 7px 14px;
+  border-left: 3px solid var(--gpt-border-strong);
+  background: var(--gpt-bg-subtle);
+  border-radius: 0 8px 8px 0;
+  color: var(--gpt-ink-secondary);
+}
+.md-body hr {
+  border: none;
+  border-top: 1px solid var(--gpt-border);
+  margin: 0.95em 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

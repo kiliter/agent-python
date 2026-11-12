@@ -20,10 +20,15 @@ import {
   Edit3,
   Check,
   X,
+  Eye,
+  EyeOff,
+  KeyRound,
+  Trash2,
 } from 'lucide-vue-next'
 import { usePlatformStore, type SettingsSubView } from '@/stores/platform'
 import { platformApi, errorMessage } from '@/api/platformApi'
 import type {
+  ApiKeySettings,
   ModelInfo,
   Revision,
   RuntimeConfig,
@@ -427,12 +432,223 @@ const effectiveRuntimeConfig = computed<RuntimeConfig | null>(() => {
     gatewayAccessTokenMasked: '',
     gatewayXmlStyle: info.gatewayXmlStyle || 'java',
     gatewayConnectTimeoutS: info.gatewayConnectTimeoutS ?? 5,
+    hasReportApiKeys: false,
+    reportApiKeysMasked: '',
+    reportApiKeyCount: 0,
   }
 })
 
 const runtimeActiveRev = computed(
   () => store.runtimeState?.activeRev || store.modelInfo?.activeRev || 'c1',
 )
+
+// ==================== 4.1 上游与嵌入调用凭证（X-API-Key）热更新管理 ====================
+const apiKeySettings = ref<ApiKeySettings | null>(null)
+const apiKeyRevealed = ref(false)
+const apiKeyFetching = ref(false)
+const apiKeyWorking = ref(false)
+const isEditingApiKey = ref(false)
+const apiKeyDraft = ref('')
+const apiKeyDraftShowPlain = ref(false)
+const apiKeyNote = ref('')
+
+const apiKeyConfigured = computed<boolean>(() => {
+  if (apiKeySettings.value) return apiKeySettings.value.configured
+  return Boolean(effectiveRuntimeConfig.value?.hasReportApiKeys)
+})
+
+const apiKeyCount = computed<number>(() => {
+  if (apiKeySettings.value) return apiKeySettings.value.count
+  return effectiveRuntimeConfig.value?.reportApiKeyCount ?? (effectiveRuntimeConfig.value?.hasReportApiKeys ? 1 : 0)
+})
+
+const apiKeyDisplayValue = computed<string>(() => {
+  if (!apiKeyConfigured.value) return '未设置'
+  if (apiKeyRevealed.value && apiKeySettings.value?.apiKeys) {
+    return apiKeySettings.value.apiKeys
+  }
+  if (apiKeySettings.value?.masked) return apiKeySettings.value.masked
+  return effectiveRuntimeConfig.value?.reportApiKeysMasked || '***'
+})
+
+async function loadApiKeySettings(silent = false): Promise<ApiKeySettings | null> {
+  apiKeyFetching.value = true
+  try {
+    const res = await platformApi.fetchApiKeySettings()
+    apiKeySettings.value = res
+    return res
+  } catch (err) {
+    if (!silent) {
+      store.showError(err, '获取 API Key 配置失败')
+    }
+    return null
+  } finally {
+    apiKeyFetching.value = false
+  }
+}
+
+async function syncRuntimeAfterApiKeyChange(res: ApiKeySettings) {
+  apiKeySettings.value = res
+  if (res.runtimeState) {
+    store.runtimeState = res.runtimeState
+  }
+  const [info, rtRevs] = await Promise.all([
+    platformApi.fetchModelInfo().catch(() => null),
+    platformApi.fetchRuntimeConfigRevisions().catch(() => null),
+  ])
+  if (info) store.modelInfo = info
+  if (rtRevs) store.runtimeRevisions = rtRevs
+}
+
+watch(
+  () => store.runtimeState?.activeRev,
+  newRev => {
+    if (newRev && apiKeySettings.value && apiKeySettings.value.activeRev !== newRev) {
+      apiKeyRevealed.value = false
+      void loadApiKeySettings(true)
+    }
+  },
+)
+
+async function handleToggleRevealApiKey() {
+  if (!apiKeyConfigured.value) return
+  if (apiKeyRevealed.value) {
+    apiKeyRevealed.value = false
+    return
+  }
+  if (!apiKeySettings.value || apiKeySettings.value.activeRev !== runtimeActiveRev.value) {
+    const loaded = await loadApiKeySettings(false)
+    if (!loaded) return
+  }
+  if (apiKeySettings.value?.configured) {
+    apiKeyRevealed.value = true
+  }
+}
+
+async function handleCopyApiKey() {
+  if (!apiKeyConfigured.value) return
+  let current = apiKeySettings.value
+  if (!current || current.activeRev !== runtimeActiveRev.value || !current.primaryKey) {
+    current = await loadApiKeySettings(false)
+  }
+  if (!current?.primaryKey) {
+    store.showToast('当前未配置可复制的 API Key', 'warning')
+    return
+  }
+  const toastMsg =
+    current.count > 1
+      ? `已复制主 API Key（共配置 ${current.count} 把密钥）`
+      : '已复制 API Key 到剪贴板'
+  await store.copyText(current.primaryKey, toastMsg)
+}
+
+function handleRegenerateApiKey() {
+  if (apiKeyWorking.value) return
+  ElMessageBox.confirm(
+    '重新生成后原 API Key 将立即失效，外部系统与聊天嵌入端需使用新密钥，确认重新生成吗？',
+    '确认重新生成 API Key',
+    {
+      confirmButtonText: '确认重新生成',
+      cancelButtonText: '取消',
+      type: 'warning',
+    },
+  )
+    .then(async () => {
+      apiKeyWorking.value = true
+      try {
+        const res = await platformApi.regenerateApiKey('重新生成调用 API Key')
+        await syncRuntimeAfterApiKeyChange(res)
+        apiKeyRevealed.value = true
+        isEditingApiKey.value = false
+        store.showToast('已重新生成 API Key 并立即生效，请及时复制保存新密钥')
+      } catch (err) {
+        store.showError(err, '重新生成 API Key 失败')
+      } finally {
+        apiKeyWorking.value = false
+      }
+    })
+    .catch(() => {})
+}
+
+async function handleToggleEditApiKey() {
+  if (isEditingApiKey.value) {
+    isEditingApiKey.value = false
+    return
+  }
+  let current = apiKeySettings.value
+  if (!current || current.activeRev !== runtimeActiveRev.value) {
+    current = await loadApiKeySettings(true)
+  }
+  apiKeyDraft.value = current?.apiKeys || ''
+  apiKeyDraftShowPlain.value = false
+  apiKeyNote.value = ''
+  isEditingApiKey.value = true
+}
+
+async function handleSaveCustomApiKey() {
+  if (apiKeyWorking.value) return
+  const parts = apiKeyDraft.value
+    .split(',')
+    .map(k => k.trim())
+    .filter(Boolean)
+  if (parts.length === 0) {
+    handleClearApiKey()
+    return
+  }
+  if (parts.some(k => /\s/.test(k))) {
+    store.showToast('单把 API Key 内不能包含空白字符，多把密钥请用英文逗号分隔', 'warning')
+    return
+  }
+  apiKeyWorking.value = true
+  try {
+    const res = await platformApi.updateApiKeySettings(parts.join(','), apiKeyNote.value.trim())
+    await syncRuntimeAfterApiKeyChange(res)
+    isEditingApiKey.value = false
+    store.showToast(`调用凭证 API Key 已热更新生效（启用 ${res.count} 把密钥）`)
+  } catch (err) {
+    store.showError(err, '保存 API Key 失败')
+  } finally {
+    apiKeyWorking.value = false
+  }
+}
+
+function handleClearApiKey() {
+  if (apiKeyWorking.value) return
+  if (!apiKeyConfigured.value) {
+    apiKeyDraft.value = ''
+    isEditingApiKey.value = false
+    store.showToast('当前已是免鉴权放行状态', 'info')
+    return
+  }
+  ElMessageBox.confirm(
+    '清空后上游报告填写接口与嵌入式聊天窗口将免 X-API-Key 鉴权直接放行，确认清空吗？',
+    '确认清空免鉴权',
+    {
+      confirmButtonText: '确认清空',
+      cancelButtonText: '取消',
+      type: 'warning',
+    },
+  )
+    .then(async () => {
+      apiKeyWorking.value = true
+      try {
+        const res = await platformApi.updateApiKeySettings(
+          '',
+          apiKeyNote.value.trim() || '清空调用 API Key（免鉴权放行）',
+        )
+        await syncRuntimeAfterApiKeyChange(res)
+        apiKeyRevealed.value = false
+        apiKeyDraft.value = ''
+        isEditingApiKey.value = false
+        store.showToast('已清空 API Key，当前恢复免鉴权放行', 'warning')
+      } catch (err) {
+        store.showError(err, '清空 API Key 失败')
+      } finally {
+        apiKeyWorking.value = false
+      }
+    })
+    .catch(() => {})
+}
 
 function populateRuntimeForm(cfg: RuntimeConfig | null, note = '') {
   if (!cfg) return
@@ -713,6 +929,10 @@ const selectedRuntimeRevKey = ref<string>('')
 const runtimeShowDiffOnly = ref(false)
 
 const RUNTIME_KEY_LABELS: Record<string, string> = {
+  reportApiKeys: '调用凭证 API Key',
+  hasReportApiKeys: '调用凭证鉴权状态',
+  reportApiKeysMasked: '调用凭证 API Key（脱敏）',
+  reportApiKeyCount: '调用凭证密钥数量',
   gatewayMode: '统一网关模式',
   gatewayUrl: '统一网关地址',
   gatewayXmlStyle: 'XML 报文风格',
@@ -774,6 +994,7 @@ const selectedRuntimeRev = computed<RuntimeConfigRevision | null>(() => {
 })
 
 const COMPARE_CONFIG_KEYS: Array<keyof RuntimeConfig> = [
+  'reportApiKeysMasked',
   'gatewayMode',
   'gatewayUrl',
   'gatewayXmlStyle',
@@ -802,6 +1023,12 @@ const COMPARE_CONFIG_KEYS: Array<keyof RuntimeConfig> = [
 ]
 
 function formatCfgValue(cfg: RuntimeConfig, key: keyof RuntimeConfig): string {
+  if (key === 'reportApiKeysMasked') {
+    if (!cfg.hasReportApiKeys) return '未配置（免鉴权放行）'
+    const countSuffix =
+      cfg.reportApiKeyCount && cfg.reportApiKeyCount > 1 ? `（共 ${cfg.reportApiKeyCount} 把）` : ''
+    return `${cfg.reportApiKeysMasked || '已配置'}${countSuffix}`
+  }
   if (key === 'llmApiKeyMasked') {
     return cfg.hasLlmApiKey ? cfg.llmApiKeyMasked || '已配置' : '未配置'
   }
@@ -826,6 +1053,7 @@ const runtimeCompareRows = computed(() => {
     const curVal = formatCfgValue(current, key)
     const tarVal = formatCfgValue(target, key)
     const secretKeyMap =
+      (key === 'reportApiKeysMasked' && secretChangedSet.has('reportApiKeys')) ||
       (key === 'llmApiKeyMasked' && secretChangedSet.has('llmApiKey')) ||
       (key === 'gatewayAppIdMasked' && secretChangedSet.has('gatewayAppId')) ||
       (key === 'gatewayAccessTokenMasked' && secretChangedSet.has('gatewayAccessToken'))
@@ -874,7 +1102,7 @@ function handleRollbackRuntime(rev: string) {
 }
 
 onMounted(async () => {
-  await store.loadSettings()
+  await Promise.all([store.loadSettings(), loadApiKeySettings(true)])
   ensureDefaultPromptRev()
   ensureDefaultRuntimeRev()
   if (activeSubView.value === 'prompt-rollback' && selectedPromptRev.value) {
@@ -1040,8 +1268,145 @@ onMounted(async () => {
         </div>
       </div>
 
-      <!-- 右栏：API 统一网关与大模型热更新配置 + 系统提示词历史基线 -->
+      <!-- 右栏：上游与嵌入调用凭证 + API 统一网关与大模型热更新配置 + 系统提示词历史基线 -->
       <div v-show="!store.isFocusFullscreen" class="settings-right-col">
+        <!-- 顶部醒目区块：上游与嵌入调用凭证（X-API-Key） -->
+        <div v-show="!isEditingRuntime" class="card settings-apikey-card">
+          <div class="card-header settings-spec-header">
+            <div class="card-title" style="flex-wrap: wrap; gap: 6px">
+              <KeyRound :size="14" style="color: var(--primary); flex-shrink: 0" />
+              <span>上游与嵌入调用凭证（X-API-Key）</span>
+              <span v-if="apiKeyConfigured" class="apikey-status-tag is-enabled">
+                已启用鉴权（{{ apiKeyCount }} 把密钥）
+              </span>
+              <span v-else class="apikey-status-tag is-open">
+                未配置（免鉴权放行）
+              </span>
+            </div>
+
+            <div class="spec-head-actions">
+              <button
+                type="button"
+                class="btn btn-sm"
+                :disabled="!apiKeyConfigured || apiKeyFetching || apiKeyWorking"
+                :title="apiKeyRevealed ? '隐藏完整密钥' : '显示完整明文密钥'"
+                @click="handleToggleRevealApiKey"
+              >
+                <EyeOff v-if="apiKeyRevealed" :size="12" />
+                <Eye v-else :size="12" />
+                <span>{{ apiKeyRevealed ? '隐藏' : '显示' }}</span>
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm"
+                :disabled="!apiKeyConfigured || apiKeyFetching || apiKeyWorking"
+                title="一键复制主调用密钥 (primaryKey)"
+                @click="handleCopyApiKey"
+              >
+                <Copy :size="12" />
+                <span>复制</span>
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm"
+                :disabled="apiKeyWorking"
+                title="重新生成高强度随机 API Key 并立即热生效"
+                @click="handleRegenerateApiKey"
+              >
+                <RefreshCw :size="12" />
+                <span>重新生成</span>
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm"
+                :class="{ 'btn-primary': !isEditingApiKey }"
+                :disabled="apiKeyWorking"
+                @click="handleToggleEditApiKey"
+              >
+                <Edit3 :size="12" />
+                <span>{{ isEditingApiKey ? '收起' : '配置 / 修改' }}</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="apikey-card-body">
+            <div class="apikey-display-row">
+              <span class="apikey-field-lbl mono">X-API-Key</span>
+              <code
+                class="apikey-val mono"
+                :class="{ 'is-empty': !apiKeyConfigured, 'is-plain': apiKeyRevealed && apiKeyConfigured }"
+              >
+                {{ apiKeyDisplayValue }}
+              </code>
+              <span class="apikey-sub-hint">保护 /api/v1/reports 与 /embed.html 接入</span>
+            </div>
+
+            <div v-if="isEditingApiKey" class="apikey-edit-box">
+              <div class="rt-field">
+                <div class="rt-label-row">
+                  <span class="rt-label">自定义密钥（单把或多把英文逗号分隔，不含空白）</span>
+                  <button
+                    type="button"
+                    class="btn-link"
+                    style="font-size: 11.5px; display: inline-flex; align-items: center; gap: 3px"
+                    @click="apiKeyDraftShowPlain = !apiKeyDraftShowPlain"
+                  >
+                    <EyeOff v-if="apiKeyDraftShowPlain" :size="12" />
+                    <Eye v-else :size="12" />
+                    <span>{{ apiKeyDraftShowPlain ? '掩码输入' : '明文核对' }}</span>
+                  </button>
+                </div>
+                <input
+                  v-model="apiKeyDraft"
+                  :type="apiKeyDraftShowPlain ? 'text' : 'password'"
+                  autocomplete="off"
+                  spellcheck="false"
+                  class="input mono"
+                  placeholder="例如：ra_prod_key1,ra_partner_key2"
+                />
+              </div>
+
+              <div class="apikey-edit-footer">
+                <input
+                  v-model="apiKeyNote"
+                  class="input apikey-note-input"
+                  placeholder="变更备注（选填，记入 cN 配置历史）"
+                />
+                <div class="apikey-edit-btns">
+                  <button
+                    type="button"
+                    class="btn btn-sm apikey-clear-btn"
+                    :disabled="!apiKeyConfigured || apiKeyWorking"
+                    title="清空全部调用密钥，恢复免鉴权放行"
+                    @click="handleClearApiKey"
+                  >
+                    <Trash2 :size="12" />
+                    <span>清空免鉴权</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-sm"
+                    :disabled="apiKeyWorking"
+                    @click="isEditingApiKey = false"
+                  >
+                    <X :size="12" />
+                    <span>取消</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-primary"
+                    :disabled="apiKeyWorking"
+                    @click="handleSaveCustomApiKey"
+                  >
+                    <Check :size="12" />
+                    <span>{{ apiKeyWorking ? '生效中…' : '保存生效' }}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- 上半区：支持在线编辑、持久化与免重启热更新的网关/模型运行参数面板 -->
         <div class="card settings-spec-card" :class="{ 'is-editing-card': isEditingRuntime }">
           <div class="card-header settings-spec-header">
@@ -1777,9 +2142,10 @@ onMounted(async () => {
               <span
                 v-for="ck in item.changedKeys.slice(0, 4)"
                 :key="ck"
-                class="changed-key-pill mono"
+                class="changed-key-pill"
+                :title="ck"
               >
-                {{ ck }}
+                {{ formatKeyLabel(ck) }}
               </span>
               <span v-if="item.changedKeys.length > 4" class="changed-key-more mono">
                 +{{ item.changedKeys.length - 4 }}
@@ -2104,7 +2470,7 @@ onMounted(async () => {
   overflow: hidden;
 }
 
-/* 右侧上下两栏，严格受控在 100vh 内滚动 */
+/* 右侧三栏，严格受控在 100vh 内滚动 */
 .settings-right-col {
   min-height: 0;
   display: flex;
@@ -2113,10 +2479,130 @@ onMounted(async () => {
   overflow: hidden;
 }
 
+.settings-apikey-card {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.apikey-status-tag {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+
+.apikey-status-tag.is-enabled {
+  background: var(--success-bg);
+  border-color: var(--success-border);
+  color: var(--success);
+}
+
+.apikey-status-tag.is-open {
+  background: var(--warning-bg);
+  border-color: var(--warning-border);
+  color: var(--warning);
+}
+
+.apikey-card-body {
+  padding: 8px 14px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.apikey-display-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-light);
+  border-radius: 5px;
+  padding: 6px 10px;
+}
+
+.apikey-field-lbl {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.apikey-val {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  word-break: break-all;
+  flex: 1 1 auto;
+  min-width: 120px;
+}
+
+.apikey-val.is-empty {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.apikey-val.is-plain {
+  color: var(--primary);
+  user-select: all;
+}
+
+.apikey-sub-hint {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-left: auto;
+}
+
+.apikey-edit-box {
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.apikey-edit-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.apikey-note-input {
+  flex: 1 1 180px;
+  min-width: 160px;
+}
+
+.apikey-edit-btns {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.apikey-clear-btn {
+  color: var(--danger);
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+}
+
+.apikey-clear-btn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
 .settings-spec-card {
-  flex: 0 1 auto;
-  max-height: 58%;
-  min-height: 0;
+  flex: 1 1 45%;
+  max-height: 48%;
+  min-height: 150px;
   display: flex;
   flex-direction: column;
   overflow: hidden;

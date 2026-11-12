@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import logging
@@ -50,9 +51,11 @@ def _record(ctx: RunContext[RunDeps], tool: str, args: dict[str, Any], output: A
 
 def _fail_or_retry(ctx: RunContext[RunDeps], tool: str, args: dict[str, Any], message: str, fallback: Any) -> Any:
     """记录异常工具调用；未超过重试次数时让模型重试，重试耗尽后返回结构化降级结果而非中断整次运行。"""
-    _record(ctx, tool, args, {"error": message}, ok=False)
+    call_id = _record(ctx, tool, args, {"error": message}, ok=False)
     if ctx.retry < ctx.max_retries:
         raise ModelRetry(message)
+    if isinstance(fallback, dict) and "callId" not in fallback:
+        return {"callId": call_id, **fallback}
     return fallback
 
 
@@ -61,35 +64,122 @@ def _cell_text(row: dict[str, Any], col: str) -> str:
     return "" if val is None else str(val)
 
 
+def _render_skill_block(deps: RunDeps, skill_id: str) -> str:
+    """组装单个 Skill 的说明文本及关联接口提示。#Created By AiCoding(codex)"""
+    skill = deps.resources.skills[skill_id]
+    apis = [a for a in skill.meta.apis if a in deps.resources.apis]
+    api_lines = "\n".join(
+        f"- {a}（{deps.resources.apis[a].title}）参数：{deps.resources.apis[a].param_hint()}"
+        for a in apis
+    )
+    return f"# Skill：{skill.title}（{skill.id}）\n\n{skill.body}\n\n" + (
+        f"## 本 Skill 可调用的接口\n{api_lines}\n" if api_lines else ""
+    )
+
+
 # ============================================================================ load_skill
-async def load_skill(ctx: RunContext[RunDeps], name: str) -> str:
-    """读取一个 Skill 的完整说明。需要查询或判断某类字段前先读取对应 Skill。
+async def load_skill(ctx: RunContext[RunDeps], name: str = "", names: list[str] | None = None) -> str:
+    """读取一个或多个 Skill 的完整说明。需要查询或判断某类字段前先读取对应 Skill。#Created By AiCoding(codex)
 
     Args:
-        name: Skill 标识，只能是“可用 Skill”中列出的标识。
+        name: 单个 Skill 标识，只能是“可用 Skill”中列出的标识。
+        names: 可选批量加载的 Skill 标识列表，一次返回多个 Skill 的说明。
     """
     deps = ctx.deps
-    if name not in deps.allowed_skills or name not in deps.resources.skills:
-        msg = f"Skill「{name}」不可用，只能加载：{deps.allowed_skills}"
-        return _fail_or_retry(ctx, "load_skill", {"name": name}, msg, f"错误：{msg}")
-    skill = deps.resources.skills[name]
-    if name not in deps.workspace.loaded_skills:
-        deps.workspace.loaded_skills.append(name)
-    _record(ctx, "load_skill", {"name": name}, {"title": skill.title}, summary={"title": skill.title})
-    apis = [a for a in skill.meta.apis if a in deps.resources.apis]
-    api_lines = "\n".join(f"- {a}（{deps.resources.apis[a].title}）参数：{deps.resources.apis[a].param_hint()}"
-                          for a in apis)
-    return f"# Skill：{skill.title}（{skill.id}）\n\n{skill.body}\n\n" + (
-        f"## 本 Skill 可调用的接口\n{api_lines}\n" if api_lines else "")
+    raw_names: list[str] = []
+    if name and str(name).strip():
+        raw_names.append(str(name).strip())
+    if names:
+        for item in names:
+            if item is not None and str(item).strip():
+                raw_names.append(str(item).strip())
+    req_names = list(dict.fromkeys(raw_names))
+
+    if not req_names:
+        rec_args = {"name": name} if names is None else {"name": name, "names": list(names)}
+        msg = f"请指定要加载的 Skill（name 或 names），可用：{deps.allowed_skills}"
+        return _fail_or_retry(ctx, "load_skill", rec_args, msg, f"错误：{msg}")
+
+    bad = [s for s in req_names if s not in deps.allowed_skills or s not in deps.resources.skills]
+    if bad:
+        rec_args = {"name": name} if names is None else (
+            {"name": name, "names": list(names)} if name else {"names": list(names)}
+        )
+        msg = (
+            f"Skill「{bad[0]}」不可用，只能加载：{deps.allowed_skills}"
+            if len(bad) == 1
+            else f"Skill {bad} 不可用，只能加载：{deps.allowed_skills}"
+        )
+        return _fail_or_retry(ctx, "load_skill", rec_args, msg, f"错误：{msg}")
+
+    for s in req_names:
+        if s not in deps.workspace.loaded_skills:
+            deps.workspace.loaded_skills.append(s)
+
+    if names is None and len(req_names) == 1:
+        skill = deps.resources.skills[req_names[0]]
+        _record(ctx, "load_skill", {"name": req_names[0]}, {"title": skill.title}, summary={"title": skill.title})
+        return _render_skill_block(deps, req_names[0])
+
+    titles = [deps.resources.skills[s].title for s in req_names]
+    rec_args = {"name": name, "names": req_names} if name else {"names": req_names}
+    rec_out = {"titles": titles} if len(titles) > 1 else {"title": titles[0], "titles": titles}
+    _record(ctx, "load_skill", rec_args, rec_out, summary=rec_out)
+    return "\n---\n\n".join(_render_skill_block(deps, s) for s in req_names)
 
 
 async def _prepare_load_skill(ctx: RunContext[RunDeps], tool_def: ToolDefinition) -> ToolDefinition | None:
     allowed = [s for s in ctx.deps.allowed_skills if s in ctx.deps.resources.skills]
     if not allowed:
         return None
-    schema = json.loads(json.dumps(tool_def.parameters_json_schema))
-    schema["properties"]["name"]["enum"] = allowed
+    orig = tool_def.parameters_json_schema
+    orig_props = orig.get("properties") or {}
+    props = dict(orig_props)
+    if "name" in props:
+        name_prop = {k: v for k, v in props["name"].items() if k != "default"}
+        name_prop["enum"] = allowed
+        props["name"] = name_prop
+    if "names" in props:
+        names_prop = dict(props["names"])
+        if "anyOf" in names_prop:
+            names_prop["anyOf"] = [
+                {**branch, "items": {**(branch.get("items") or {}), "enum": allowed}}
+                if isinstance(branch, dict) and branch.get("type") == "array"
+                else branch
+                for branch in names_prop["anyOf"]
+            ]
+        elif "items" in names_prop and isinstance(names_prop["items"], dict):
+            names_prop["items"] = {**names_prop["items"], "enum": allowed}
+        props["names"] = names_prop
+    schema = {**orig, "properties": props}
     return dataclasses.replace(tool_def, parameters_json_schema=schema)
+
+
+def _format_api_success_payload(contract: Any, result: ApiResult, default_preview_rows: int) -> dict[str, Any]:
+    """根据已缓存或新获取的成功 ApiResult 生成返回给模型的摘要字典（不含 callId）。#Created By AiCoding(codex)"""
+    max_chars = contract.response.summary.maxPreviewChars
+    n_preview = contract.preview_rows(default_preview_rows)
+    preview = []
+    for i, rec in enumerate(result.records[:n_preview]):
+        clipped = {
+            k: ("" if v is None else (str(v) if len(str(v)) <= max_chars else str(v)[:max_chars] + "…"))
+            for k, v in rec.items()
+        }
+        preview.append({**clipped, "row": i})
+    if contract.response.records.mode == "none" and result.ok and not result.no_data:
+        note = "接口调用成功（该契约声明无业务记录体）"
+    elif not result.records:
+        note = "没有记录"
+    else:
+        note = "预览内容已截断；判断和引用前必须用 query_result 读取完整列值"
+    return {
+        "resultId": result.result_id,
+        "ok": True,
+        "count": len(result.records),
+        "columns": result.columns,
+        "preview": preview,
+        "note": note,
+    }
 
 
 # ============================================================================ call_api
@@ -112,57 +202,91 @@ async def call_api(ctx: RunContext[RunDeps], name: str, args: dict[str, Any]) ->
         msg = f"接口 {name} 参数不合法：{'；'.join(errors)}。参数要求：{contract.param_hint()}"
         return _fail_or_retry(ctx, "call_api", {"name": name, "args": clean_args}, msg,
                               {"ok": False, "error": msg, "note": "接口参数不合法，请按找不到处理"})
-    t0 = time.monotonic()
+
+    ws = deps.workspace
+    cache_key: tuple[str, str] | None = None
+    if contract.idempotent:
+        cache_key = (name, json.dumps(clean_args, sort_keys=True, ensure_ascii=False))
+        cached = ws._idempotent_cache.get(cache_key)
+        if cached is not None:
+            payload = _format_api_success_payload(contract, cached, deps.settings.agent_preview_rows)
+            call_id = _record(
+                ctx, "call_api", {"name": name, "args": clean_args},
+                {"resultId": cached.result_id, "count": len(cached.records)},
+                summary={"resultId": cached.result_id, "ok": True, "count": len(cached.records), "costMs": 0},
+            )
+            return {"callId": call_id, **payload}
+        inflight = ws._idempotent_inflight.get(cache_key)
+        if inflight is not None:
+            shared = await asyncio.shield(inflight)
+            if shared.ok:
+                payload = _format_api_success_payload(contract, shared, deps.settings.agent_preview_rows)
+                call_id = _record(
+                    ctx, "call_api", {"name": name, "args": clean_args},
+                    {"resultId": shared.result_id, "count": len(shared.records)},
+                    summary={"resultId": shared.result_id, "ok": True, "count": len(shared.records), "costMs": 0},
+                )
+                return {"callId": call_id, **payload}
+
+    fut: asyncio.Future[ApiResult] | None = None
+    if cache_key is not None and cache_key not in ws._idempotent_inflight:
+        fut = asyncio.get_running_loop().create_future()
+        ws._idempotent_inflight[cache_key] = fut
+
     try:
-        res = await deps.gateway.invoke(contract, clean_args)
-    except Exception as exc:  # noqa: BLE001 - 网关意外异常转为结构化错误记录
-        log.warning("网关调用未预期异常 api=%s：%s", name, exc)
-        res = ApiCallResult(ok=False, error=f"网关调用异常：{type(exc).__name__} {exc}".strip(),
-                            cost_ms=int((time.monotonic() - t0) * 1000))
-    result = ApiResult(
-        result_id=deps.workspace.next_result_id(), api=name, title=contract.title, args=clean_args, ok=res.ok,
-        error=res.error, columns=dict(contract.response.records.columns), records=res.records,
-        cost_ms=res.cost_ms, raw=res.raw, request_preview=res.request_preview, no_data=res.no_data,
-    )
-    deps.workspace.add_result(result)
-    if not res.ok:
-        out = {"resultId": result.result_id, "ok": False, "error": res.error,
-               "note": "接口调用失败，请如实按找不到处理并写明原因，不要猜测数据"}
-        _record(ctx, "call_api", {"name": name, "args": clean_args}, out, ok=False,
-                summary={**out, "costMs": res.cost_ms})
-        return out
-    max_chars = contract.response.summary.maxPreviewChars
-    n_preview = contract.preview_rows(deps.settings.agent_preview_rows)
-    preview = []
-    for i, rec in enumerate(res.records[:n_preview]):
-        clipped = {
-            k: ("" if v is None else (str(v) if len(str(v)) <= max_chars else str(v)[:max_chars] + "…"))
-            for k, v in rec.items()
+        t0 = time.monotonic()
+        try:
+            res = await deps.gateway.invoke(contract, clean_args)
+        except Exception as exc:  # noqa: BLE001 - 网关意外异常转为结构化错误记录
+            log.warning("网关调用未预期异常 api=%s：%s", name, exc)
+            res = ApiCallResult(ok=False, error=f"网关调用异常：{type(exc).__name__} {exc}".strip(),
+                                cost_ms=int((time.monotonic() - t0) * 1000))
+        result = ApiResult(
+            result_id=ws.next_result_id(), api=name, title=contract.title, args=clean_args, ok=res.ok,
+            error=res.error, columns=dict(contract.response.records.columns), records=res.records,
+            cost_ms=res.cost_ms, raw=res.raw, request_preview=res.request_preview, no_data=res.no_data,
+        )
+        ws.add_result(result)
+        if cache_key is not None and result.ok:
+            ws._idempotent_cache[cache_key] = result
+        if fut is not None and not fut.done():
+            fut.set_result(result)
+    except BaseException as exc:
+        if fut is not None and not fut.done():
+            fut.set_exception(exc)
+        raise
+    finally:
+        if fut is not None and cache_key is not None and ws._idempotent_inflight.get(cache_key) is fut:
+            ws._idempotent_inflight.pop(cache_key, None)
+
+    if not result.ok:
+        base_err = {
+            "resultId": result.result_id,
+            "ok": False,
+            "error": result.error,
+            "note": "接口调用失败，请如实按找不到处理并写明原因，不要猜测数据",
         }
-        preview.append({**clipped, "row": i})
-    if contract.response.records.mode == "none" and res.ok and not res.no_data:
-        note = "接口调用成功（该契约声明无业务记录体）"
-    elif not res.records:
-        note = "没有记录"
-    else:
-        note = "预览内容已截断；判断和引用前必须用 query_result 读取完整列值"
-    out = {
-        "resultId": result.result_id, "ok": True, "count": len(res.records), "columns": result.columns,
-        "preview": preview,
-        "note": note,
-    }
-    _record(ctx, "call_api", {"name": name, "args": clean_args},
-            {"resultId": result.result_id, "count": len(res.records)},
-            summary={"resultId": result.result_id, "ok": True, "count": len(res.records), "costMs": res.cost_ms})
-    return out
+        call_id = _record(ctx, "call_api", {"name": name, "args": clean_args}, base_err, ok=False,
+                          summary={**base_err, "costMs": result.cost_ms})
+        return {"callId": call_id, **base_err}
+
+    payload = _format_api_success_payload(contract, result, deps.settings.agent_preview_rows)
+    call_id = _record(
+        ctx, "call_api", {"name": name, "args": clean_args},
+        {"resultId": result.result_id, "count": len(result.records)},
+        summary={"resultId": result.result_id, "ok": True, "count": len(result.records), "costMs": result.cost_ms},
+    )
+    return {"callId": call_id, **payload}
 
 
 async def _prepare_call_api(ctx: RunContext[RunDeps], tool_def: ToolDefinition) -> ToolDefinition | None:
     allowed = [a for a in ctx.deps.allowed_apis if a in ctx.deps.resources.apis]
     if not allowed:
         return None
-    schema = json.loads(json.dumps(tool_def.parameters_json_schema))
-    schema["properties"]["name"]["enum"] = allowed
+    orig = tool_def.parameters_json_schema
+    orig_props = orig.get("properties") or {}
+    props = {**orig_props, "name": {**(orig_props.get("name") or {}), "enum": allowed}}
+    schema = {**orig, "properties": props}
     hints = "；".join(f"{a}（{ctx.deps.resources.apis[a].title}）：{ctx.deps.resources.apis[a].param_hint()}"
                      for a in allowed)
     return dataclasses.replace(tool_def, parameters_json_schema=schema,
@@ -311,32 +435,40 @@ async def query_result(
         failed_res = [r for r in results_list if not r.ok]
         if failed_res:
             err = "；".join(f"{r.result_id} 调用失败：{r.error or '未知错误'}" for r in failed_res)
-            out = {
+            call_id = _record(ctx, "query_result", args, {"ok": False, "error": err, "total": 0, "rows": []}, ok=False)
+            return {
+                "callId": call_id,
                 "resultIds": rids, "ok": False, "error": err, "total": 0, "rows": [],
                 "note": "存在调用失败的接口结果，没有可合并筛选的记录",
             }
-            _record(ctx, "query_result", args, {"ok": False, "error": err, "total": 0, "rows": []}, ok=False)
-            return out
 
-        non_empty = [r for r in results_list if r.records]
-        all_cols = (
-            set().union(*(rec.keys() for r in non_empty for rec in r.records))
-            if non_empty
-            else set().union(*(r.columns for r in results_list))
-        )
-        for c in [*where_list, *any_list]:
-            if non_empty and c.column not in all_cols:
-                msg = f"列 {c.column} 不存在，可用列：{sorted(all_cols)}"
+        all_cols: set[str] = set()
+        for r in results_list:
+            all_cols.update(r.columns.keys())
+            for rec in r.records:
+                all_cols.update(rec.keys())
+        if all_cols:
+            for c in [*where_list, *any_list]:
+                if c.column not in all_cols:
+                    msg = f"列 {c.column} 不存在，可用列：{sorted(all_cols)}"
+                    return _fail_or_retry(
+                        ctx, "query_result", args, msg,
+                        {"resultIds": rids, "ok": False, "error": msg, "total": 0, "rows": []},
+                    )
+            if orderBy and orderBy.column not in all_cols:
+                msg = f"排序列 {orderBy.column} 不存在，可用列：{sorted(all_cols)}"
                 return _fail_or_retry(
                     ctx, "query_result", args, msg,
                     {"resultIds": rids, "ok": False, "error": msg, "total": 0, "rows": []},
                 )
-        if orderBy and non_empty and orderBy.column not in all_cols:
-            msg = f"排序列 {orderBy.column} 不存在，可用列：{sorted(all_cols)}"
-            return _fail_or_retry(
-                ctx, "query_result", args, msg,
-                {"resultIds": rids, "ok": False, "error": msg, "total": 0, "rows": []},
-            )
+            if columns:
+                bad_cols = [col for col in columns if col not in all_cols]
+                if bad_cols:
+                    msg = f"投影列 {', '.join(bad_cols)} 不存在，可用列：{sorted(all_cols)}"
+                    return _fail_or_retry(
+                        ctx, "query_result", args, msg,
+                        {"resultIds": rids, "ok": False, "error": msg, "total": 0, "rows": []},
+                    )
 
         merged_rows: list[tuple[str, int, dict[str, Any]]] = []
         for res in results_list:
@@ -356,12 +488,11 @@ async def query_result(
             }
             for rid, i, rec in merged_rows[:limit]
         ]
-        out = {"resultIds": rids, "total": len(merged_rows), "rows": out_rows}
-        _record(
+        call_id = _record(
             ctx, "query_result", args,
             {"total": len(merged_rows), "rows": [{"resultId": r["resultId"], "row": r["row"]} for r in out_rows]},
         )
-        return out
+        return {"callId": call_id, "resultIds": rids, "total": len(merged_rows), "rows": out_rows}
 
     if not resultId:
         msg = f"resultId 不能为空（或传入非空 resultIds），可用：{list(deps.workspace.results)}"
@@ -375,20 +506,28 @@ async def query_result(
         return _fail_or_retry(ctx, "query_result", args, msg,
                               {"resultId": resultId, "ok": False, "error": msg, "total": 0, "rows": []})
     if not res.ok:
-        out = {"resultId": resultId, "ok": False, "error": res.error, "total": 0, "rows": [],
-               "note": "该接口调用失败，没有可筛选的记录"}
-        _record(ctx, "query_result", args, {"ok": False, "error": res.error, "total": 0, "rows": []}, ok=False)
-        return out
-    all_cols = set().union(*(r.keys() for r in res.records)) if res.records else set(res.columns)
-    for c in [*where_list, *any_list]:
-        if res.records and c.column not in all_cols:
-            msg = f"列 {c.column} 不存在，可用列：{sorted(all_cols)}"
+        call_id = _record(ctx, "query_result", args, {"ok": False, "error": res.error, "total": 0, "rows": []}, ok=False)
+        return {"callId": call_id, "resultId": resultId, "ok": False, "error": res.error, "total": 0, "rows": [],
+                "note": "该接口调用失败，没有可筛选的记录"}
+    all_cols = set(res.columns.keys())
+    for r in res.records:
+        all_cols.update(r.keys())
+    if all_cols:
+        for c in [*where_list, *any_list]:
+            if c.column not in all_cols:
+                msg = f"列 {c.column} 不存在，可用列：{sorted(all_cols)}"
+                return _fail_or_retry(ctx, "query_result", args, msg,
+                                      {"resultId": resultId, "ok": False, "error": msg, "total": 0, "rows": []})
+        if orderBy and orderBy.column not in all_cols:
+            msg = f"排序列 {orderBy.column} 不存在，可用列：{sorted(all_cols)}"
             return _fail_or_retry(ctx, "query_result", args, msg,
                                   {"resultId": resultId, "ok": False, "error": msg, "total": 0, "rows": []})
-    if orderBy and res.records and orderBy.column not in all_cols:
-        msg = f"排序列 {orderBy.column} 不存在，可用列：{sorted(all_cols)}"
-        return _fail_or_retry(ctx, "query_result", args, msg,
-                              {"resultId": resultId, "ok": False, "error": msg, "total": 0, "rows": []})
+        if columns:
+            bad_cols = [col for col in columns if col not in all_cols]
+            if bad_cols:
+                msg = f"投影列 {', '.join(bad_cols)} 不存在，可用列：{sorted(all_cols)}"
+                return _fail_or_retry(ctx, "query_result", args, msg,
+                                      {"resultId": resultId, "ok": False, "error": msg, "total": 0, "rows": []})
     rows = [
         (i, r) for i, r in enumerate(res.records)
         if all(_match(_cell_text(r, c.column), c) for c in where_list)
@@ -398,9 +537,8 @@ async def query_result(
         rows.sort(key=lambda x: _cell_text(x[1], orderBy.column), reverse=orderBy.desc)
     out_rows = [{**({k: v for k, v in r.items() if k in columns} if columns else r), "row": i}
                 for i, r in rows[:limit]]
-    out = {"resultId": resultId, "total": len(rows), "rows": out_rows}
-    _record(ctx, "query_result", args, {"total": len(rows), "rows": [r["row"] for r in out_rows]})
-    return out
+    call_id = _record(ctx, "query_result", args, {"total": len(rows), "rows": [r["row"] for r in out_rows]})
+    return {"callId": call_id, "resultId": resultId, "total": len(rows), "rows": out_rows}
 
 
 # ============================================================================ 文本与日期
@@ -418,7 +556,9 @@ async def normalize_text(ctx: RunContext[RunDeps], text: str, extraChars: str = 
 
 async def text_contains(ctx: RunContext[RunDeps], target: str, text: str | None = None, normalize: bool = True,
                         extraChars: str = "") -> dict[str, Any]:
-    """判断文本是否包含目标串。不传 text 时在单据全文中查找。
+    """判断文本是否包含目标串。不传 text 时在单据全文中查找。#Created By AiCoding(codex)
+
+    normalize=True 时默认一并剥离半角/全角空格、制表符与换行符，兼容跨行折行 PDF 业务名匹配。
 
     Args:
         target: 要查找的目标串。
@@ -430,10 +570,13 @@ async def text_contains(ctx: RunContext[RunDeps], target: str, text: str | None 
     target_s = target or ""
     extra_s = extraChars or ""
     if normalize:
-        contains = normalized_contains(source, target_s, extra_s)
+        effective_extra = extra_s + " \t\r\n\u3000"
+        contains = normalized_contains(source, target_s, effective_extra)
+        norm_target = _normalize(target_s, effective_extra)
     else:
         contains = bool(target_s) and target_s in (source or "")
-    out = {"contains": contains, "normalizedTarget": _normalize(target_s, extra_s) if normalize else target_s}
+        norm_target = target_s
+    out = {"contains": contains, "normalizedTarget": norm_target}
     call_id = _record(ctx, "text_contains", {"target": target, "text": "<单据全文>" if text is None else text,
                                              "normalize": normalize, "extraChars": extraChars}, out)
     return {"callId": call_id, **out}
@@ -443,7 +586,7 @@ async def date_range(ctx: RunContext[RunDeps], time: str, unit: Literal["day", "
     """计算某个时间所在的那一天（或那个月）的开始和结束时间，格式 yyyyMMddHHmmss。
 
     Args:
-        time: 至少包含 yyyyMMdd 的时间，如 20261105103012。
+        time: 包含合法日期（unit=month 时也支持 yyyyMM / yyyy-M / yyyy年M月）的时间文本。
         unit: day 或 month。
     """
     try:
@@ -455,22 +598,43 @@ async def date_range(ctx: RunContext[RunDeps], time: str, unit: Literal["day", "
     return {"callId": call_id, "start": start, "end": end}
 
 
-async def format_date(ctx: RunContext[RunDeps], value: str, fromPattern: str, toPattern: str) -> dict[str, Any]:
-    """日期格式转换（Java 风格格式：yyyy、MM、M、dd、d、HH、mm、ss）。结果可作为 derive 证据引用 callId。
+async def format_date(
+    ctx: RunContext[RunDeps],
+    value: str = "",
+    fromPattern: str = "",
+    toPattern: str = "",
+    values: list[str] | None = None,
+) -> dict[str, Any]:
+    """日期格式转换（Java 风格格式：yyyy、MM、M、dd、d、HH、mm、ss）。结果可作为 derive 证据引用 callId。#Created By AiCoding(codex)
+
+    支持单值 value 转换（返回 value）或 values 列表批量转换（返回 values）。
 
     Args:
-        value: 原日期文本，如 20261005。
+        value: 原日期文本，如 20261005（与 values 二选一或同时传入）。
         fromPattern: 原格式，如 yyyyMMdd。
         toPattern: 目标格式，如 yyyy年M月d号。
+        values: 可选批量转换的原日期文本列表。
     """
+    rec_args: dict[str, Any] = (
+        {"value": value, "fromPattern": fromPattern, "toPattern": toPattern}
+        if values is None
+        else {**({"value": value} if value else {}), "values": list(values),
+              "fromPattern": fromPattern, "toPattern": toPattern}
+    )
     try:
+        if values is not None:
+            if not values:
+                raise ValueError("values 不能为空列表")
+            converted = [convert_date(v, fromPattern, toPattern) for v in values]
+            payload: dict[str, Any] = {"values": converted}
+            if value:
+                payload["value"] = convert_date(value, fromPattern, toPattern)
+            call_id = _record(ctx, "format_date", rec_args, payload)
+            return {"callId": call_id, "ok": True, **payload}
         out = convert_date(value, fromPattern, toPattern)
     except ValueError as exc:
-        _record(ctx, "format_date", {"value": value, "fromPattern": fromPattern, "toPattern": toPattern},
-                {"error": str(exc)}, ok=False)
-        return {"ok": False, "error": str(exc)}
-    call_id = _record(ctx, "format_date", {"value": value, "fromPattern": fromPattern, "toPattern": toPattern},
-                      {"value": out})
+        return _fail_or_retry(ctx, "format_date", rec_args, str(exc), {"ok": False, "error": str(exc)})
+    call_id = _record(ctx, "format_date", rec_args, {"value": out})
     return {"callId": call_id, "ok": True, "value": out}
 
 

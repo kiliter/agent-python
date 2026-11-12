@@ -30,15 +30,15 @@ const hasVersionDrift = computed(() => {
 })
 
 // ==================== 三向可拖拽分隔条尺寸控制 ====================
-const LEFT_MIN_W = 180
-const LEFT_MAX_W = 360
-const LEFT_DEFAULT_W = 224
+const LEFT_MIN_W = 200
+const LEFT_MAX_W = 400
+const LEFT_DEFAULT_W = 268
 
-const RIGHT_MIN_W = 270
-const RIGHT_MAX_W = 480
-const RIGHT_DEFAULT_W = 276
+const RIGHT_MIN_W = 280
+const RIGHT_MAX_W = 520
+const RIGHT_DEFAULT_W = 324
 
-const MIN_CENTER_W = 560
+const MIN_CENTER_W = 500
 
 const DEBUG_MIN_H = 132
 const DEBUG_DEFAULT_H = 244
@@ -69,7 +69,7 @@ function stopActiveDrag() {
   }
 }
 
-/** 拖拽左竖向分隔条（180px ~ 360px，同时保证中间纵列 >= 560px） */
+/** 拖拽左竖向分隔条（200px ~ 400px，同时保证中间纵列 >= 500px） */
 function startDragLeft(ev: MouseEvent) {
   if (store.ideLeftCollapsed) return
   stopActiveDrag()
@@ -102,7 +102,7 @@ function startDragLeft(ev: MouseEvent) {
   }
 }
 
-/** 拖拽右竖向分隔条（270px ~ 480px，同时保证中间纵列 >= 560px） */
+/** 拖拽右竖向分隔条（280px ~ 520px，同时保证中间纵列 >= 500px） */
 function startDragRight(ev: MouseEvent) {
   stopActiveDrag()
   draggingZone.value = 'right'
@@ -320,7 +320,7 @@ function handleStatusSyntaxClick() {
           <WorkbenchLeftExplorer />
         </div>
 
-        <!-- 左竖向可拖拽分隔条（180px ~ 360px） -->
+        <!-- 左竖向可拖拽分隔条（200px ~ 400px） -->
         <div
           v-show="!store.ideLeftCollapsed"
           class="splitter-v"
@@ -360,7 +360,7 @@ function handleStatusSyntaxClick() {
           </div>
         </main>
 
-        <!-- 右竖向可拖拽分隔条（270px ~ 480px） -->
+        <!-- 右竖向可拖拽分隔条（280px ~ 520px） -->
         <div
           class="splitter-v"
           :class="{ 'is-dragging': draggingZone === 'right' }"

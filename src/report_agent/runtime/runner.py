@@ -7,6 +7,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict, deque
+import dataclasses
+import itertools
 import json
 import logging
 import re
@@ -30,7 +33,14 @@ from ..store.releases import ReleaseStore
 from ..store.runs import RunStore, new_run_id
 from ..store.service import ResourceService
 from .deps import RunDeps
-from .evidence import EvidenceChecker, FieldIssue, format_issues, locate_quote_in_document, scalar_to_str
+from .evidence import (
+    EvidenceChecker,
+    FieldIssue,
+    format_issues,
+    get_document_index,
+    locate_quote_in_document,
+    scalar_to_str,
+)
 from .model_factory import build_model, build_model_settings
 from .output_model import build_report_model, report_to_dict
 from .prompt import USER_PROMPT, build_task_instructions
@@ -41,8 +51,10 @@ from .workspace import EventSink, ProcessEvent, Workspace
 
 log = logging.getLogger(__name__)
 
-Entry = Literal["上游调用", "试运行", "回归"]
+Entry = Literal["上游调用", "试运行", "回归", "聊天窗口"]
 _JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL | re.IGNORECASE)
+_BUNDLE_SEQ = itertools.count(1)
+_MAX_AGENT_CACHE = 128
 
 
 class InputValidationError(ValueError):
@@ -66,6 +78,8 @@ class RunRequest:
     target: Literal["online", "draft"] = "online"
     operator: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
+    # #Created By AiCoding(codex) 调用方可预先指定运行编号（聊天窗口需在启动前拿到 runId 以便订阅事件）
+    run_id: str | None = None
 
 
 def validate_inputs(template: Template, inputs: dict[str, str]) -> list[str]:
@@ -139,34 +153,119 @@ def _extract_candidate_report(active_run: Any, field_names: set[str]) -> dict[st
     return None
 
 
+def _has_valid_non_degraded_support(
+    ans: dict[str, Any],
+    report: dict[str, dict[str, Any]],
+    failed: set[str],
+    deps: RunDeps | None = None,
+) -> bool:
+    """当衍生字段引用了模型自报 not_found 前置字段时，检查是否仍具备至少一条真实有效支撑源。#Created By AiCoding(codex)"""
+    raw_ev = ans.get("evidence")
+    if not isinstance(raw_ev, list):
+        return False
+    val = ans.get("value")
+    is_empty_list = isinstance(val, list) and len(val) == 0
+    doc_idx = get_document_index(deps.workspace, deps.document) if deps is not None else None
+    for e in raw_ev:
+        if not isinstance(e, dict):
+            continue
+        t = e.get("type")
+        if t == "field":
+            ref_name = str(e.get("name") or "")
+            ref_ans = report.get(ref_name)
+            if ref_name not in failed and isinstance(ref_ans, dict) and ref_ans.get("status") == "found":
+                return True
+        elif t == "api":
+            if deps is None:
+                return True
+            rid = str(e.get("resultId") or "")
+            res = deps.workspace.results.get(rid)
+            row = e.get("row")
+            if is_empty_list:
+                if (
+                    not isinstance(row, bool)
+                    and (row is None or (isinstance(row, int) and row == 0))
+                    and res is not None
+                    and res.ok
+                    and len(res.records) == 0
+                ):
+                    return True
+            else:
+                col = str(e.get("column") or "")
+                if (
+                    res is not None
+                    and res.ok
+                    and not isinstance(row, bool)
+                    and isinstance(row, int)
+                    and 0 <= row < len(res.records)
+                    and col in res.records[row]
+                ):
+                    return True
+        elif t == "document":
+            quote = scalar_to_str(e.get("quote"))
+            if quote.strip() and (doc_idx is None or doc_idx.locate(quote)):
+                return True
+        elif t == "input":
+            key = e.get("key")
+            if deps is None:
+                if isinstance(key, str) and key:
+                    return True
+            elif (
+                isinstance(key, str)
+                and key in deps.inputs
+                and deps.inputs[key] is not None
+                and scalar_to_str(deps.inputs[key]).strip() != ""
+            ):
+                return True
+        elif is_empty_list and t == "tool" and deps is not None:
+            call = deps.workspace.tool_calls.get(str(e.get("callId") or ""))
+            if call and call.ok and isinstance(call.output, dict):
+                if call.tool == "call_api" and call.output.get("count") == 0 and not isinstance(call.output.get("count"), bool):
+                    return True
+                if call.tool == "query_result" and call.output.get("total") == 0 and not isinstance(call.output.get("total"), bool):
+                    return True
+    return False
+
+
 def _cascade_degraded_fields(
     report: dict[str, dict[str, Any]],
     failed: set[str],
     issues: list[FieldIssue],
+    deps: RunDeps | None = None,
 ) -> None:
-    """将证据中引用了已降级字段（type=field）的下游衍生字段级联降级，直到不动点。"""
-    if not failed:
-        return
+    """将证据中引用了已降级字段或悬空依赖 not_found 前置字段的下游衍生字段递归级联降级，直到不动点。#Created By AiCoding(codex)"""
     while True:
-        newly_failed: list[tuple[str, list[str]]] = []
+        newly_failed: list[tuple[str, str]] = []
         for fname, ans in report.items():
             if fname in failed or not isinstance(ans, dict) or ans.get("status") != "found":
                 continue
             raw_ev = ans.get("evidence")
             if not isinstance(raw_ev, list):
                 continue
-            bad_refs: list[str] = []
+            bad_failed_refs: list[str] = []
+            not_found_refs: list[str] = []
             for e in raw_ev:
                 if isinstance(e, dict) and e.get("type") == "field":
                     ref_name = str(e.get("name") or "")
-                    if ref_name in failed and ref_name not in bad_refs:
-                        bad_refs.append(ref_name)
-            if bad_refs:
-                newly_failed.append((fname, bad_refs))
+                    if not ref_name or ref_name == fname:
+                        continue
+                    if ref_name in failed:
+                        if ref_name not in bad_failed_refs:
+                            bad_failed_refs.append(ref_name)
+                    else:
+                        ref_ans = report.get(ref_name)
+                        if not isinstance(ref_ans, dict) or ref_ans.get("status") != "found":
+                            if ref_name not in not_found_refs:
+                                not_found_refs.append(ref_name)
+            if bad_failed_refs:
+                msg = f"引用的前置字段（{'、'.join(bad_failed_refs)}）校验未通过已降级，衍生结论同步降级"
+                newly_failed.append((fname, msg))
+            elif not_found_refs and not _has_valid_non_degraded_support(ans, report, failed, deps=deps):
+                msg = f"引用的前置字段（{'、'.join(not_found_refs)}）状态为 not_found，衍生结论同步降级"
+                newly_failed.append((fname, msg))
         if not newly_failed:
             break
-        for fname, bad_refs in newly_failed:
-            msg = f"引用的前置字段（{'、'.join(bad_refs)}）校验未通过已降级，衍生结论同步降级"
+        for fname, msg in newly_failed:
             issues.append(FieldIssue(fname, msg))
             failed.add(fname)
             report[fname] = {
@@ -228,7 +327,7 @@ def _salvage_partial_report(candidate: dict[str, Any], report_model: type[BaseMo
                 "reasoning": "证据校验未通过：" + "；".join(i.message for i in ev_issues if i.field == name),
             }
 
-    _cascade_degraded_fields(salvaged, failed, issues)
+    _cascade_degraded_fields(salvaged, failed, issues, deps=deps)
 
     issue_dicts = [i.to_dict() for i in issues]
     if issue_dicts:
@@ -241,36 +340,159 @@ def _salvage_partial_report(candidate: dict[str, Any], report_model: type[BaseMo
     return salvaged
 
 
+@dataclass(frozen=True)
+class _RuntimeBundle:
+    """不可变运行期模型与工具配置快照，保证 reload_config 单引用原子切换。#Created By AiCoding(codex)"""
+
+    settings: Settings
+    model: Any
+    model_settings: dict[str, Any]
+    tools: list[Any]
+    seq: int = field(default_factory=lambda: next(_BUNDLE_SEQ))
+
+
+class _DynamicLimiter:
+    """支持运行期跨线程安全动态调额的异步并发限流器，绝不因热重载突破在途并发上限。#Created By AiCoding(codex)"""
+
+    def __init__(self, limit: int) -> None:
+        self._limit = max(1, int(limit))
+        self._inflight = 0
+        self._waiters: deque[asyncio.Future[None]] = deque()
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    @property
+    def inflight(self) -> int:
+        return self._inflight
+
+    @property
+    def _value(self) -> int:
+        return max(0, self._limit - self._inflight)
+
+    def _wake_waiters(self) -> None:
+        while self._inflight < self._limit and self._waiters:
+            fut = self._waiters.popleft()
+            if not fut.done():
+                self._inflight += 1
+                fut.set_result(None)
+
+    def set_limit(self, limit: int) -> None:
+        self._limit = max(1, int(limit))
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            try:
+                running = asyncio.get_running_loop()
+            except RuntimeError:
+                running = None
+            if running is loop:
+                self._wake_waiters()
+            else:
+                loop.call_soon_threadsafe(self._wake_waiters)
+        else:
+            self._wake_waiters()
+
+    async def __aenter__(self) -> _DynamicLimiter:
+        loop = asyncio.get_running_loop()
+        self._loop = loop
+        if self._inflight < self._limit and not self._waiters:
+            self._inflight += 1
+            return self
+        fut: asyncio.Future[None] = loop.create_future()
+        self._waiters.append(fut)
+        try:
+            await fut
+        except BaseException:
+            if not fut.done():
+                fut.cancel()
+                try:
+                    self._waiters.remove(fut)
+                except ValueError:
+                    pass
+            else:
+                self._inflight = max(0, self._inflight - 1)
+                self._wake_waiters()
+            raise
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self._inflight = max(0, self._inflight - 1)
+        self._wake_waiters()
+
+
 class AgentRunner:
     """进程内唯一的运行器。"""
 
     def __init__(self, settings: Settings, model: Any, model_settings: dict[str, Any], gateway: GatewayClient,
                  service: ResourceService, releases: ReleaseStore, runs: RunStore) -> None:
-        self.settings = settings
-        self.model = model
-        self.model_settings = model_settings
+        self._bundle = _RuntimeBundle(
+            settings=settings,
+            model=model,
+            model_settings=model_settings,
+            tools=build_tools(settings.agent_tool_retries),
+        )
         self.gateway = gateway
         self.service = service
         self.releases = releases
         self.runs = runs
-        self._sem = asyncio.Semaphore(settings.agent_max_concurrent_runs)
-        self._tools = build_tools(settings.agent_tool_retries)
+        self._sem = _DynamicLimiter(settings.agent_max_concurrent_runs)
+        self._agent_cache: OrderedDict[tuple[str, int, int], tuple[type[BaseModel], Agent[RunDeps, Any]]] = OrderedDict()
+
+    @property
+    def settings(self) -> Settings:
+        return self._bundle.settings
+
+    @settings.setter
+    def settings(self, value: Settings) -> None:
+        self._bundle = dataclasses.replace(self._bundle, settings=value, seq=next(_BUNDLE_SEQ))
+
+    @property
+    def model(self) -> Any:
+        return self._bundle.model
+
+    @model.setter
+    def model(self, value: Any) -> None:
+        self._bundle = dataclasses.replace(self._bundle, model=value, seq=next(_BUNDLE_SEQ))
+
+    @property
+    def model_settings(self) -> dict[str, Any]:
+        return self._bundle.model_settings
+
+    @model_settings.setter
+    def model_settings(self, value: dict[str, Any]) -> None:
+        self._bundle = dataclasses.replace(self._bundle, model_settings=value, seq=next(_BUNDLE_SEQ))
+
+    @property
+    def _tools(self) -> list[Any]:
+        return self._bundle.tools
+
+    @_tools.setter
+    def _tools(self, value: list[Any]) -> None:
+        self._bundle = dataclasses.replace(self._bundle, tools=value, seq=next(_BUNDLE_SEQ))
 
     def reload_config(self, settings: Settings, *, rebuild_model: bool = True) -> None:
-        """运行期热重载模型、参数、工具重试与并发信号量，立即对后续运行生效。"""
-        prev_concurrency = self.settings.agent_max_concurrent_runs
-        self.settings = settings
-        self.model_settings = build_model_settings(settings)
+        """运行期原子热重载模型、参数、工具重试与动态并发限流器，立即对后续运行生效。"""
+        cur = self._bundle
+        next_model_settings = build_model_settings(settings)
         if rebuild_model:
             model_input = (
                 settings
                 if settings.llm_api_key.get_secret_value()
                 else settings.model_copy(update={"llm_api_key": SecretStr("EMPTY")})
             )
-            self.model = build_model(model_input)
-        self._tools = build_tools(settings.agent_tool_retries)
-        if settings.agent_max_concurrent_runs != prev_concurrency:
-            self._sem = asyncio.Semaphore(settings.agent_max_concurrent_runs)
+            next_model = build_model(model_input)
+        else:
+            next_model = cur.model
+        next_tools = build_tools(settings.agent_tool_retries)
+        self._bundle = _RuntimeBundle(
+            settings=settings,
+            model=next_model,
+            model_settings=next_model_settings,
+            tools=next_tools,
+        )
+        self._sem.set_limit(settings.agent_max_concurrent_runs)
 
     # ------------------------------------------------------------------ 快照
     def _capture(self, target: str) -> tuple[str, ResourceSet]:
@@ -327,7 +549,7 @@ class AgentRunner:
                 for name in failed:
                     report[name] = {"status": "not_found", "value": None, "evidence": [],
                                     "reasoning": "证据校验未通过：" + "；".join(i.message for i in issues if i.field == name)}
-                _cascade_degraded_fields(report, failed, issues)
+                _cascade_degraded_fields(report, failed, issues, deps=deps)
                 issue_dicts = [i.to_dict() for i in issues]
                 deps.workspace.validation_rounds.append(issue_dicts)
                 deps.events.emit("report_degraded", attempt=attempt, issues=issue_dicts, fields=sorted(failed))
@@ -342,23 +564,29 @@ class AgentRunner:
     # ------------------------------------------------------------------ 运行
     async def run(self, req: RunRequest, listener: Callable[[ProcessEvent], None] | None = None) -> dict[str, Any]:
         """执行一次填写，返回完整结果（同时写入运行记录）。"""
-        run_id = new_run_id()
+        run_id = req.run_id or new_run_id()
         started_at = datetime.now().astimezone()
-        rev, rs = await asyncio.to_thread(self._capture, req.target)
+        if req.target == "online":
+            try_snap = getattr(self.releases, "try_live_snapshot", None)
+            snap = try_snap() if callable(try_snap) else None
+            rev, rs = snap if snap is not None else await asyncio.to_thread(self._capture, req.target)
+        else:
+            rev, rs = await asyncio.to_thread(self._capture, req.target)
         tpl = rs.templates.get(req.template_id)
         if tpl is None:
             raise TemplateUnavailable(f"模板 {req.template_id} 不存在" + ("（草稿与线上都没有）" if req.target == "draft" else "或未发布"))
         if tpl.offline and req.target == "online":
             raise TemplateUnavailable(f"模板 {req.template_id} 已下线")
-        inputs = {k: ("" if v is None else str(v)) for k, v in (req.inputs or {}).items()}
+        inputs = {k: ("" if v is None else str(v)).strip() for k, v in (req.inputs or {}).items()}
         errors = validate_inputs(tpl, inputs)
         if errors:
             raise InputValidationError(errors)
 
-        rt_settings = self.settings
-        rt_model = self.model
-        rt_model_settings = self.model_settings
-        rt_tools = self._tools
+        bundle = self._bundle
+        rt_settings = bundle.settings
+        rt_model = bundle.model
+        rt_model_settings = bundle.model_settings
+        rt_tools = bundle.tools
         rt_sem = self._sem
         events = EventSink(listener)
         deps = RunDeps(
@@ -369,20 +597,31 @@ class AgentRunner:
         )
         events.emit("run_started", runId=run_id, templateId=tpl.id, templateName=tpl.name, rev=rev,
                     skills=deps.allowed_skills, apis=deps.allowed_apis)
-        report_model = build_report_model(tpl)
-        agent = self._build_agent(
-            report_model,
-            settings=rt_settings,
-            model=rt_model,
-            model_settings=rt_model_settings,
-            tools=rt_tools,
-        )
+        cache_key = (rev, tpl.id, bundle.seq) if req.target == "online" else None
+        cached_pair = self._agent_cache.get(cache_key) if cache_key is not None else None
+        if cached_pair is not None:
+            self._agent_cache.move_to_end(cache_key)  # type: ignore[arg-type]
+            report_model, agent = cached_pair
+        else:
+            report_model = build_report_model(tpl)
+            agent = self._build_agent(
+                report_model,
+                settings=rt_settings,
+                model=rt_model,
+                model_settings=rt_model_settings,
+                tools=rt_tools,
+            )
+            if cache_key is not None:
+                self._agent_cache[cache_key] = (report_model, agent)
+                while len(self._agent_cache) > _MAX_AGENT_CACHE:
+                    self._agent_cache.popitem(last=False)
         report: dict[str, dict[str, Any]] | None = None
         error: str | None = None
         usage: dict[str, Any] = {}
         messages: Any = None
         result = None
         active_run = None
+        cancelled = False
         t0 = time.monotonic()
         try:
             async with rt_sem:
@@ -419,6 +658,10 @@ class AgentRunner:
             error = f"大模型调用失败：{exc}"
         except AgentRunError as exc:
             error = f"智能体运行失败：{exc}"
+        except asyncio.CancelledError:
+            # #Created By AiCoding(codex) 被调用方取消（聊天窗口「停止」）：照常写入运行记录后再向上抛出取消
+            cancelled = True
+            error = "运行已取消"
         except Exception as exc:  # noqa: BLE001 - 兜底，保证运行记录完整
             log.exception("智能体运行异常 runId=%s", run_id)
             error = f"内部错误：{type(exc).__name__} {exc}"
@@ -444,6 +687,8 @@ class AgentRunner:
         outcome = self._finish(run_id, started_at, rev, req, deps, report, error, usage, t0, model_name=model_name)
         detail = {**outcome, "messages": messages}
         self.runs.submit(self._summary(outcome), detail)
+        if cancelled:
+            raise asyncio.CancelledError
         return outcome
 
     # ------------------------------------------------------------------ 结果整理
@@ -551,7 +796,8 @@ def _evidence_label(evidence: list[dict[str, Any]], ws: Workspace, document: str
     """生成给人看的证据说明，以及前端定位用的 evidenceTarget。"""
     labels: list[str] = []
     target: dict[str, Any] | None = None
-    doc_lines = document.splitlines()
+    doc_idx = get_document_index(ws, document)
+    doc_lines: list[str] | None = None
     for e in evidence:
         if not isinstance(e, dict):
             continue
@@ -570,7 +816,7 @@ def _evidence_label(evidence: list[dict[str, Any]], ws: Workspace, document: str
                                 "column": col_name}
         elif t == "document":
             quote = scalar_to_str(e.get("quote"))
-            locs = locate_quote_in_document(document, quote, value=value)
+            locs = locate_quote_in_document(document, quote, value=value, index=doc_idx)
             if locs:
                 first_loc = locs[0]
                 line = first_loc["line"]
@@ -584,6 +830,8 @@ def _evidence_label(evidence: list[dict[str, Any]], ws: Workspace, document: str
                     doc_target["matchCount"] = len(locs)
                     doc_target["matches"] = locs
             else:
+                if doc_lines is None:
+                    doc_lines = document.splitlines()
                 first = quote.splitlines()[0] if quote else ""
                 line = next((i + 1 for i, ln in enumerate(doc_lines) if first and first in ln), None)
                 line_desc = f"第 {line} 行" if line else ""

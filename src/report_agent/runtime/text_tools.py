@@ -16,13 +16,19 @@ from typing import Any
 FIXED_CHARS_TO_REMOVE = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~！\"#$%&'（）*+，-。/：；<=>？@[\\]^_`{|}~"
 _ZERO_WIDTH_CHARS = "\ufeff\u200b\u200c\u200d"
 MAX_REGEX_LENGTH = 2000
+MAX_REGEX_TEXT_LENGTH = 200_000
 MAX_PERIOD_MONTHS = 36
-_SEPARATED_DATE_RE = re.compile(r"^\s*(\d{4})\D+(\d{1,2})\D+(\d{1,2})(?!\d)")
 
-# #Created By AiCoding(codex) extract_dates 严格日历扫描规则
-_DATE_RULE1_CN_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})(?:\s*[日号]|(?!\d))")
+# #Created By AiCoding(codex) extract_dates 严格日历扫描规则（中文规则必须以显式“日/号”结尾，防止误吸套餐/月租/折扣数字）
+_DATE_RULE1_CN_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]")
 _DATE_RULE2_SEP_RE = re.compile(r"(?<![A-Za-z0-9])(19\d{2}|20\d{2})([-/.])(\d{1,2})\2(\d{1,2})(?!\d)")
 _DATE_RULE3_COMPACT_RE = re.compile(r"(?<![A-Za-z0-9])(19\d{2}|20\d{2})(\d{2})(\d{2})(?![A-Za-z0-9])")
+_DATE_COMPACT_OPT_TIME_SCAN_RE = re.compile(
+    r"(?<![A-Za-z0-9])(19\d{2}|20\d{2})(\d{2})(\d{2})(?:\d{4}|\d{6})?(?![A-Za-z0-9])"
+)
+_YM_CN_SCAN_RE = re.compile(r"(?<![A-Za-z0-9])(19\d{2}|20\d{2})\s*年\s*(\d{1,2})\s*月(?!\s*\d)")
+_YM_SEP_SCAN_RE = re.compile(r"(?<![A-Za-z0-9])(19\d{2}|20\d{2})([-/.])(\d{1,2})(?![-\d/.])")
+_YM_COMPACT_SCAN_RE = re.compile(r"(?<![A-Za-z0-9])(19\d{2}|20\d{2})(0[1-9]|1[0-2])(?![A-Za-z0-9])")
 _DATE_RULE4_MD_RE = re.compile(r"(?<!\d)(?<!年)(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]")
 _LEADING_YEAR_RE = re.compile(r"^(19\d{2}|20\d{2})(?!\d)")
 _INDEPENDENT_YEAR_RE = re.compile(r"(?<![A-Za-z0-9])(19\d{2}|20\d{2})(?!\d)")
@@ -49,12 +55,71 @@ _CN_TIMESTAMP_RE = re.compile(
 )
 
 
+def _subpattern_can_match_empty(subpattern: Any) -> bool:
+    """判断正则语法树子表达式是否可能匹配空串。#Created By AiCoding(codex)"""
+    for op, av in subpattern.data:
+        name = str(op)
+        if name in ("MAX_REPEAT", "MIN_REPEAT"):
+            lo, _, body = av
+            if lo == 0 or _subpattern_can_match_empty(body):
+                continue
+            return False
+        if name == "SUBPATTERN":
+            _, _, _, body = av
+            if not _subpattern_can_match_empty(body):
+                return False
+        elif name == "BRANCH":
+            _, branches = av
+            if not any(_subpattern_can_match_empty(b) for b in branches):
+                return False
+        elif name in ("AT", "ASSERT", "ASSERT_NOT"):
+            continue
+        else:
+            return False
+    return True
+
+
+def _has_nested_repeat(subpattern: Any, *, in_repeat: bool = False) -> bool:
+    """使用标准库 re._parser 语法树检测重复量词内部嵌套重复量词的高危回溯模式。#Created By AiCoding(codex)"""
+    for op, av in subpattern.data:
+        name = str(op)
+        if name in ("MAX_REPEAT", "MIN_REPEAT"):
+            lo, hi, body = av
+            is_variable_multi = hi > 1 and lo != hi
+            is_multi = hi > 1
+            if in_repeat and (is_variable_multi or (lo == 0 and hi == 1 and _subpattern_can_match_empty(body))):
+                return True
+            if is_multi and _subpattern_can_match_empty(body):
+                return True
+            if _has_nested_repeat(body, in_repeat=in_repeat or is_multi):
+                return True
+        elif name == "SUBPATTERN":
+            _, _, _, body = av
+            if _has_nested_repeat(body, in_repeat=in_repeat):
+                return True
+        elif name == "BRANCH":
+            _, branches = av
+            if any(_has_nested_repeat(b, in_repeat=in_repeat) for b in branches):
+                return True
+        elif name in ("ASSERT", "ASSERT_NOT"):
+            _, body = av
+            if _has_nested_repeat(body, in_repeat=in_repeat):
+                return True
+    return False
+
+
 def safe_regex_compile(pattern: str) -> re.Pattern[str]:
-    """安全编译正则表达式，非法语法或超长模式统一抛出 ValueError。"""
+    """安全编译正则表达式，非法语法、超长或高危嵌套量词模式统一抛出 ValueError。"""
     if not isinstance(pattern, str) or not pattern:
         raise ValueError("正则表达式不能为空")
     if len(pattern) > MAX_REGEX_LENGTH:
         raise ValueError(f"正则表达式长度超过上限（{MAX_REGEX_LENGTH}）")
+    try:
+        parsed = re._parser.parse(pattern)  # type: ignore[attr-defined]
+    except re.error as exc:
+        raise ValueError(f"正则表达式不合法：{exc}") from exc
+    if _has_nested_repeat(parsed):
+        raise ValueError("正则表达式包含嵌套重复量词，存在回溯风险")
     try:
         return re.compile(pattern)
     except re.error as exc:
@@ -138,25 +203,64 @@ def convert_date(value: str, from_pattern: str, to_pattern: str) -> str:
     return format_date(parse_date(value, from_pattern), to_pattern)
 
 
+def _extract_date_from_text(raw: str) -> _date | None:
+    """从整串或带前缀文本中严格提取首个真实日历日期，绝不盲拼非连续数字。#Created By AiCoding(codex)"""
+    try:
+        return _parse_calendar_date(raw)
+    except ValueError:
+        pass
+    for regex, is_sep in ((_DATE_RULE1_CN_RE, False), (_DATE_RULE2_SEP_RE, True), (_DATE_COMPACT_OPT_TIME_SCAN_RE, False)):
+        m = regex.search(raw)
+        if m:
+            y = int(m.group(1))
+            mo = int(m.group(3)) if is_sep else int(m.group(2))
+            d = int(m.group(4)) if is_sep else int(m.group(3))
+            return _date(y, mo, d)
+    return None
+
+
+def _extract_year_month_from_text(raw: str) -> tuple[int, int] | None:
+    """从整串或带前缀文本中提取合法年月 (year, month)。#Created By AiCoding(codex)"""
+    ym = _try_parse_pure_year_month(raw)
+    if ym is not None:
+        return ym
+    dt = _extract_date_from_text(raw)
+    if dt is not None:
+        return dt.year, dt.month
+    for regex, m_group in ((_YM_CN_SCAN_RE, 2), (_YM_SEP_SCAN_RE, 3), (_YM_COMPACT_SCAN_RE, 2)):
+        m = regex.search(raw)
+        if m:
+            year, month = int(m.group(1)), int(m.group(m_group))
+            if not (1900 <= year <= 2099) or not (1 <= month <= 12):
+                raise ValueError(f"时间年月不合法：{raw}")
+            return year, month
+    return None
+
+
 def date_range(time_value: str, unit: str) -> tuple[str, str]:
-    """计算某天或某月的起止时间（yyyyMMddHHmmss）。time_value 至少包含 yyyyMMdd 或分隔日期。"""
+    """计算某天或某月的起止时间（yyyyMMddHHmmss）。#Created By AiCoding(codex)
+
+    严格按边界提取日期（绝不盲拼非数字前缀后的散落数字）；unit="month" 时额外支持 6 位年月（yyyyMM / yyyy-M / yyyy年M月）。
+    """
     if unit not in ("day", "month"):
         raise ValueError("unit 只能是 day 或 month")
-    raw = str(time_value or "").strip()
-    sep_match = _SEPARATED_DATE_RE.match(raw)
-    if sep_match:
-        dt = datetime(int(sep_match.group(1)), int(sep_match.group(2)), int(sep_match.group(3)))
-    else:
-        contig = re.search(r"\d{8}", raw)
-        digits = contig.group(0) if contig else re.sub(r"\D", "", raw)
-        if len(digits) < 8:
-            raise ValueError("时间至少需要包含 yyyyMMdd 8 位数字")
-        dt = datetime.strptime(digits[:8], "%Y%m%d")
+    if time_value is None or isinstance(time_value, bool):
+        raise ValueError("时间不能为空")
+    raw = str(time_value).strip()
+    if not raw:
+        raise ValueError("时间不能为空")
     if unit == "day":
+        dt = _extract_date_from_text(raw)
+        if dt is None:
+            raise ValueError(f"无法从“{time_value}”解析出合法日期（支持 yyyyMMdd、yyyyMMddHHmmss、yyyy-M-d、yyyy年M月d日）")
         day = dt.strftime("%Y%m%d")
         return day + "000000", day + "235959"
-    last = calendar.monthrange(dt.year, dt.month)[1]
-    return f"{dt.year:04d}{dt.month:02d}01000000", f"{dt.year:04d}{dt.month:02d}{last:02d}235959"
+    ym = _extract_year_month_from_text(raw)
+    if ym is None:
+        raise ValueError(f"无法从“{time_value}”解析出合法年月或日期（支持 yyyyMM、yyyy-M、yyyy年M月、yyyyMMdd）")
+    year, month = ym
+    last = calendar.monthrange(year, month)[1]
+    return f"{year:04d}{month:02d}01000000", f"{year:04d}{month:02d}{last:02d}235959"
 
 
 # ============================================================================ 二期确定性原语函数
@@ -397,23 +501,43 @@ def expand_period(period: str) -> dict[str, Any]:
     if not raw:
         raise ValueError("账期/日期文本不能为空")
 
-    # 1. 多账期分隔（$、,、，、;、；、顿号）
+    # 1. 多账期分隔（$、,、，、;、；、顿号）：
+    #    - 恰好 2 段 A$B 且 A <= B 时按闭区间展开连续月份（对齐 Java billing-cycle-sms）；
+    #    - 多于 2 段、无序 2 段或其它列表分隔符时按离散月份去重，并统一按月份升序排列输出。
     if _MULTI_PERIOD_SPLIT_RE.search(raw):
         segments = [seg.strip() for seg in _MULTI_PERIOD_SPLIT_RE.split(raw)]
         if any(not seg for seg in segments):
             raise ValueError(f"多账期列表存在空段：{period}")
-        month_items: list[dict[str, str]] = []
-        seen_months: set[str] = set()
+        parsed_yms: list[tuple[int, int]] = []
         for seg in segments:
             ym = _try_parse_pure_year_month(seg)
             if ym is None:
                 raise ValueError(f"无法将账期段“{seg}”解析为合法年月（如 yyyyMM、yyyy-M 或 yyyy年M月）")
-            item = _make_month_item(*ym)
-            if item["month"] not in seen_months:
-                seen_months.add(item["month"])
-                month_items.append(item)
-        overall_start = min(m["startDate"] for m in month_items)
-        overall_end = max(m["endDate"] for m in month_items)
+            parsed_yms.append(ym)
+
+        is_dollar_pair = "$" in raw and not re.search(r"[,，;；、]", raw) and len(parsed_yms) == 2
+        if is_dollar_pair and parsed_yms[0] <= parsed_yms[1]:
+            (y1, m1), (y2, m2) = parsed_yms
+            total_months = (y2 - y1) * 12 + (m2 - m1) + 1
+            if total_months > MAX_PERIOD_MONTHS:
+                raise ValueError(f"区间跨度为 {total_months} 个月，超过上限（{MAX_PERIOD_MONTHS} 个月）")
+            month_items: list[dict[str, str]] = []
+            cur_y, cur_m = y1, m1
+            for _ in range(total_months):
+                month_items.append(_make_month_item(cur_y, cur_m))
+                if cur_m == 12:
+                    cur_y += 1
+                    cur_m = 1
+                else:
+                    cur_m += 1
+        else:
+            unique_yms = sorted(set(parsed_yms))
+            if len(unique_yms) > MAX_PERIOD_MONTHS:
+                raise ValueError(f"账期月份数量为 {len(unique_yms)} 个月，超过上限（{MAX_PERIOD_MONTHS} 个月）")
+            month_items = [_make_month_item(y, m) for y, m in unique_yms]
+
+        overall_start = month_items[0]["startDate"]
+        overall_end = month_items[-1]["endDate"]
         return {
             "months": [m["month"] for m in month_items],
             "monthRanges": month_items,
@@ -542,6 +666,8 @@ def regex_extract(pattern: str, text: str | None = None, group: int = 1) -> dict
         eff_group = group
 
     source = "" if text is None else str(text)
+    if len(source) > MAX_REGEX_TEXT_LENGTH:
+        raise ValueError(f"待匹配文本长度超过安全上限（{MAX_REGEX_TEXT_LENGTH} 字符）")
     matches: list[str] = []
     all_matches: list[str] = []
     seen: set[str] = set()

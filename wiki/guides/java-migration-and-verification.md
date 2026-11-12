@@ -46,23 +46,25 @@ uv run python tools/java_migration/generate.py
 ```bash
 uv run python tools/java_migration/verify_structure.py
 ```
-逐项检查 `S1`～`S7`：
+逐项检查 `S1`～`S9`：
 - `S1`：33 个模板集合与 ID 一一对应；
-- `S2`：`body.md.j2` 与 Java 模板经 `elseif -> elif`、`null -> none` 转换后逐字相等；
+- `S2`：`body.md.j2` 与 Java 模板经 `elseif -> elif`、`null -> none` 转换后逐字相等（白名单放行模板 `115` 显式补齐的 `违约责任` 占位符守卫）；
 - `S3`：字段集合覆盖全部正文变量与隐式 Skill 依赖字段，且 `visible` 标记准确；
 - `S4`：Java `.rule` 中每条有效规则原文均完整保留在对应字段 `description` 中；
 - `S5`/`S6`：Skill 依赖闭包完整、接口引用存在、`{% for %}` 循环属性均在 `list` 字段列定义中；
-- `S7`：全量资源 `validate_all()` **0 error、0 warning**。
+- `S7`：全量资源 `validate_all()` **0 error、0 warning**；
+- `S8`（AST 布尔守卫门禁）：扫描所有模板 Jinja2 AST，禁止 `whenMissing == "placeholder"` 的字段在 `{% if 字段 %}` 中裸做真值判断而缺少 `!= "{{字段}}"` 守卫（防死分支回退）；
+- `S9`（AST 枚举字面量门禁）：扫描所有模板 Jinja2 AST 中枚举字段的 `==` / `!=` / `in` 字面量比较，确保均落在声明的 `values` 集合内（显式登记模板 `116` 历史遗留项）。
 
 ### 第三层：网关报文、Skill 逻辑与 Pebble 逐字渲染对拍
 
 当本机存在前代 Java 编译产物（`pdf-agent-parse/target/classes`）与本地 Maven 仓库（`~/.m2/repository`）及 JDK `javac`/`java` 时，脚本自动编译运行 Java Harness：
 
 ```bash
-# 对拍 3 个接口 XML 请求报文（字节级一致）及 11 个 Skill 原语逻辑（自动豁免登记的有意修复项）
+# 对拍 3 个接口 XML 请求报文（字节级一致）、契约响应解析（含 cc_pretty_num_info_query 顶层报错拦截）及 11 个 Skill 原语逻辑
 uv run python tools/java_migration/check_skills.py
 
-# 对拍 33 个模板在全找到、全缺失、枚举全组合、列表 0/1/3 行下的渲染文本（自动识别模板 120 有设备押金修复差异）
+# 对拍 33 个模板在全找到、全缺失、枚举全组合、列表 0/1/3 行下的渲染文本（自动识别模板 120 有设备押金及 111/114/115 违约责任修复差异）
 uv run python tools/java_migration/verify_render.py
 ```
 

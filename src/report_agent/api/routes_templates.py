@@ -10,12 +10,12 @@ import json
 import re
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Body, Depends, Query, Request
 from pydantic import BaseModel, Field
 
 from ..domain.jinja_env import BodySyntaxError, TrackedValue, body_variables, render_body
 from ..domain.resources import _RESERVED_FIELD_NAMES
-from ..domain.template import Template, TemplateDef
+from ..domain.template import FieldDef, Template, TemplateDef
 from ..runtime.render import field_render
 from ..runtime.runner import RunRequest
 from ..store.cases import CaseStore
@@ -92,6 +92,15 @@ def _resolve_skills(request: Request, refs: list[str]) -> list[str]:
         if sk.id not in out:
             out.append(sk.id)
     return out
+
+
+def _parse_expected_revision(raw: Any) -> int | None:
+    """校验可选草稿乐观锁版本号（允许 None 或非负整数）。"""
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise bad_request("草稿乐观锁版本号 revision 必须是非负整数", "INVALID_REVISION")
+    return raw
 
 
 def _mutate(request: Request, tid: int, fn, revision: int | None = None) -> dict[str, Any]:
@@ -385,6 +394,10 @@ class PreviewBody(BaseModel):
     bodyText: str | None = None
     values: dict[str, Any] = Field(default_factory=dict,
                                    description="字段名 → 值；不传或为 null 视为找不到。列表字段传行对象数组或其 JSON 字符串")
+    fields: list[dict[str, Any]] | None = Field(
+        default=None,
+        description="可选内存态字段定义列表（兼容后端 FieldDef 与前端 TemplateField DTO），传入时优先用于构造预览上下文",
+    )
 
 
 def _preview_rows(val: Any) -> Any:
@@ -397,13 +410,34 @@ def _preview_rows(val: Any) -> Any:
     return val
 
 
+def _parse_preview_fields(raw_fields: list[dict[str, Any]]) -> list[FieldDef]:
+    """将预览请求传入的内存字段规范化为 FieldDef 列表（兼容中英文枚举与 DTO 属性名）。"""
+    parsed: list[FieldDef] = []
+    for item in raw_fields:
+        if not isinstance(item, dict):
+            raise bad_request("预览字段项必须是对象", "INVALID_PREVIEW_FIELD")
+        try:
+            parsed.append(FieldDef.model_validate(dto_to_field(item)))
+        except Exception as exc:  # noqa: BLE001
+            raise bad_request(f"预览字段定义不合法：{exc}", "INVALID_PREVIEW_FIELD") from exc
+    return parsed
+
+
 @router.post("/templates/{tid}/render-preview")
 def render_preview(request: Request, tid: int, body: PreviewBody) -> dict[str, Any]:
-    """用给定字段值渲染正文，找不到的字段按 whenMissing 处理（正文编辑器右侧预览用）。"""
+    """用给定字段值渲染正文，找不到的字段按 whenMissing 处理（优先采用请求体传入的内存 fields）。"""
     tpl = _working(request, tid)
     text = body.bodyText if body.bodyText is not None else tpl.body
+    if body.fields is not None:
+        preview_tpl = Template(
+            definition=tpl.definition.model_copy(update={"fields": _parse_preview_fields(body.fields)}),
+            body=text,
+            offline=tpl.offline,
+        )
+    else:
+        preview_tpl = tpl
     ctx: dict[str, Any] = {}
-    for f in tpl.definition.fields:
+    for f in preview_tpl.definition.fields:
         val = body.values.get(f.name)
         if f.is_list:
             # #Created By AiCoding(codex) 列表字段与生产渲染走同一路径（找不到时为空列表）
@@ -531,8 +565,13 @@ def save_field(request: Request, tid: int, name: str, body: dict[str, Any]) -> d
             f"字段名「{new['name']}」不合法：只能使用中英文、数字和下划线，不能以下划线或数字开头，且不能为模板保留字",
             "INVALID_FIELD_NAME",
         )
+    if new["type"] == "list" and new["evidence"] == "input":
+        raise bad_request(
+            f"列表字段「{new['name']}」的证据类型不能设为 input（仅支持 quote 或 derive）",
+            "INVALID_FIELD_EVIDENCE",
+        )
     original = str(body.get("originalName") or name).strip()
-    revision = body.get("revision")
+    revision = _parse_expected_revision(body.get("revision"))
 
     def fn(data: dict[str, Any], text: str) -> str:
         fields = data["fields"]
@@ -553,32 +592,46 @@ def save_field(request: Request, tid: int, name: str, body: dict[str, Any]) -> d
                 fields[orig_idx] = new
         return text
 
-    _mutate(request, tid, fn, revision)
+    meta = _mutate(request, tid, fn, revision)
     tpl = _working(request, tid)
     f = tpl.definition.field(new["name"])
-    return field_to_dto(f, body_usage(tpl.body), ref_by_fields(tpl).get(f.name)) if f else new
+    dto = field_to_dto(f, body_usage(tpl.body), ref_by_fields(tpl).get(f.name)) if f else dict(new)
+    return {**dto, "revision": meta["revision"], "draft": meta}
+
+
+class DeleteFieldBody(BaseModel):
+    revision: int | None = None
 
 
 @router.delete("/templates/{tid}/fields/{name}")
-def delete_field(request: Request, tid: int, name: str, force: bool = False) -> dict[str, Any]:
+def delete_field(
+    request: Request,
+    tid: int,
+    name: str,
+    force: bool = False,
+    revision: int | None = None,
+    body: DeleteFieldBody | None = Body(default=None),
+) -> dict[str, Any]:
     tpl = _working(request, tid)
     if tpl.definition.field(name) is None:
         raise not_found(f"字段「{name}」不存在")
     usage = body_usage(tpl.body).get(name, 0)
     if usage and not force:
         raise bad_request(f"字段「{name}」在正文中被引用 {usage} 次，请先移除引用", "FIELD_IN_USE", usage=usage)
+    eff_rev = body.revision if (body is not None and body.revision is not None) else revision
 
     def fn(data: dict[str, Any], text: str) -> str:
         data["fields"] = [f for f in data["fields"] if f["name"] != name]
         return text
 
-    _mutate(request, tid, fn)
-    return {"deletedName": name}
+    meta = _mutate(request, tid, fn, _parse_expected_revision(eff_rev))
+    return {"deletedName": name, "revision": meta["revision"], "draft": meta}
 
 
 class BatchEvidenceBody(BaseModel):
     fieldNames: list[str]
     evidenceType: Literal["quote", "input", "derive"]
+    revision: int | None = None
 
 
 @router.post("/templates/{tid}/fields/batch-evidence")
@@ -588,18 +641,26 @@ def batch_evidence(request: Request, tid: int, body: BatchEvidenceBody) -> dict[
 
     def fn(data: dict[str, Any], text: str) -> str:
         nonlocal count
+        if body.evidenceType == "input":
+            bad_list_names = [f["name"] for f in data["fields"] if f["name"] in names and f.get("type") == "list"]
+            if bad_list_names:
+                raise bad_request(
+                    f"列表字段（{'、'.join(bad_list_names)}）的证据类型不能设为 input（仅支持 quote 或 derive）",
+                    "INVALID_FIELD_EVIDENCE",
+                )
         for f in data["fields"]:
             if f["name"] in names:
                 f["evidence"] = body.evidenceType
                 count += 1
         return text
 
-    _mutate(request, tid, fn)
-    return {"updatedCount": count}
+    meta = _mutate(request, tid, fn, _parse_expected_revision(body.revision))
+    return {"updatedCount": count, "revision": meta["revision"], "draft": meta}
 
 
 class OrderBody(BaseModel):
     names: list[str]
+    revision: int | None = None
 
 
 @router.put("/templates/{tid}/fields-order")
@@ -613,12 +674,13 @@ def reorder_fields(request: Request, tid: int, body: OrderBody) -> dict[str, Any
         data["fields"] = [by_name[n] for n in body.names]
         return text
 
-    _mutate(request, tid, fn)
-    return {"names": body.names}
+    meta = _mutate(request, tid, fn, _parse_expected_revision(body.revision))
+    return {"names": body.names, "revision": meta["revision"], "draft": meta}
 
 
 class SkillsBody(BaseModel):
     skills: list[str]
+    revision: int | None = None
 
 
 @router.put("/templates/{tid}/skills")
@@ -630,8 +692,8 @@ def update_skills(request: Request, tid: int, body: SkillsBody) -> dict[str, Any
         data["skills"] = skills
         return text
 
-    _mutate(request, tid, fn)
-    return {"skills": skills}
+    meta = _mutate(request, tid, fn, _parse_expected_revision(body.revision))
+    return {"skills": skills, "revision": meta["revision"], "draft": meta}
 
 
 # ============================================================================ 用例

@@ -31,6 +31,8 @@ from .template import (BODY_FILE, OFFLINE_FILE, TEMPLATE_FILE, Template, Templat
 log = logging.getLogger(__name__)
 
 SYSTEM_PROMPT_FILE = "system-prompt.md"
+ROUTER_SKILL_ID = "template-router"
+_ROUTER_TPL_HEADING_RE = re.compile(r"^###\s+(\d{1,10})\b", re.MULTILINE)
 ResourceKind = Literal["template", "skill", "api", "system-prompt"]
 
 
@@ -254,6 +256,26 @@ def _list_field_issues(tree: nodes.Template, d: TemplateDef) -> list[tuple[str, 
                     and by_name[expr.name].is_list:
                 out.append(("warning", "LIST_PRINTED", f"正文第 {expr.lineno} 行直接输出了列表字段「{expr.name}」，"
                             "列表字段应使用 {% for item in 字段 %} 逐行输出列", expr.name, expr.lineno))
+    seen_if_list: set[tuple[str, int | None]] = set()
+    for if_node in tree.find_all(nodes.If):
+        test_names = (
+            [if_node.test, *if_node.test.find_all(nodes.Name)]
+            if isinstance(if_node.test, nodes.Name)
+            else list(if_node.test.find_all(nodes.Name))
+        )
+        for nm in test_names:
+            if nm.ctx == "load" and nm.name in by_name and by_name[nm.name].is_list:
+                line = nm.lineno or if_node.lineno
+                if (nm.name, line) not in seen_if_list:
+                    seen_if_list.add((nm.name, line))
+                    out.append((
+                        "warning",
+                        "LIST_IN_IF_CONDITION",
+                        f"正文第 {line} 行在条件判断中使用了列表字段「{nm.name}」，当列表缺失（not_found）时仅布尔判断不会触发 PARTIAL 追踪；"
+                        f"建议改用 {{% for item in {nm.name} %}}...{{% else %}}...{{% endfor %}}",
+                        nm.name,
+                        line,
+                    ))
     return out
 
 
@@ -352,19 +374,56 @@ def validate_template(tpl: Template, rs: ResourceSet) -> list[Issue]:
     for ref in d.skills:
         if ref not in rs.skills:
             add("error", "SKILL_NOT_FOUND", f"引用的 Skill「{ref}」不存在或未发布")
+    if ROUTER_SKILL_ID in d.skills:
+        add("warning", "ROUTER_SKILL_IN_TEMPLATE",
+            f"「{ROUTER_SKILL_ID}」是聊天路由专用 Skill，不应关联到填报模板")
     if not d.skills:
         add("warning", "NO_SKILL", "模板没有关联任何 Skill，模型只能从入参和单据中取值")
     return out
 
 
 def validate_skill(skill: Skill, rs: ResourceSet) -> list[Issue]:
-    """校验 Skill：引用的接口必须存在。"""
+    """校验 Skill：引用的接口必须存在；若为聊天路由专用 Skill，交叉核验在线模板覆盖。"""
     out: list[Issue] = []
     for api in skill.meta.apis:
         if api not in rs.apis:
             out.append(Issue("error", "API_NOT_FOUND", f"Skill 引用的接口「{api}」不存在或未发布", "skill", skill.id))
     if not skill.meta.description.strip():
         out.append(Issue("warning", "SKILL_NO_DESCRIPTION", "Skill 缺少 description，模型无法判断何时加载", "skill", skill.id))
+    if skill.id == ROUTER_SKILL_ID:
+        if skill.meta.apis:
+            out.append(Issue(
+                "error",
+                "ROUTER_SKILL_HAS_APIS",
+                f"Skill「{ROUTER_SKILL_ID}」仅用于聊天模板路由，不允许声明业务网关接口",
+                "skill",
+                skill.id,
+            ))
+        covered_ids: set[int] = set()
+        for m in _ROUTER_TPL_HEADING_RE.finditer(skill.body):
+            tid = int(m.group(1))
+            if tid in covered_ids:
+                continue
+            covered_ids.add(tid)
+            tpl = rs.templates.get(tid)
+            if tpl is None or tpl.offline:
+                reason = "已下线" if tpl is not None and tpl.offline else "不存在或未发布"
+                out.append(Issue(
+                    "error",
+                    "ROUTER_TEMPLATE_NOT_FOUND",
+                    f"Skill「{ROUTER_SKILL_ID}」引用的模板「{tid}」{reason}",
+                    "skill",
+                    skill.id,
+                ))
+        for tpl in sorted(rs.templates.values(), key=lambda t: t.id):
+            if not tpl.offline and tpl.id not in covered_ids:
+                out.append(Issue(
+                    "warning",
+                    "ROUTER_TEMPLATE_UNCOVERED",
+                    f"在线模板「{tpl.id}（{tpl.name}）」未在 {ROUTER_SKILL_ID} 中维护适用说明",
+                    "skill",
+                    skill.id,
+                ))
     return out
 
 

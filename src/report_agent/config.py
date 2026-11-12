@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     llm_max_tokens: int | None = None
     llm_timeout_s: float = Field(default=120.0, description="单次模型请求超时")
     llm_http_retries: int = Field(default=2, description="模型 HTTP 层自动重试次数（网络错误、5xx）")
-    llm_parallel_tool_calls: bool | None = Field(default=None, description="是否允许模型并行调用工具，None 表示使用服务端默认")
+    llm_parallel_tool_calls: bool | None = Field(default=True, description="是否允许模型并行调用工具，None 表示使用服务端默认")
     llm_strict_tools: bool | None = Field(default=None, description="是否声明 strict 工具定义；内网推理服务不支持时设为 false")
     llm_tool_choice_required: bool | None = Field(default=None, description="推理服务是否支持 tool_choice=required")
 
@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     agent_output_retries: int = Field(default=3, description="证据校验不通过时，最多让模型重新交卷几次")
     agent_tool_retries: int = Field(default=2, description="工具参数不合法时，最多让模型重试几次")
     agent_request_limit: int = Field(default=25, description="单次运行最多请求模型多少轮")
-    agent_tool_calls_limit: int = Field(default=40, description="单次运行最多调用多少次工具")
+    agent_tool_calls_limit: int = Field(default=120, description="单次运行最多调用多少次工具")
     agent_run_timeout_s: float = Field(default=600.0, description="单次运行总超时")
     agent_max_concurrent_runs: int = Field(default=8, description="进程内同时运行的智能体数量上限")
     agent_preview_rows: int = Field(default=10, description="call_api 摘要中最多预览多少行")
@@ -63,6 +63,7 @@ class Settings(BaseSettings):
         default="java", description="java=与现有 Java 实现逐字一致（字母序、空值 xsi:nil）；clean=声明顺序、无 xsi:nil"
     )
     gateway_connect_timeout_s: float = 5.0
+    gateway_max_concurrency: int = Field(default=32, description="进程内调用真实统一网关的最大并发请求数")
 
     # ---------------- 管理端认证 ----------------
     admin_token_secret: SecretStr | None = Field(default=None, description="会话令牌签名密钥；不配置时自动生成并保存在数据目录")

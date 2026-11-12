@@ -42,10 +42,11 @@ INPUT_DEFS: dict[str, tuple[str, str]] = {
     "业务名称": ("本次争议的业务、套餐或活动名称", "5G智享套餐（个人版）"),
     "创建时间": ("工单创建时间 yyyyMMddHHmmss，短信类 Skill 以它为查询基准", "20261105103012"),
     "业务月份": ("业务办理日期 yyyyMMdd；受理渠道为热线、掌上营业厅时用作受理日期", "20261105"),
+    "deadlineDate": ("活动或合约到期截止日期（可选，如 yyyyMMdd 或 yyyy-MM-dd；未传时从订购短信提取最大合法日期）", "20271201"),
     "账单": ("账单起止月份，格式 yyyyMM$yyyyMM，起止月份均包含在查询范围内", "202610$202610"),
     "充值号码": ("充值的手机号码，11 位", "13900001234"),
     "充值时间": ("充值时间：支持 yyyyMMdd、yyyyMM（整月）或日期/账期范围（如 yyyyMMdd-yyyyMMdd）", "20260705"),
-    "extraInfo": ("上游附加信息（JSON 文本），可能包含充值号码、办理日期、手机号等", '{"充值号码":"13900001234","办理日期":"20260705"}'),
+    "extraInfo": ("上游附加信息（JSON 文本），可能包含充值号码、办理日期、手机号、安装地址等", '{"充值号码":"13900001234","办理日期":"20260705"}'),
 }
 
 # Skill 需要的入参（与 seed/skills 中各 Skill 的“需要的入参”保持一致）。
@@ -54,8 +55,8 @@ SKILL_INPUTS: dict[str, list[str]] = {
     "accept-type": [],
     "second-confirmation-sms": ["手机号码", "业务名称", "创建时间"],
     "verification-sms": ["手机号码", "业务名称", "创建时间"],
-    "reminder-sms": ["手机号码", "业务名称", "创建时间"],
-    "renewal-reminder-sms": ["手机号码", "业务名称", "创建时间"],
+    "reminder-sms": ["手机号码", "业务名称", "创建时间", "deadlineDate"],
+    "renewal-reminder-sms": ["手机号码", "业务名称", "创建时间", "deadlineDate"],
     "number-portability-sms": ["手机号码", "创建时间"],
     "original-package-name": ["手机号码", "业务名称", "创建时间"],
     "billing-cycle-sms": ["手机号码", "账单"],
@@ -69,6 +70,7 @@ FIELD_INPUTS: dict[str, list[str]] = {
     "业务名称": ["业务名称"],
     "受理日期": ["业务名称", "业务月份"],
     "客户手机号": ["extraInfo", "手机号码"],
+    "安装地址": ["extraInfo"],
     "客户号码": ["手机号码"],
 }
 FIELD_INPUTS_OVERRIDE: dict[tuple[str, str], list[str]] = {
@@ -83,8 +85,14 @@ INPUT_ORDER = list(INPUT_DEFS.keys())
 # Java 源读取
 # ---------------------------------------------------------------------------
 
-def pebble_to_jinja(text: str) -> str:
-    """Pebble → Jinja2 机械转换：只改 {% %} 标签内的 elseif / null，正文文本不动；换行统一为 LF。"""
+# 模板 115（合约活动违约争议处理模板）中「违约责任」既在第 19 行直接输出（保留 whenMissing=placeholder），
+# 又在第 59 行做非空分支判断；必须排除占位符字面量，防止 not_found 时误入违约行为段落并污染 missingShown。
+_TPL115_OLD_IF = '{% if 违约责任 is defined and 违约责任 != none and 违约责任 != ""  %}'
+_TPL115_NEW_IF = '{% if 违约责任 is defined and 违约责任 != none and 违约责任 != "" and 违约责任 != "{{违约责任}}" %}'
+
+
+def pebble_to_jinja(text: str, *, code: str = "") -> str:
+    """Pebble → Jinja2 转换：替换 {% %} 标签内的 elseif / null、统一 LF，并对模板 115 补齐占位符排除守卫。"""
 
     def fix_tag(m: re.Match[str]) -> str:
         tag = m.group(0)
@@ -93,7 +101,12 @@ def pebble_to_jinja(text: str) -> str:
         return tag
 
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    return _TAG_RE.sub(fix_tag, text)
+    converted = _TAG_RE.sub(fix_tag, text)
+    if code == "合约活动违约争议处理模板":
+        if _TPL115_OLD_IF not in converted:
+            raise SystemExit(f"模板 {code} 未找到预期的违约责任条件分支：{_TPL115_OLD_IF!r}")
+        converted = converted.replace(_TPL115_OLD_IF, _TPL115_NEW_IF, 1)
+    return converted
 
 
 def load_template_ids() -> dict[str, int]:
@@ -232,7 +245,7 @@ def generate_one(path: Path, ids: dict[str, int], catalog: dict, mappings: dict[
         raise SystemExit(f"{path.name} 首行没有“服务争议点N:”")
     code = m.group(1).strip()
     tid = ids[code]
-    body = pebble_to_jinja(raw)
+    body = pebble_to_jinja(raw, code=code)
     info = BodyInfo(body)
     rules = load_rules(code)
 

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 from typing import Any
 
@@ -42,27 +43,45 @@ def api_health(request: Request) -> dict[str, Any]:
 
 
 # ============================================================================ 认证
+# 独立登录并发信号量：限制 PBKDF2（60 万次迭代）并发线程占用，防止恶意高频登录耗尽全局默认线程池
+_LOGIN_SEM = asyncio.Semaphore(4)
+
+
+def _client_ip(request: Request) -> str | None:
+    """提取直连客户端 IP（不盲信可伪造的代理头，防绕过限流或伪造封禁）。"""
+    client = request.client
+    return client.host if client and client.host else None
+
+
 class LoginBody(BaseModel):
     username: str
     password: str
 
 
 @auth_router.post("/auth/login", tags=["认证"])
-def login(request: Request, response: Response, body: LoginBody) -> dict[str, Any]:
+async def login(request: Request, response: Response, body: LoginBody) -> dict[str, Any]:
     guard = request.app.state.login_guard
     users = request.app.state.users
     username = body.username.strip()
     if not username or not body.password:
         raise bad_request("用户名和密码不能为空")
-    guard.check(username)
-    rec = users.get(username)
-    raw_hash = rec.get("passwordHash") if rec else None
-    has_valid_hash = isinstance(raw_hash, str) and bool(raw_hash)
-    pw_ok = verify_password(body.password, raw_hash if has_valid_hash else DUMMY_PASSWORD_HASH)
+    client_ip = _client_ip(request)
+    guard.check(username, client_ip=client_ip)
+
+    def _verify_credentials() -> tuple[dict[str, Any] | None, bool, bool]:
+        rec_local = users.get(username)
+        raw_hash = rec_local.get("passwordHash") if rec_local else None
+        valid_hash = isinstance(raw_hash, str) and bool(raw_hash)
+        matched = verify_password(body.password, raw_hash if valid_hash else DUMMY_PASSWORD_HASH)
+        return rec_local, valid_hash, matched
+
+    async with _LOGIN_SEM:
+        rec, has_valid_hash, pw_ok = await asyncio.to_thread(_verify_credentials)
+
     if not rec or not has_valid_hash or not pw_ok:
-        guard.fail(username)
+        guard.fail(username, known_user=rec is not None, client_ip=client_ip)
         raise HTTPException(401, detail={"code": "INVALID_CREDENTIALS", "message": "用户名或密码错误"})
-    guard.success(username)
+    guard.success(username, client_ip=client_ip)
     user = User(username, rec.get("displayName") or username, rec.get("role") or "")
     token = request.app.state.tokens.issue(user)
     settings = container(request).settings

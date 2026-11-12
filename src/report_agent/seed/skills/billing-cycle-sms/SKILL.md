@@ -38,7 +38,7 @@ apis:
 
 ## 查询方法（用 `expand_period` 解析并逐月调用）
 
-1. 校验 `账单` 符合 `^(\d{6})\$(\d{6})$` 且开始月份 `<=` 结束月份后，调用 `expand_period(period=账单)`（若起止月份跨度超过两个月，如 `202610$202612` 需要展开首尾闭区间内的全部连续月份，可将 `$` 替换为 `-` 传入 `expand_period(period="202610-202612")`；单月如 `202610$202610` 或相邻两月 `202610$202611` 直接传 `账单` 即可）。
+1. 校验 `账单` 符合 `^(\d{6})\$(\d{6})$` 且开始月份 `<=` 结束月份后，直接调用 `expand_period(period=账单)`——平台会自动将双段 `yyyyMM$yyyyMM` 按闭区间展开为首尾之间的全部连续月份（升序排列，如 `202607$202610` 展开为 `["202607","202608","202609","202610"]`）。
 2. 从 `expand_period` 返回的 `monthRanges` 中直接读取每个月的 `month`、`start`（当月首日 `000000`）与 `end`（当月末日 `235959`），对每个月调用 `call_api("querySMSSendInfo", {"手机号码": 手机号码, "开始时间": start, "结束时间": end})`。互不依赖的月份可以并行调用。
 3. 任一月份 `ok=false`（非“无短信记录”的业务失败、网络错误等）→ 整个字段提交 `status="not_found"`、`value=null` 并写明哪个月失败（不能把接口报错当作空列表）。
 4. 某月 `ok=true` 且 `count=0`（含“无短信记录”）是正常的，表示该月无短信记录。
@@ -72,6 +72,9 @@ apis:
 ## 提交要求
 
 - **有命中记录时**：提交 `status="found"`，`value` 为行对象数组（每行五个键：`提醒类型`、`账期月`、`提醒时间`、`提醒次数`、`短信内容`）；`evidence` 引用每一行包含的每条短信记录（`{"type":"api","resultId":...,"row":...,"column":"smsSendTime"}`，资费变更行再引用 `smsContent`），以及用到的 `expand_period`、`query_result`、`format_date` 的 `{"type":"tool","callId":...}`。
-- **全部月份查询成功（`ok=true`）但无任何命中提醒短信时**：**必须提交 `status="found"`、`value=[]`**，并在 `evidence` 中附上本次 `call_api` 或 `query_result` 的工具证据 `{"type":"tool","callId":"..."}`（或对应 `{"type":"api","resultId":"...","row":0,"column":"smsSendTime"}`），`reasoning` 写明“各月接口查询成功，无符合条件的提醒短信”。
+- **全部月份查询成功（`ok=true`）但无任何命中提醒短信时**：**必须提交 `status="found"`、`value=[]`**，并在 `evidence` 中附上结果为 0 行的查询证据：
+  - 若调用 `query_result` 筛选后 `total == 0`（三类提醒筛选均 `total == 0`），引用这些 `total == 0` 的 `query_result` 返回的 `{"type":"tool","callId":"..."}`；
+  - 若所有月份 `call_api` 均直接返回 `count == 0`，引用各月 `call_api` 返回的 `{"type":"tool","callId":"..."}`（或 `count == 0` 结果的 `{"type":"api","resultId":"...","row":0,"column":""}`）；
+  - 严禁在原接口 `count > 0` 时仅引用 `type="api"`，也严禁引用 `load_skill` 的 `callId`！`reasoning` 写明“各月接口查询成功，无符合条件的提醒短信”。
 - **仅当缺少合法入参（号码非 11 位、账单格式不合法）或任一月份接口报错（`ok=false`）时**：提交 `status="not_found"`、`value=null`。
 - 不得输出账单区间以外、或未命中上述关键词的短信。

@@ -7,8 +7,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
+from functools import lru_cache, wraps
 from typing import Any
 
 from jinja2 import Environment, StrictUndefined, Template as JinjaTemplate, TemplateSyntaxError, Undefined, meta, nodes
@@ -185,13 +186,72 @@ class _TrackedCodeGenerator(CodeGenerator):
         self.write(")")
 
 
+def _collect_tracked_sources(items: Iterable[Any]) -> tuple[list[str], bool]:
+    """收集过滤器入参（含 list/tuple 容器元素）中携带的 TrackedValue 字段名与缺失标记。#Created By AiCoding(codex)"""
+    names: list[str] = []
+    any_missing = False
+
+    def _visit(obj: Any) -> None:
+        nonlocal any_missing
+        if isinstance(obj, TrackedValue):
+            for fn in obj.field_names:
+                if fn not in names:
+                    names.append(fn)
+            if obj.missing:
+                any_missing = True
+        elif isinstance(obj, TrackedList):
+            if obj.field_name and obj.field_name not in names:
+                names.append(obj.field_name)
+            if obj.missing:
+                any_missing = True
+            for el in list.__iter__(obj):
+                _visit(el)
+        elif isinstance(obj, (list, tuple)):
+            for el in obj:
+                _visit(el)
+
+    for item in items:
+        _visit(item)
+    return names, any_missing
+
+
+def _wrap_tracked_result(res: Any, sources: Iterable[Any]) -> Any:
+    """若过滤器返回 str 且入参含追踪来源，则包装回 TrackedValue 以免丢失 used 追踪。#Created By AiCoding(codex)"""
+    if not isinstance(res, str):
+        return res
+    names, any_missing = _collect_tracked_sources(sources)
+    if isinstance(res, TrackedValue):
+        if not names and not any_missing:
+            return res
+        return res._wrap(str.__str__(res), extra_names=names, extra_missing=any_missing)
+    if names:
+        return TrackedValue(res, names[0], missing=any_missing, field_names=names)
+    return res
+
+
+def _wrap_filter_func(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """包装 Jinja2 内置过滤器以保留 TrackedValue 字段追踪（同时通过 @wraps 保留 jinja_pass_arg）。#Created By AiCoding(codex)"""
+
+    @wraps(fn)
+    def _wrapped(*args: Any, **kwargs: Any) -> Any:
+        res = fn(*args, **kwargs)
+        if isinstance(res, str):
+            return _wrap_tracked_result(res, (*args, *kwargs.values()))
+        return res
+
+    return _wrapped
+
+
 class _TrackedTemplate(JinjaTemplate):
     """在模板渲染期间绑定当前环境的 used 集合，使 TrackedList.__iter__ 能准确记录被遍历的列表字段。
 
     #Created By AiCoding(codex)
+    当外层（如 render_body）已通过 _ACTIVE_USED 绑定独立 used 集合时直接复用，确保预编译模板并发渲染互不串扰。
     """
 
     def render(self, *args: Any, **kwargs: Any) -> str:
+        if _ACTIVE_USED.get() is not None:
+            return super().render(*args, **kwargs)
         used_set = getattr(self.environment, "_used", None)
         token = _ACTIVE_USED.set(used_set)
         try:
@@ -200,6 +260,8 @@ class _TrackedTemplate(JinjaTemplate):
             _ACTIVE_USED.reset(token)
 
     async def render_async(self, *args: Any, **kwargs: Any) -> str:
+        if _ACTIVE_USED.get() is not None:
+            return await super().render_async(*args, **kwargs)
         used_set = getattr(self.environment, "_used", None)
         token = _ACTIVE_USED.set(used_set)
         try:
@@ -213,6 +275,18 @@ class _TrackedSandboxEnvironment(ImmutableSandboxedEnvironment):
     template_class = _TrackedTemplate
     _strict_undefined: bool = False
     _used: set[str] | None = None
+
+    def call_filter(
+        self,
+        name: str,
+        value: Any,
+        args: Sequence[Any] | None = None,
+        kwargs: Mapping[str, Any] | None = None,
+        context: Any = None,
+        eval_ctx: Any = None,
+    ) -> Any:
+        res = super().call_filter(name, value, args, kwargs, context, eval_ctx)
+        return _wrap_tracked_result(res, (value, *(args or ()), *(kwargs or {}).values()))
 
     def _tracked_concat(self, seq: Iterable[Any]) -> str:
         parts: list[str] = []
@@ -307,18 +381,20 @@ def make_environment(used: set[str] | None = None, *, strict_undefined: bool = F
     """
 
     def finalize(value: Any) -> Any:
+        active_used = _ACTIVE_USED.get()
+        target_used = active_used if active_used is not None else used
         if isinstance(value, Undefined):
             if strict_undefined or value._undefined_obj is not _jinja_missing or not value._undefined_name:
                 value._fail_with_undefined_error()
             name = str(value._undefined_name)
-            if used is not None:
-                used.add(name)
+            if target_used is not None:
+                target_used.add(name)
             return "{{" + name + "}}"
-        if used is not None:
+        if target_used is not None:
             if isinstance(value, TrackedValue):
-                used.update(value.field_names)
+                target_used.update(value.field_names)
             elif isinstance(value, TrackedList) and value.field_name:
-                used.add(value.field_name)
+                target_used.add(value.field_name)
         return "" if value is None else value
 
     env = _TrackedSandboxEnvironment(
@@ -333,11 +409,14 @@ def make_environment(used: set[str] | None = None, *, strict_undefined: bool = F
     env._used = used
     for unsafe_global in ("cycler", "joiner", "lipsum", "namespace"):
         env.globals.pop(unsafe_global, None)
+    for filter_name, filter_fn in list(env.filters.items()):
+        env.filters[filter_name] = _wrap_filter_func(filter_fn)
     env.tests["hasDigit"] = _test_has_digit
     return env
 
 
 _PARSE_ENV = make_environment()
+_RENDER_ENV_STRICT = make_environment(strict_undefined=True)
 
 
 class BodySyntaxError(ValueError):
@@ -377,16 +456,25 @@ def printed_variables(body: str) -> set[str]:
     return names
 
 
-def render_body(body: str, context: dict[str, Any], *, strict_undefined: bool = False) -> tuple[str, set[str]]:
-    """渲染正文，返回（文本，实际输出的字段名集合）。"""
-    used: set[str] = set()
-    env = make_environment(used, strict_undefined=strict_undefined)
+@lru_cache(maxsize=256)
+def _compile_body_template(body: str, strict_undefined: bool = False) -> JinjaTemplate:
+    """预编译并缓存 Jinja2 模板对象（上限 256 个），消除每次渲染重编译 AST 的开销。#Created By AiCoding(codex)"""
+    env = _RENDER_ENV_STRICT if strict_undefined else _PARSE_ENV
     try:
-        template = env.from_string(body)
+        return env.from_string(body)
     except TemplateSyntaxError as exc:
         raise BodySyntaxError(f"第 {exc.lineno} 行语法错误：{exc.message}", exc.lineno) from exc
+
+
+def render_body(body: str, context: dict[str, Any], *, strict_undefined: bool = False) -> tuple[str, set[str]]:
+    """渲染正文，返回（文本，实际输出的字段名集合）。#Created By AiCoding(codex)"""
+    template = _compile_body_template(body, strict_undefined)
+    used: set[str] = set()
+    token = _ACTIVE_USED.set(used)
     try:
         text = template.render(**(context or {}))
     except SecurityError as exc:
         raise SecurityError(f"模板安全沙箱拦截：{exc}") from exc
+    finally:
+        _ACTIVE_USED.reset(token)
     return text, used

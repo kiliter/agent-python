@@ -122,6 +122,10 @@ class Workspace:
     validation_rounds: list[list[dict[str, str]]] = field(default_factory=list)
     _result_seq: int = 0
     _call_seq: int = 0
+    _idempotent_cache: dict[tuple[str, str], ApiResult] = field(default_factory=dict, repr=False)
+    _idempotent_inflight: dict[tuple[str, str], asyncio.Future[ApiResult]] = field(default_factory=dict, repr=False)
+    _doc_index: Any = field(default=None, repr=False)
+    _doc_index_source: str | None = field(default=None, repr=False)
 
     def next_result_id(self) -> str:
         self._result_seq += 1

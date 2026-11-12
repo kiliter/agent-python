@@ -19,9 +19,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api.auth import LoginGuard, TokenService, UserStore
+from .api.routes_chat import chat_router
 from .api.routes_resources import router as resources_router
 from .api.routes_system import admin_router, auth_router, report_router
 from .api.routes_templates import router as templates_router
+from .chat.service import ChatError
 from .config import Settings, get_settings
 from .container import Container, build_container
 from .runtime.runner import InputValidationError, TemplateUnavailable
@@ -114,6 +116,10 @@ def install_error_handlers(app: FastAPI) -> None:
     async def _input(_: Request, exc: InputValidationError):
         return _error(400, "INVALID_INPUT", str(exc), errors=exc.errors)
 
+    @app.exception_handler(ChatError)
+    async def _chat_error(_: Request, exc: ChatError):
+        return _error(exc.status, exc.code, exc.message, **exc.details)
+
     @app.exception_handler(GitError)
     async def _git(_: Request, exc: GitError):
         log.error("Git 操作失败：%s", exc)
@@ -149,6 +155,8 @@ def create_app(settings: Settings | None = None, container: Container | None = N
             yield
         finally:
             cleanup.cancel()
+            if c.chat is not None:
+                await c.chat.aclose()
             await c.runs.stop()
             await c.gateway.aclose()
 
@@ -159,6 +167,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
     app.include_router(resources_router)
     app.include_router(admin_router)
     app.include_router(report_router)
+    app.include_router(chat_router)
 
     @app.get("/healthz", tags=["系统"])
     def healthz(request: Request):
@@ -188,14 +197,18 @@ def create_app(settings: Settings | None = None, container: Container | None = N
 
 
 async def _cleanup_loop(c: Container) -> None:
-    """每天清理一次过期运行记录。"""
+    """每天清理一次过期运行记录与聊天会话。"""
     while True:
         try:
             removed = await asyncio.to_thread(c.runs.cleanup, c.settings.runs_keep_days)
             if removed:
                 log.info("已清理 %d 天的过期运行记录", removed)
+            if c.chat is not None:
+                chat_removed = await asyncio.to_thread(c.chat.store.cleanup, c.settings.runs_keep_days)
+                if chat_removed:
+                    log.info("已清理 %d 个过期聊天会话文件", chat_removed)
         except Exception:  # noqa: BLE001
-            log.exception("清理运行记录失败")
+            log.exception("清理运行记录或聊天会话失败")
         await asyncio.sleep(24 * 3600)
 
 

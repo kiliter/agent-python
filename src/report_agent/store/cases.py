@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 from pathlib import Path
@@ -20,6 +21,11 @@ from .layout import CASE_ID_RE, DataLayout, InvalidResource, ensure_within
 
 log = logging.getLogger(__name__)
 _CASE_ID_RE = CASE_ID_RE
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+_YAML_TOP_KEY_RE = re.compile(
+    rb'^(?:[A-Za-z0-9_\-\x80-\xff]+|"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\')\s*:(?:\s|$)'
+)
+_MAX_VALID_CACHE = 8192
 
 
 class CaseDef(BaseModel):
@@ -39,11 +45,13 @@ class CaseDef(BaseModel):
 
 
 class CaseStore:
-    """用例增删改查。"""
+    """用例增删改查（count 采用目录扫描 + 文件指纹轻量校验缓存，避免全量反序列化）。"""
 
     def __init__(self, layout: DataLayout, lock: threading.RLock) -> None:
         self.layout = layout
         self.lock = lock
+        self._cache_lock = threading.Lock()
+        self._valid_cache: dict[str, tuple[int, int, bool]] = {}
 
     def _dir(self, tid: int) -> Path:
         if not isinstance(tid, int) or isinstance(tid, bool) or tid <= 0:
@@ -56,10 +64,48 @@ class CaseStore:
         d = self._dir(tid)
         return ensure_within(d, d / f"{case_id}.yaml")
 
+    def _remember_validity(self, path_str: str, mtime_ns: int, size: int, valid: bool) -> None:
+        with self._cache_lock:
+            if len(self._valid_cache) >= _MAX_VALID_CACHE and path_str not in self._valid_cache:
+                self._valid_cache.pop(next(iter(self._valid_cache)), None)
+            self._valid_cache[path_str] = (mtime_ns, size, valid)
+
+    def _is_valid_case_file(self, path_str: str, mtime_ns: int, size: int) -> bool:
+        """轻量判定用例文件是否为合法键值映射 YAML（命中指纹缓存时 0 文件打开开销）。"""
+        if size <= 0:
+            return False
+        with self._cache_lock:
+            cached = self._valid_cache.get(path_str)
+        if cached is not None and cached[0] == mtime_ns and cached[1] == size:
+            return cached[2]
+
+        valid = False
+        try:
+            with open(path_str, "rb") as fp:
+                head = fp.read(512)
+            if head.startswith(b"\xef\xbb\xbf"):
+                head = head[3:]
+            for raw_line in head.splitlines():
+                stripped = raw_line.strip()
+                if not stripped or stripped.startswith(b"#") or stripped == b"---":
+                    continue
+                if stripped.startswith(b"{"):
+                    with open(path_str, "rb") as fp_full:
+                        parsed = yaml.load(fp_full.read(), Loader=_YAML_LOADER)
+                    valid = isinstance(parsed, dict)
+                else:
+                    valid = bool(_YAML_TOP_KEY_RE.match(stripped))
+                break
+        except (OSError, yaml.YAMLError):
+            valid = False
+
+        self._remember_validity(path_str, mtime_ns, size, valid)
+        return valid
+
     @staticmethod
     def _load_file(path: Path) -> CaseDef | None:
         try:
-            raw = yaml.safe_load(path.read_text(encoding="utf-8", errors="replace"))
+            raw = yaml.load(path.read_text(encoding="utf-8", errors="replace"), Loader=_YAML_LOADER)
         except (yaml.YAMLError, OSError) as exc:
             log.warning("读取用例文件失败 %s：%s", path, exc)
             return None
@@ -84,12 +130,41 @@ class CaseStore:
             if p.name.startswith(".") or not _CASE_ID_RE.match(p.stem):
                 continue
             case = self._load_file(p)
+            try:
+                st = p.stat()
+                self._remember_validity(str(p), st.st_mtime_ns, st.st_size, case is not None)
+            except OSError:
+                pass
             if case is not None:
                 cases.append(case)
         return cases
 
     def count(self, tid: int) -> int:
-        return len(self.list(tid))
+        """快速统计模板下合法回归用例数量（仅扫描目录项与轻量头校验，不执行全量 YAML 反序列化）。"""
+        d = self._dir(tid)
+        if not d.is_dir():
+            return 0
+        total = 0
+        try:
+            with os.scandir(d) as it:
+                for entry in it:
+                    name = entry.name
+                    if name.startswith(".") or not name.endswith(".yaml"):
+                        continue
+                    stem = name[:-5]
+                    if not _CASE_ID_RE.match(stem):
+                        continue
+                    try:
+                        if not entry.is_file():
+                            continue
+                        st = entry.stat()
+                    except OSError:
+                        continue
+                    if self._is_valid_case_file(entry.path, st.st_mtime_ns, st.st_size):
+                        total += 1
+        except OSError:
+            return 0
+        return total
 
     def get(self, tid: int, case_id: str) -> CaseDef | None:
         p = self._case_path(tid, case_id)
@@ -106,6 +181,11 @@ class CaseStore:
         case.updatedAt = now_iso()
         with self.lock:
             atomic_write_text(p, yaml.safe_dump(case.model_dump(), allow_unicode=True, sort_keys=False, width=1000))
+            try:
+                st = p.stat()
+                self._remember_validity(str(p), st.st_mtime_ns, st.st_size, True)
+            except OSError:
+                pass
         return case
 
     def delete(self, tid: int, case_id: str) -> bool:
@@ -113,6 +193,8 @@ class CaseStore:
         with self.lock:
             if p.is_file():
                 p.unlink()
+                with self._cache_lock:
+                    self._valid_cache.pop(str(p), None)
                 return True
         return False
 

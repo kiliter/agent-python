@@ -123,8 +123,14 @@ def build_report_model(template: Template) -> type[BaseModel]:
                 list_item_type: Any = kinds[0]
             else:
                 list_item_type = Annotated[Union[tuple(kinds)], Field(discriminator="type")]  # type: ignore[valid-type]
+            cols_desc = "、".join(
+                c.name + (f"（可选值：{'/'.join(c.values)}）" if c.type == "enum" and c.values else "") for c in f.columns
+            )
+            desc = (f"{EVIDENCE_LABEL[f.evidence]}；列表字段，value 为行对象数组（查过确无匹配记录时提交 status=found, value=[] 并附查询证据；"
+                    f"缺少入参或接口失败时提交 status=not_found, value=null），列：{cols_desc}")
+            # #Created By AiCoding(codex) 说明放入 $defs 模型文档，外层 $ref 不挂 description，避免 OpenAI strict 转换器包裹冗余 anyOf
             cache[cache_key] = create_model(
-                f"FieldAnswer{suffix}_{len(cache) + 1}", __base__=_Strict,
+                f"FieldAnswer{suffix}_{len(cache) + 1}", __base__=_Strict, __doc__=desc,
                 status=(Literal["found", "not_found"], Field(
                     description="found=已核查数据源并得出确定列表（有记录填行数组，接口调用成功且确无匹配记录填 []）；"
                                 "not_found=缺少必要入参、前置依赖缺失或接口调用失败无法获知结果")),
@@ -136,34 +142,30 @@ def build_report_model(template: Template) -> type[BaseModel]:
                     description="取值依据（非空列表覆盖所有行的出处；status=found 且 value=[] 时仍须附上查询证据，如 tool/api/document）")),
                 reasoning=(str, Field(default="", description="判断过程；value=[] 或 not_found 时写明核查过程与原因")),
             )
-            cols_desc = "、".join(
-                c.name + (f"（可选值：{'/'.join(c.values)}）" if c.type == "enum" and c.values else "") for c in f.columns
-            )
-            desc = (f"{EVIDENCE_LABEL[f.evidence]}；列表字段，value 为行对象数组（查过确无匹配记录时提交 status=found, value=[] 并附查询证据；"
-                    f"缺少入参或接口失败时提交 status=not_found, value=null），列：{cols_desc}")
-            model_fields[f"f{idx}"] = (cache[cache_key], Field(alias=f.name, description=desc))
+            model_fields[f"f{idx}"] = (cache[cache_key], Field(alias=f.name))
             continue
         values = tuple(f.values) if f.type == "enum" and f.values else None
-        sig = (tuple(k.__name__ for k in kinds), values)
+        is_quote_whole = bool(f.evidence == "quote" and f.quoteWhole)
+        sig = (f.evidence, tuple(k.__name__ for k in kinds), values, is_quote_whole)
         if sig not in cache:
             if len(kinds) == 1:
                 item_type: Any = kinds[0]
             else:
                 item_type = Annotated[Union[tuple(kinds)], Field(discriminator="type")]  # type: ignore[valid-type]
             value_type: Any = Literal[values] if values else str  # type: ignore[valid-type]
+            desc = f"{EVIDENCE_LABEL[f.evidence]}"
+            if f.type == "enum":
+                desc += f"；可选值：{'/'.join(f.values)}"
+            if is_quote_whole:
+                desc += "；必须整条原样引用"
             cache[sig] = create_model(
-                f"FieldAnswer{suffix}_{len(cache) + 1}", __base__=_Strict,
+                f"FieldAnswer{suffix}_{len(cache) + 1}", __base__=_Strict, __doc__=desc,
                 status=(Literal["found", "not_found"], Field(description="found=找到并给出证据；not_found=没有依据")),
                 value=(value_type | None, Field(default=None, description="字段值；not_found 时为 null")),
                 evidence=(list[item_type], Field(default_factory=list, description="取值依据")),
                 reasoning=(str, Field(default="", description="判断过程；not_found 时写明原因")),
             )
-        desc = f"{EVIDENCE_LABEL[f.evidence]}"
-        if f.type == "enum":
-            desc += f"；可选值：{'/'.join(f.values)}"
-        if f.evidence == "quote" and f.quoteWhole:
-            desc += "；必须整条原样引用"
-        model_fields[f"f{idx}"] = (cache[sig], Field(alias=f.name, description=desc))
+        model_fields[f"f{idx}"] = (cache[sig], Field(alias=f.name))
 
     return create_model(
         f"Report{suffix}", __config__=ConfigDict(populate_by_name=True, extra="forbid"),

@@ -41,14 +41,23 @@ class ReleaseStore:
         self.lock = lock
         self.keep = keep
         self._entries: list[dict[str, Any]] | None = None
+        self._entries_sig: tuple[int, int] | None = None
         self._snapshots: OrderedDict[str, ResourceSet] = OrderedDict()
         self._snap_lock = threading.Lock()
+
+    def _index_sig(self) -> tuple[int, int]:
+        try:
+            st = self.layout.release_index.stat()
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return (0, -1)
 
     # ------------------------------------------------------------------ 索引
     def entries(self) -> list[dict[str, Any]]:
         """全部版本元数据，按版本号升序。自动跳过损坏或不完整的索引行。"""
         with self.lock:
-            if self._entries is None:
+            sig = self._index_sig()
+            if self._entries is None or self._entries_sig != sig:
                 valid: list[dict[str, Any]] = []
                 for item in read_jsonl(self.layout.release_index):
                     rev = item.get("rev")
@@ -62,6 +71,7 @@ class ReleaseStore:
                     valid.append({**item, "n": n})
                 valid.sort(key=lambda e: e["n"])
                 self._entries = valid
+                self._entries_sig = sig
             return list(self._entries)
 
     def entry(self, rev: str) -> dict[str, Any]:
@@ -127,6 +137,18 @@ class ReleaseStore:
             raise ReleaseNotFound("尚无线上版本")
         return rev, self.snapshot(rev)
 
+    def try_live_snapshot(self) -> tuple[str, ResourceSet] | None:
+        """同步无重 IO 快路径：仅通过 os.readlink 读取线上软链并查进程内 _snapshots 缓存，未命中返回 None。"""
+        rev = self.live_rev()
+        if not rev:
+            return None
+        with self._snap_lock:
+            rs = self._snapshots.get(rev)
+            if rs is None:
+                return None
+            self._snapshots.move_to_end(rev)
+            return rev, rs
+
     # ------------------------------------------------------------------ 血缘
     def lineage(self, rev: str | None = None) -> list[dict[str, Any]]:
         """从 rev（默认线上版本）沿 base 往回的版本链，最新在前。"""
@@ -175,6 +197,7 @@ class ReleaseStore:
             os.replace(built_dir, final)
             append_line(self.layout.release_index, _dumps(entry))
             self._entries = None
+            self._entries_sig = None
             atomic_symlink(entry["rev"], self.layout.current)
 
     def switch(self, rev: str) -> None:

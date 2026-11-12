@@ -112,7 +112,7 @@ apis:
    - 算两条记录的秒级距离 → 写明调用 `time_diff`；
    - 提取正则捕获组 → 写明调用 `regex_extract`；
    - 筛表排序（含跨月合并或 OR 条件） → 写明调用 `query_result`（用 `resultIds` / `anyOf` / `between` / `normalizedContains`），明确写上“严禁目测预览筛选”。
-2. **明确区分 `ok=false` 与 `count=0`**：尤其对列表字段，各月 `ok=true` 但无命中记录时要求提交 `status="found", value=[]`（附成功调用证据），而任一接口 `ok=false` 时必须提交 `status="not_found"`。
+2. **明确区分 `ok=false` 与 `count=0`**：尤其对列表字段，各月 `ok=true` 但无命中记录时要求提交 `status="found", value=[]`（附上结果为 0 行的 `query_result(total=0)` 或 `call_api(count=0)` 的工具 `callId` 证据，严禁引用 `load_skill`），而任一接口 `ok=false` 时必须提交 `status="not_found"`。
 3. **写清相同参数复用 `resultId`**：若多个 Skill 查同一个接口且参数相同（如工单创建当天短信），嘱咐模型直接复用已有 `resultId`。
 4. **绑定到模板**：最后在目标模板的 `skills` 列表中勾选该新 Skill（未勾选的 Skill 会被 `load_skill` 权限拦截）。
 

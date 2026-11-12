@@ -6,6 +6,7 @@ import type {
   ApiConnector,
   ApiDetail,
   ApiItem,
+  ApiKeySettings,
   ApiTestCallResult,
   ApiValidateResult,
   CurrentUser,
@@ -305,23 +306,64 @@ export const platformApi = {
   publishTemplate: (id: number, note: string) =>
     request<PublishResult & { item: TemplateItem }>('POST', `/templates/${id}/publish`, { note }),
   rollbackTemplateRevision: (id: number, targetRev: string, mode: 'draft_only' | 'publish_now' = 'draft_only', reason = '') =>
-    request<{ mode: string; rev: string; targetRev: string; item: TemplateItem; detail: TemplateDetail }>(
-      'POST', `/templates/${id}/rollback`, { targetRev, mode, reason }),
+    request<{
+      mode: string
+      rev: string
+      targetRev: string
+      targetOffline?: boolean
+      warning?: string
+      item: TemplateItem
+      detail: TemplateDetail
+    }>('POST', `/templates/${id}/rollback`, { targetRev, mode, reason }),
   fetchTemplateRevisions: (id: number) => request<Revision[]>('GET', `/templates/${id}/revisions`),
   fetchTemplateDiff: (id: number, a: string, b: string) =>
     request<TemplateDiff>('GET', `/templates/${id}/diff${query({ a, b })}`),
-  renderPreview: (id: number, bodyText: string, values: Record<string, string | null>) =>
-    request<RenderPreview>('POST', `/templates/${id}/render-preview`, { bodyText, values }),
-  saveTemplateField: (id: number, field: TemplateField, originalName?: string) =>
-    request<TemplateField>('PUT', `/templates/${id}/fields/${enc(field.name)}`, { ...field, originalName }),
-  deleteTemplateField: (id: number, name: string) =>
-    request<{ deletedName: string }>('DELETE', `/templates/${id}/fields/${enc(name)}`),
-  batchUpdateEvidenceType: (id: number, fieldNames: string[], evidenceType: EvidenceType) =>
-    request<{ updatedCount: number }>('POST', `/templates/${id}/fields/batch-evidence`, { fieldNames, evidenceType }),
-  reorderFields: (id: number, names: string[]) =>
-    request<{ names: string[] }>('PUT', `/templates/${id}/fields-order`, { names }),
-  updateTemplateSkills: (id: number, skills: string[]) =>
-    request<{ skills: string[] }>('PUT', `/templates/${id}/skills`, { skills }),
+  renderPreview: (
+    id: number,
+    bodyText: string,
+    values: Record<string, string | null>,
+    fields?: TemplateField[],
+  ) =>
+    request<RenderPreview>('POST', `/templates/${id}/render-preview`, {
+      bodyText,
+      values,
+      ...(fields !== undefined ? { fields } : {}),
+    }),
+  saveTemplateField: (id: number, field: TemplateField, originalName?: string, revision?: number | null) =>
+    request<TemplateField & { revision?: number; draft?: DraftMeta }>(
+      'PUT',
+      `/templates/${id}/fields/${enc(field.name)}`,
+      { ...field, originalName, ...(revision !== undefined ? { revision } : {}) },
+    ),
+  deleteTemplateField: (id: number, name: string, revision?: number | null) =>
+    request<{ deletedName: string; revision?: number; draft?: DraftMeta }>(
+      'DELETE',
+      `/templates/${id}/fields/${enc(name)}${query({ revision })}`,
+      revision !== undefined ? { revision } : undefined,
+    ),
+  batchUpdateEvidenceType: (
+    id: number,
+    fieldNames: string[],
+    evidenceType: EvidenceType,
+    revision?: number | null,
+  ) =>
+    request<{ updatedCount: number; revision?: number; draft?: DraftMeta }>(
+      'POST',
+      `/templates/${id}/fields/batch-evidence`,
+      { fieldNames, evidenceType, ...(revision !== undefined ? { revision } : {}) },
+    ),
+  reorderFields: (id: number, names: string[], revision?: number | null) =>
+    request<{ names: string[]; revision?: number; draft?: DraftMeta }>(
+      'PUT',
+      `/templates/${id}/fields-order`,
+      { names, ...(revision !== undefined ? { revision } : {}) },
+    ),
+  updateTemplateSkills: (id: number, skills: string[], revision?: number | null) =>
+    request<{ skills: string[]; revision?: number; draft?: DraftMeta }>(
+      'PUT',
+      `/templates/${id}/skills`,
+      { skills, ...(revision !== undefined ? { revision } : {}) },
+    ),
 
   // ==================== 回归用例 ====================
   fetchTemplateCases: (id: number) => request<RegressionCase[]>('GET', `/templates/${id}/cases`),
@@ -402,8 +444,12 @@ export const platformApi = {
   saveSystemPromptDraft: (sysPromptText: string, revision?: number | null) =>
     request<SystemPromptState & { status: ResourceStatus }>('PUT', '/settings/system-prompt/draft',
       { sysPromptText, revision }),
-  publishSystemPrompt: (sysPromptText?: string, note = '') =>
-    request<{ status: ResourceStatus; rev: string }>('POST', '/settings/system-prompt/publish', { sysPromptText, note }),
+  publishSystemPrompt: (sysPromptText?: string, note = '', revision?: number | null) =>
+    request<{ status: ResourceStatus; rev: string }>('POST', '/settings/system-prompt/publish', {
+      sysPromptText,
+      note,
+      ...(revision !== undefined ? { revision } : {}),
+    }),
   discardSystemPromptDraft: () => request<SystemPromptState>('POST', '/settings/system-prompt/discard-draft'),
   rollbackSystemPrompt: (targetRev: string, mode: 'draft_only' | 'publish_now' = 'draft_only', reason = '') =>
     request<SystemPromptState & { status: ResourceStatus; rev?: string }>('POST', '/settings/system-prompt/rollback',
@@ -422,4 +468,9 @@ export const platformApi = {
     }),
   syncRuntimeConfigFromEnv: (note = '') =>
     request<RuntimeConfigState>('POST', '/settings/runtime/sync-env', { note }),
+  fetchApiKeySettings: () => request<ApiKeySettings>('GET', '/settings/api-key'),
+  updateApiKeySettings: (apiKeys: string, note = '') =>
+    request<ApiKeySettings>('PUT', '/settings/api-key', { apiKeys, note }),
+  regenerateApiKey: (note = '') =>
+    request<ApiKeySettings>('POST', '/settings/api-key/regenerate', { note }),
 }

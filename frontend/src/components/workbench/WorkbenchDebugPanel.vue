@@ -89,7 +89,7 @@ function fillInputSample(inp: TemplateInput) {
   setInputValue(inp.key, inp.sample)
 }
 
-/** 校验单个契约入参：返回错误提示文本，合法返回 null */
+/** 校验单个契约入参：返回错误提示文本，合法返回 null（锚定整串匹配，对齐后端 fullmatch + strip） */
 function getInputError(inp: TemplateInput): string | null {
   const val = getInputValue(inp.key).trim()
   if (!val) {
@@ -97,7 +97,7 @@ function getInputError(inp: TemplateInput): string | null {
   }
   if (inp.pattern) {
     try {
-      const re = new RegExp(inp.pattern)
+      const re = new RegExp(`^(?:${inp.pattern})$`)
       if (!re.test(val)) {
         return `格式不匹配（${inp.preset || inp.pattern}）`
       }
@@ -216,7 +216,7 @@ async function handleRunDebug() {
     const val = getInputValue(inp.key).trim()
     if (!val || !inp.pattern) continue
     try {
-      const re = new RegExp(inp.pattern)
+      const re = new RegExp(`^(?:${inp.pattern})$`)
       if (!re.test(val)) {
         invalidKeys.push(inp.key)
       }
@@ -234,7 +234,7 @@ async function handleRunDebug() {
 
   const inputsPayload: Record<string, string> = { ...(store.dryRunPreset.inputs || {}) }
   for (const inp of store.templateInputs) {
-    inputsPayload[inp.key] = getInputValue(inp.key)
+    inputsPayload[inp.key] = getInputValue(inp.key).trim()
   }
 
   await store.executeDryRun({

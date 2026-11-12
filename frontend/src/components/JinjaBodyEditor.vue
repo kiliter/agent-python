@@ -38,77 +38,87 @@ const acTop = ref(48)
 const suppressAcAnnotation = Annotation.define<boolean>()
 // 标记由 store.bodyText 同步回编辑器的变更（加载模板、字段改名），不再回写 store、不标记未保存
 const externalSyncAnnotation = Annotation.define<boolean>()
+// 标记字段列表变更需要重绘 Jinja2 装饰
+const refreshJinjaHighlightAnnotation = Annotation.define<boolean>()
 
-// 构建 Jinja2 语法高亮与可点击胶囊 Decoration（使用 Decoration.set(..., true) 自动排序，杜绝同行混合标签导致 RangeError）
+// 构建 Jinja2 语法高亮与可点击胶囊 Decoration（仅扫描可见行区间，杜绝光标移动时整篇文档扫描）
 function buildJinjaDecorations(v: EditorView): DecorationSet {
   const ranges: Range<Decoration>[] = []
   const doc = v.state.doc
+  if (doc.length === 0) return Decoration.none
   const definedNames = new Set(store.templateFields.map(f => f.name))
   const undefinedNames = new Set(store.undefinedBodyFields)
 
-  for (let i = 1; i <= doc.lines; i++) {
-    const line = doc.line(i)
-    const text = line.text
-    let lineHasUndefined = false
+  const scanRanges = v.visibleRanges.length > 0 ? v.visibleRanges : [{ from: 0, to: doc.length }]
+  let lastLineNo = 0
+  for (const { from, to } of scanRanges) {
+    const startLine = doc.lineAt(from).number
+    const endLine = doc.lineAt(to).number
+    for (let i = Math.max(startLine, lastLineNo + 1); i <= endLine; i++) {
+      lastLineNo = i
+      const line = doc.line(i)
+      const text = line.text
+      let lineHasUndefined = false
 
-    // 统一扫描同行中的 {% ... %} 控制块与 {{ ... }} 变量胶囊
-    const combinedRe = /(\{%[^\n]*?%\})|(\{\{([^{}\n]+)\}\})/g
-    let m: RegExpExecArray | null
-    while ((m = combinedRe.exec(text)) !== null) {
-      if (m[1]) {
-        const blockStart = line.from + m.index
-        const blockText = m[1]
-        const blockEnd = blockStart + blockText.length
-        ranges.push(Decoration.mark({ class: 'jinja-tag' }).range(blockStart, blockStart + 2))
+      // 统一扫描同行中的 {% ... %} 控制块与 {{ ... }} 变量胶囊
+      const combinedRe = /(\{%[^\n]*?%\})|(\{\{([^{}\n]+)\}\})/g
+      let m: RegExpExecArray | null
+      while ((m = combinedRe.exec(text)) !== null) {
+        if (m[1]) {
+          const blockStart = line.from + m.index
+          const blockText = m[1]
+          const blockEnd = blockStart + blockText.length
+          ranges.push(Decoration.mark({ class: 'jinja-tag' }).range(blockStart, blockStart + 2))
 
-        const innerStart = blockStart + 2
-        const innerText = blockText.slice(2, -2)
-        const tokenRe = /\b(if|elif|else|endif|and|or|not|in)\b|("[^"]*")|([\u4e00-\u9fa5A-Za-z0-9_]+)/g
-        let tm: RegExpExecArray | null
-        while ((tm = tokenRe.exec(innerText)) !== null) {
-          const start = innerStart + tm.index
-          const end = start + tm[0].length
-          if (tm[1]) {
-            ranges.push(Decoration.mark({ class: 'jinja-kw' }).range(start, end))
-          } else if (tm[2]) {
-            ranges.push(Decoration.mark({ class: 'jinja-str' }).range(start, end))
-          } else if (tm[3]) {
-            const fname = tm[3]
-            const exists = definedNames.has(fname)
-            ranges.push(
-              Decoration.mark({
-                class: exists ? 'jinja-var' : 'jinja-var undefined',
-                attributes: { 'data-field': fname, title: `点击编辑字段：${fname}` }
-              }).range(start, end)
-            )
-          }
-        }
-
-        ranges.push(Decoration.mark({ class: 'jinja-tag' }).range(blockEnd - 2, blockEnd))
-      } else if (m[2] && m[3] !== undefined) {
-        const start = line.from + m.index
-        const end = start + m[2].length
-        const fname = m[3].split('|')[0].trim()
-        if (!fname) continue
-        const exists = definedNames.has(fname)
-        if (undefinedNames.has(fname)) lineHasUndefined = true
-        ranges.push(
-          Decoration.mark({
-            class: exists ? 'jinja-var' : 'jinja-var undefined',
-            attributes: {
-              'data-field': fname,
-              title: exists
-                ? `点击在右侧打开字段抽屉：${fname}`
-                : `未定义字段：${fname}（点击可在右侧抽屉定义）`
+          const innerStart = blockStart + 2
+          const innerText = blockText.slice(2, -2)
+          const tokenRe = /\b(if|elif|else|endif|and|or|not|in)\b|("[^"]*")|([\u4e00-\u9fa5A-Za-z0-9_]+)/g
+          let tm: RegExpExecArray | null
+          while ((tm = tokenRe.exec(innerText)) !== null) {
+            const start = innerStart + tm.index
+            const end = start + tm[0].length
+            if (tm[1]) {
+              ranges.push(Decoration.mark({ class: 'jinja-kw' }).range(start, end))
+            } else if (tm[2]) {
+              ranges.push(Decoration.mark({ class: 'jinja-str' }).range(start, end))
+            } else if (tm[3]) {
+              const fname = tm[3]
+              const exists = definedNames.has(fname)
+              ranges.push(
+                Decoration.mark({
+                  class: exists ? 'jinja-var' : 'jinja-var undefined',
+                  attributes: { 'data-field': fname, title: `点击编辑字段：${fname}` }
+                }).range(start, end)
+              )
             }
-          }).range(start, end)
-        )
-      }
-    }
+          }
 
-    // 含未定义字段的整行标红
-    if (lineHasUndefined) {
-      ranges.push(Decoration.line({ class: 'line-error' }).range(line.from))
+          ranges.push(Decoration.mark({ class: 'jinja-tag' }).range(blockEnd - 2, blockEnd))
+        } else if (m[2] && m[3] !== undefined) {
+          const start = line.from + m.index
+          const end = start + m[2].length
+          const fname = m[3].split('|')[0].trim()
+          if (!fname) continue
+          const exists = definedNames.has(fname)
+          if (undefinedNames.has(fname)) lineHasUndefined = true
+          ranges.push(
+            Decoration.mark({
+              class: exists ? 'jinja-var' : 'jinja-var undefined',
+              attributes: {
+                'data-field': fname,
+                title: exists
+                  ? `点击在右侧打开字段抽屉：${fname}`
+                  : `未定义字段：${fname}（点击可在右侧抽屉定义）`
+              }
+            }).range(start, end)
+          )
+        }
+      }
+
+      // 含未定义字段的整行标红
+      if (lineHasUndefined) {
+        ranges.push(Decoration.line({ class: 'line-error' }).range(line.from))
+      }
     }
   }
 
@@ -122,8 +132,11 @@ const jinjaHighlightPlugin = ViewPlugin.fromClass(
       this.decorations = buildJinjaDecorations(v)
     }
     update(u: ViewUpdate) {
-      // 字段定义变化时会派发一个空事务，这里也一并重建装饰
-      if (u.docChanged || u.viewportChanged || u.transactions.length > 0) {
+      if (
+        u.docChanged ||
+        u.viewportChanged ||
+        u.transactions.some(tr => Boolean(tr.annotation(refreshJinjaHighlightAnnotation)))
+      ) {
         this.decorations = buildJinjaDecorations(u.view)
       }
     }
@@ -593,7 +606,9 @@ watch(
 watch(
   () => store.templateFields.map(f => f.name).join('\n'),
   () => {
-    view?.dispatch({ annotations: suppressAcAnnotation.of(true) })
+    view?.dispatch({
+      annotations: [suppressAcAnnotation.of(true), refreshJinjaHighlightAnnotation.of(true)],
+    })
   }
 )
 
@@ -633,7 +648,12 @@ async function refreshPreview() {
   const seq = ++previewSeq
   previewLoading.value = true
   try {
-    const res = await platformApi.renderPreview(id, store.bodyText || '', previewValues())
+    const res = await platformApi.renderPreview(
+      id,
+      store.bodyText || '',
+      previewValues(),
+      store.templateFields,
+    )
     if (seq !== previewSeq) return
     previewText.value = res.text || ''
     previewError.value = res.error
@@ -658,7 +678,17 @@ function schedulePreview(delay = 500) {
 }
 
 watch(
-  () => [store.bodyText, store.currentTemplateId, store.dryRunResult],
+  () => [
+    store.bodyText,
+    store.currentTemplateId,
+    store.dryRunResult,
+    store.templateFields
+      .map(
+        f =>
+          `${f.name}:${f.type}:${f.whenMissing}:${f.defaultValue}:${(f.columns || []).map(c => `${c.name}:${c.type}`).join(',')}`,
+      )
+      .join('|'),
+  ],
   () => schedulePreview()
 )
 

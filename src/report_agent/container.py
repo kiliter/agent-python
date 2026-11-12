@@ -13,6 +13,9 @@ from pathlib import Path
 
 from pydantic import SecretStr
 
+from .chat.manager import ChatRunManager
+from .chat.service import ChatService
+from .chat.store import ChatStore
 from .config import Settings
 from .domain.resources import load_resource_dir
 from .gateway.base import GatewayClient
@@ -61,6 +64,7 @@ class Container:
     runs: RunStore
     gateway: GatewayClient
     runner: AgentRunner
+    chat: ChatService | None = None
     runtime_config: RuntimeConfigStore | None = None
     env_settings: Settings | None = None
     external_model: bool = False
@@ -142,6 +146,9 @@ def build_container(settings: Settings, model=None, gateway: GatewayClient | Non
 
     runner = AgentRunner(effective_settings, actual_model, build_model_settings(effective_settings), reloadable_gw,
                          service, releases, runs)
+    chat_store = ChatStore(layout.chats)
+    chat_manager = ChatRunManager(runner)
+    chat_service = ChatService(chat_store, chat_manager, runner, releases, service, runs, publisher)
     return Container(
         effective_settings,
         layout,
@@ -155,6 +162,7 @@ def build_container(settings: Settings, model=None, gateway: GatewayClient | Non
         runs,
         reloadable_gw,
         runner,
+        chat=chat_service,
         runtime_config=runtime_config,
         env_settings=env_settings,
         external_model=external_model,

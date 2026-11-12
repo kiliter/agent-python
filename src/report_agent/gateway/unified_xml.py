@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from typing import Any
@@ -240,20 +241,30 @@ def _classify_http_error(status: int) -> str:
 
 
 class UnifiedGatewayXmlClient:
-    """真实统一网关调用。"""
+    """真实统一网关调用（内置可配置并发信号量保护）。#Created By AiCoding(codex)"""
 
     def __init__(self, base_url: str, app_id: str, access_token: str, style: str = "java",
-                 connect_timeout_s: float = 5.0) -> None:
+                 connect_timeout_s: float = 5.0, max_concurrency: int | None = None) -> None:
         clean_url = (base_url or "").strip()
         if not clean_url:
             raise ValueError("GATEWAY_MODE=live 时必须配置 GATEWAY_URL")
         if not clean_url.startswith(("http://", "https://")):
             raise ValueError("GATEWAY_URL 必须以 http:// 或 https:// 开头")
+        if max_concurrency is None:
+            env_val = (os.getenv("GATEWAY_MAX_CONCURRENCY") or "").strip()
+            try:
+                eff_concurrency = int(env_val) if env_val else 32
+            except ValueError:
+                eff_concurrency = 32
+        else:
+            eff_concurrency = int(max_concurrency)
         self.url = clean_url.rstrip("/") + OPENAPI_PATH
         self.app_id = app_id
         self.access_token = access_token
         self.style = style
         self.connect_timeout_s = connect_timeout_s
+        self.max_concurrency = max(1, eff_concurrency)
+        self._sem = asyncio.Semaphore(self.max_concurrency)
         self._client = httpx.AsyncClient(follow_redirects=False)
 
     async def aclose(self) -> None:
@@ -286,9 +297,10 @@ class UnifiedGatewayXmlClient:
         last_error = ""
         for attempt in range(1, attempts + 1):
             try:
-                resp = await self._client.post(
-                    self.url, content=payload.encode("utf-8"), timeout=timeout, headers=headers,
-                )
+                async with self._sem:
+                    resp = await self._client.post(
+                        self.url, content=payload.encode("utf-8"), timeout=timeout, headers=headers,
+                    )
             except httpx.ConnectTimeout as exc:
                 last_error = f"网关连接超时（>{self.connect_timeout_s:g}s）：{type(exc).__name__} {exc}".strip()
                 log.warning("网关 %s 第 %d/%d 次调用连接超时：%s", contract.processCode, attempt, attempts, exc)

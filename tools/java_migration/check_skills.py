@@ -11,11 +11,13 @@
   5. 按二期升级后的 SKILL.md 步骤，直接调用平台确定性工具（extract_dates、date_shift、expand_period、time_diff、
      regex_extract、query_result[between/anyOf/resultIds]、format_date、date_range）在 mock 数据上模拟 11 个 Skill，
      与 Java Groovy 脚本正常场景真实输出逐项对拍。
-  6. 专项验证二期已修复的 4 类历史缺陷与列表新语义：
-     ① reminder-sms 遇到“（编号：25JS206149）。\\n1.”不再误算成 20614901，而是提取真实合法日期 20271201；
+  6. 专项验证二期及全量审查修复的历史缺陷与契约防线：
+     ① reminder-sms 遇到“（编号：25JS206149）。\\n1.”不再误算成 20614901，且无日期且无 deadlineDate 时跳过查询返回 not_found（绝不回退创建时间当天误取订购提醒）；
      ② qry-balance 传入纯年月 充值时间="202607" 时正确展开整月并命中 2026 年 7 月流水，不再因 20260007 回溯返回空；
      ③ pretty-number-info 按 msisdn == 手机号码精确匹配、空 grade 判为非靓号、多档 event_name JSON 数组按“、”拼接；
-     ④ 列表字段（billing-cycle-sms / qry-balance）在接口调用成功但匹配 0 行时提交 status="found", value=[] 并通过模型与证据校验。
+     ④ billing-cycle-sms 跨月账单 202607$202610 闭区间展开全部 4 个月（202607..202610）；
+     ⑤ 列表字段空列表（status="found", value=[]）接受 total=0 的 query_result callId，严拒 load_skill callId 与非空表 api 冒充；
+     ⑥ cc_pretty_num_info_query 顶层网关报错（resp_code=9999 且缺失 content.ret_code）准确判为 ok=False。
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from report_agent.config import Settings
 from report_agent.domain.api_contract import parse_api_yaml
 from report_agent.domain.resources import load_resource_dir
 from report_agent.domain.skill import parse_skill_markdown
+from report_agent.gateway.base import extract_records, parse_xml
 from report_agent.gateway.mock import MockGatewayClient
 from report_agent.gateway.unified_xml import build_request_xml
 from report_agent.runtime import tools as rt_tools
@@ -130,7 +133,8 @@ def load_resources():
         check(sk.meta.name == d.name and bool(SKILL_ID_RE.match(sk.meta.name)) and not missing
               and bool(sk.meta.description.strip()) and bool(sk.meta.title.strip()),
               f"skill {d.name}: title={sk.meta.title} apis={sk.meta.apis} 缺失接口={missing}")
-    check(len(skills) == 11, f"共 {len(skills)} 个 Skill（期望 11）")
+    # 11 个填报取数 Skill + 1 个聊天 template-router Skill
+    check(len(skills) == 12, f"共 {len(skills)} 个 Skill（期望 12：11 个填报取数 + 1 个聊天 template-router）")
     print("== 2. 接口契约解析与 schema_errors")
     for name, c in apis.items():
         errs = c.schema_errors()
@@ -279,10 +283,68 @@ async def _run_qry_balance(ctx: _SimContext, phone: str, period_text: str) -> tu
     ev = (
         [{"type": "api", "resultId": r["resultId"], "row": r["row"], "column": "payDatetime"} for r in qr["rows"]]
         if qr["rows"]
-        else [{"type": "tool", "callId": list(ctx.deps.workspace.tool_calls)[-1]}]
+        else [{"type": "tool", "callId": qr.get("callId") or list(ctx.deps.workspace.tool_calls)[-1]}]
     )
     submission = {"status": "found", "value": rows, "evidence": ev, "reasoning": "按 expand_period + query_result 查询"}
     return submission, rows
+
+
+async def _run_reminder_sms(
+    ctx: _SimContext, phone: str, biz_sms: str | None, create_time: str, deadline_date: str = ""
+) -> dict[str, dict[str, Any]]:
+    """按修复后的 reminder-sms/SKILL.md 执行：优先 deadlineDate，否则订购短信提取最大日期；无合法到期日直接跳过接口查询。#Created By AiCoding(codex)"""
+    not_found_pair = {
+        "提醒短信": {"status": "not_found", "value": None, "evidence": [], "reasoning": "未找到合法到期日期"},
+        "提醒日期": {"status": "not_found", "value": None, "evidence": [], "reasoning": "未找到合法到期日期"},
+    }
+    target_day = ""
+    if deadline_date.strip():
+        dl_dates = await rt_tools.extract_dates(ctx, text=deadline_date, defaultYear=create_time)  # type: ignore[arg-type]
+        if dl_dates.get("count", 0) > 0:
+            target_day = str(dl_dates["max"] or "")
+    if not target_day:
+        if not biz_sms:
+            return not_found_pair
+        sms_dates = await rt_tools.extract_dates(ctx, text=biz_sms, defaultYear=create_time)  # type: ignore[arg-type]
+        if sms_dates.get("count", 0) == 0:
+            return not_found_pair
+        target_day = str(sms_dates["max"] or "")
+    shift = await rt_tools.date_shift(ctx, date=target_day, days=0)  # type: ignore[arg-type]
+    api_out = await rt_tools.call_api(
+        ctx, "querySMSSendInfo", {"手机号码": phone, "开始时间": shift["start"], "结束时间": shift["end"]}  # type: ignore[arg-type]
+    )
+    if not api_out.get("ok") or api_out.get("count", 0) == 0:
+        return not_found_pair
+    qr = await rt_tools.query_result(
+        ctx,  # type: ignore[arg-type]
+        resultId=api_out["resultId"],
+        where=[Condition(column="smsContent", op="contains", value="提醒")],
+        orderBy=OrderBy(column="smsSendTime", desc=True),
+        limit=1,
+    )
+    if not qr["rows"]:
+        return not_found_pair
+    row = qr["rows"][0]
+    dt_out = await rt_tools.format_date(
+        ctx, value=row["smsSendTime"], fromPattern="yyyyMMddHHmmss", toPattern="yyyy-MM-dd"  # type: ignore[arg-type]
+    )
+    return {
+        "提醒短信": {
+            "status": "found",
+            "value": row["smsContent"],
+            "evidence": [{"type": "api", "resultId": api_out["resultId"], "row": row["row"], "column": "smsContent"}],
+            "reasoning": f"到期日 {target_day} 查询命中提醒短信",
+        },
+        "提醒日期": {
+            "status": "found",
+            "value": dt_out["value"],
+            "evidence": [
+                {"type": "tool", "callId": dt_out["callId"]},
+                {"type": "api", "resultId": api_out["resultId"], "row": row["row"], "column": "smsSendTime"},
+            ],
+            "reasoning": f"到期日 {target_day} 提醒短信发送日期格式化",
+        },
+    }
 
 
 async def simulate() -> dict[str, Any]:
@@ -518,13 +580,25 @@ async def verify_phase2_bug_fixes() -> None:
         and (ds["start"], ds["end"]) == ("20271201000000", "20271201235959"),
         f"缺陷①修复验证：reminder-sms 提取合法日期 {ed['dates']}，查询窗口=({ds['start']}, {ds['end']})，不再误算 20614901",
     )
-    # 无日期文本回退创建时间当天（14 位创建时间直接走 date_shift）
-    ed_empty = await rt_tools.extract_dates(ctx1, text="尊敬的客户，您已办理业务（编号：25JS206149）。", defaultYear="20261105103012")  # type: ignore[arg-type]
-    ds_fallback = await rt_tools.date_shift(ctx1, date="20261105103012", days=0)  # type: ignore[arg-type]
+    # 无日期且未传 deadlineDate：直接跳过接口调用，提醒短信与提醒日期均为 not_found（绝不回退创建时间当天误命中【订购提醒】）
+    ctx1_nodate = _make_ctx(rs, template_id=105, inputs={"手机号码": "13900001234", "创建时间": "20261105103012"})
+    nodate_sms = "【订购提醒】尊敬的客户，您已成功办理“5G智享套餐（个人版）”活动（编号：25JS206149）。"
+    rem_nodate_out = await _run_reminder_sms(ctx1_nodate, "13900001234", nodate_sms, "20261105103012")
     check(
-        ed_empty["count"] == 0 and ds_fallback["baseDate"] == "20261105"
-        and (ds_fallback["start"], ds_fallback["end"]) == ("20261105000000", "20261105235959"),
-        f"缺陷①补充验证：订购短信仅有编号无日期时 count={ed_empty['count']}，回退创建时间当天 {ds_fallback['baseDate']}",
+        len(ctx1_nodate.deps.workspace.results) == 0
+        and rem_nodate_out["提醒短信"]["status"] == "not_found"
+        and rem_nodate_out["提醒日期"]["status"] == "not_found",
+        f"缺陷①补充验证（P0-3 修复）：订购短信无日期且无 deadlineDate 时跳过接口（results={len(ctx1_nodate.deps.workspace.results)}），"
+        "提醒短信/提醒日期返回 not_found，不误查创建时间当天",
+    )
+    # 传入非空 deadlineDate 时优先解析该截止日并命中提醒短信
+    ctx1_dl = _make_ctx(rs, template_id=105, inputs={"手机号码": "13900001234", "创建时间": "20261105103012", "deadlineDate": "2027-12-01"})
+    rem_dl_out = await _run_reminder_sms(ctx1_dl, "13900001234", nodate_sms, "20261105103012", deadline_date="2027-12-01")
+    check(
+        len(ctx1_dl.deps.workspace.results) == 1
+        and rem_dl_out["提醒短信"]["status"] == "found"
+        and rem_dl_out["提醒日期"]["status"] == "found",
+        "缺陷①补充验证（deadlineDate 优先）：订购短信无日期但传入 deadlineDate='2027-12-01' 时正常查询 20271201",
     )
 
     # 缺陷②：qry-balance 传入 充值时间="202607" 命中 2026 年 7 月全部 2 条流水
@@ -598,7 +672,7 @@ async def verify_phase2_bug_fixes() -> None:
     rep119["账期短信提醒列表"] = {
         "status": "found",
         "value": [],
-        "evidence": [{"type": "tool", "callId": list(ctx5.deps.workspace.tool_calls)[-1]}],
+        "evidence": [{"type": "tool", "callId": qr5.get("callId") or list(ctx5.deps.workspace.tool_calls)[-1]}],
         "reasoning": "查询成功无提醒短信",
     }
     build_report_model(tpl119).model_validate(rep119)
@@ -606,6 +680,83 @@ async def verify_phase2_bug_fixes() -> None:
     check(
         nodata_call["ok"] is True and qr5["rows"] == [] and ev_issues_119 == [],
         f"缺陷④修复验证（billing-cycle-sms 无短信记录）：status=found value=[] 证据校验问题={ev_issues_119}",
+    )
+
+    # 缺陷⑤（P1-7）：billing-cycle-sms 跨月账单 202607$202610 闭区间展开全部 4 个月（202607..202610）
+    ctx_multi_bill = _make_ctx(rs, template_id=119, inputs={"手机号码": "13900001234", "账单": "202607$202610"})
+    exp_multi = await rt_tools.expand_period(ctx_multi_bill, period="202607$202610")  # type: ignore[arg-type]
+    check(
+        exp_multi.get("ok") is True
+        and exp_multi.get("months") == ["202607", "202608", "202609", "202610"]
+        and len(exp_multi.get("monthRanges") or []) == 4,
+        f"缺陷⑤修复验证（billing-cycle-sms 跨月 $ 闭区间）：months={exp_multi.get('months')}",
+    )
+
+    # 缺陷⑥（P0-1）：EvidenceChecker 拒绝用 load_skill t1（及非空表 api）冒充空列表证据，接受 total=0 的 query_result callId
+    ctx_ev = _make_ctx(rs, template_id=106, inputs={"手机号码": "15062667019", "充值时间": "20260720"})
+    await rt_tools.load_skill(ctx_ev, name="qry-balance")  # type: ignore[arg-type]
+    sk_call_id = next(iter(ctx_ev.deps.workspace.tool_calls.keys()), "t1")
+    fake_rep = {f.name: {"status": "not_found", "value": None, "evidence": [], "reasoning": "测试"} for f in tpl106.definition.fields}
+    fake_rep["充值流水"] = {
+        "status": "found",
+        "value": [],
+        "evidence": [{"type": "tool", "callId": sk_call_id}],
+        "reasoning": "伪造 load_skill 充当空列表证据",
+    }
+    fake_issues = EvidenceChecker(tpl106, ctx_ev.deps.inputs, ctx_ev.deps.document, ctx_ev.deps.workspace).check(fake_rep)
+    api_ev_out = await rt_tools.call_api(ctx_ev, "BOSS_QryBalanceFlowLog", {"手机号码": "15062667019", "账期": "202607"})  # type: ignore[arg-type]
+    qr_ev_out = await rt_tools.query_result(
+        ctx_ev,  # type: ignore[arg-type]
+        resultId=api_ev_out["resultId"],
+        where=[Condition(column="payDatetime", op="startsWith", value="20260720")],
+        limit=100,
+    )
+    nonempty_api_rep = dict(fake_rep)
+    nonempty_api_rep["充值流水"] = {
+        "status": "found",
+        "value": [],
+        "evidence": [{"type": "api", "resultId": api_ev_out["resultId"], "row": 0, "column": "payDatetime"}],
+        "reasoning": "原接口有 2 条记录却直接引 api 报空列表",
+    }
+    nonempty_api_issues = EvidenceChecker(tpl106, ctx_ev.deps.inputs, ctx_ev.deps.document, ctx_ev.deps.workspace).check(nonempty_api_rep)
+    valid_qr_rep = dict(fake_rep)
+    valid_qr_rep["充值流水"] = {
+        "status": "found",
+        "value": [],
+        "evidence": [{"type": "tool", "callId": str(qr_ev_out.get("callId") or "")}],
+        "reasoning": "按 20260720 筛选 total=0",
+    }
+    valid_qr_issues = EvidenceChecker(tpl106, ctx_ev.deps.inputs, ctx_ev.deps.document, ctx_ev.deps.workspace).check(valid_qr_rep)
+    check(
+        bool(fake_issues)
+        and bool(nonempty_api_issues)
+        and "callId" in api_ev_out
+        and "callId" in qr_ev_out
+        and qr_ev_out.get("total") == 0
+        and valid_qr_issues == [],
+        f"缺陷⑥修复验证（空列表证据防线）：拒 load_skill={len(fake_issues)} 条、拒非空表 api={len(nonempty_api_issues)} 条、"
+        f"接受 query_result(total=0, callId={qr_ev_out.get('callId')})={valid_qr_issues}",
+    )
+
+    # 缺陷⑦（P1-8）：cc_pretty_num_info_query 顶层网关报错 resp_code=9999（无 content.ret_code）判为 ok=False
+    pretty_contract = rs.apis["cc_pretty_num_info_query"]
+    err_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<operation_out><response><resp_code>9999</resp_code><resp_desc>网关调用超时</resp_desc></response></operation_out>"
+    )
+    err_parsed = extract_records(pretty_contract, parse_xml(err_xml))
+    nodata_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<operation_out><content><ret_code>1</ret_code><ret_msg>号码不存在</ret_msg></content></operation_out>"
+    )
+    nodata_parsed = extract_records(pretty_contract, parse_xml(nodata_xml))
+    check(
+        err_parsed.ok is False
+        and err_parsed.no_data is False
+        and nodata_parsed.ok is True
+        and nodata_parsed.no_data is True,
+        f"缺陷⑦修复验证（靓号网关错误拦截）：resp_code=9999 -> ok={err_parsed.ok}({err_parsed.error})；"
+        f"ret_code=1 -> ok={nodata_parsed.ok}, no_data={nodata_parsed.no_data}",
     )
 
 

@@ -45,7 +45,7 @@ updated: 2026-11-12
 
 ## 3. 空列表语义与二期修复的历史缺陷（R8）
 
-- **查清无流水 vs 接口报错**：所有账期 `ok=True` 但无符合条件记录时，提交 **`status="found", value=[]`** 并附上 `query_result` / `call_api` 的成功证据，报告渲染为空且运行状态为 **`SUCCESS`**；任一账期 `ok=False` 或缺参则交 `status="not_found", value=None`，由于模板 106/107 正文直接执行 `{% for item in 充值流水 %}`，`TrackedList` 将运行状态准确判定为 **`PARTIAL`**。
+- **查清无流水 vs 接口报错**：所有账期 `ok=True` 但无符合条件记录时，提交 **`status="found", value=[]`** 并附上结果为 0 行的 `query_result(total==0)` 或各账期 `call_api(count==0)` 的工具 `callId` 证据（严禁引用 `load_skill` 或非空结果集 `api` 证据），报告渲染为空且运行状态为 **`SUCCESS`**；任一账期 `ok=False` 或缺参则交 `status="not_found", value=None`，由于模板 106/107 正文直接执行 `{% for item in 充值流水 %}`，`TrackedList` 将运行状态准确判定为 **`PARTIAL`**。
 - **修复 Java R8 正则回溯缺陷**：前代 Java Groovy 在过滤日期时使用 `(20\d{2})\D*(\d{1,2})\D*(\d{1,2})`，当上游传入纯年月 `"202607"` 时，正则回溯将其强行拆解成 `2026` 年 `0` 月 `7` 日（`"20260007"`），把该月所有真实流水（`202607xx`）全部当成区间外记录误删。二期由 `expand_period` 将纯年月自动展开为当月首尾真实日期（`20260701`～`20260731`），彻底修复了纯账期查询查不出流水的缺陷。
 
 ## 相关页面

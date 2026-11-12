@@ -5,6 +5,8 @@ tags: [lint, open-questions, roadmap, business-rules]
 sources:
   - tools/java_migration/MAPPING.md
   - tools/java_migration/TEMPLATES.md
+  - tools/java_migration/verify_structure.py
+  - src/report_agent/seed/templates/116/body.md.j2
   - docs/frontend-api-handoff.md
 updated: 2026-11-12
 ---
@@ -26,6 +28,10 @@ updated: 2026-11-12
 
 3. **网关超时网络层的重试次数策略**
    - 为与前代 Java `WebClient` 默认不重试行为对齐，3 个迁移契约（`querySMSSendInfo`、`BOSS_QryBalanceFlowLog`、`cc_pretty_num_info_query`）当前的 `retry.maxAttempts` 均设为 `1`。由于这 3 个查询接口均为幂等只读接口（`idempotent: true`），生产切流前可由运维决定是否在契约中调为 `2` 以吸收偶发瞬时网络抖动（待业务确认）。
+
+4. **模板 `116`（`增值业务扣费争议处理模板`）源自 Java 原模板的 `受理渠道` 枚举分支失配**
+   - 在 `src/report_agent/seed/templates/116/body.md.j2` 第 38 行的条件分支（迁移自前代 Java 原模板，审查报告简记为 `受理渠道 == "合作方平台" or "一级电渠"` 类第三方电渠枚举失配，原模板实际字面量为 `{% elif 受理渠道 == "合作方平台" or 受理渠道 == "电视端" or 受理渠道 == "APP" or 受理渠道 == "短信" %}`）中，比较值不在 `accept-type` 产出的 `受理渠道` 枚举集合 `["热线", "掌上营业厅", "其他"]` 内，因此该 `elif` 分支在 Java 现网与当前 Python 版中均不可达（统一落入后续 `else` 分支）。
+   - 为保持与 Java 原模板逐字等价（`S2`），当前未擅自改写该模板正文，并在 `tools/java_migration/verify_structure.py` 的 **S9** 枚举字面量 AST 门禁中将其显式登记为已知历史白名单；后续需业务侧确认是否应合并映射至 `"掌上营业厅"` 或扩展增值业务专属渠道判定规则（待业务确认）。
 
 ## 2. 平台后续演进议题
 

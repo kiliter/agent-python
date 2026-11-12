@@ -1,22 +1,36 @@
 <!--
   智能申告核查平台 · 业务支撑数智稽核中台 根布局组件
-  包含左侧可折叠权威主导航（3组7项）、50px 顶栏（面包屑/生产基线/⌘K全局检索/双主题切换/账号胶囊）、主视图舱、全局抽屉与弹窗
+  包含左侧可折叠权威主导航（3组8项）、50px 顶栏（面包屑/生产基线/⌘K全局检索/双主题切换/账号胶囊）、全局多页签栏、主视图与动态聊天保活舱、全局抽屉与弹窗
   #Created By AiCoding(codex)
 -->
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, defineAsyncComponent } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { PanelLeftClose, PanelLeftOpen, ArrowUpRight, Search } from 'lucide-vue-next'
 import { usePlatformStore } from '@/stores/platform'
+import { useWorkspaceTabsStore } from '@/stores/workspaceTabs'
 import type { NavKey } from '@/types/platform'
 import SvgIcon from '@/components/SvgIcon.vue'
-import GlobalDrawers from '@/components/GlobalDrawers.vue'
-import GlobalModals from '@/components/GlobalModals.vue'
-import LoginView from '@/views/LoginView.vue'
+import WorkspaceTabsBar from '@/components/WorkspaceTabsBar.vue'
+import ChatIframeTabPane from '@/components/ChatIframeTabPane.vue'
+
+const GlobalDrawers = defineAsyncComponent(() => import('@/components/GlobalDrawers.vue'))
+const GlobalModals = defineAsyncComponent(() => import('@/components/GlobalModals.vue'))
+const LoginView = defineAsyncComponent(() => import('@/views/LoginView.vue'))
 
 const store = usePlatformStore()
+const tabsStore = useWorkspaceTabsStore()
 const router = useRouter()
 const route = useRoute()
+
+/** 从左侧主导航、面包屑、顶栏胶囊或 ⌘K 显式进入路由模块（即使与当前 currentNav 相同也解除聊天页签激活态） */
+function navigateFromShell(navKey: NavKey) {
+  const sameNavWhileInChat = tabsStore.isChatIframeActive && store.currentNav === navKey
+  store.navigate(navKey)
+  if (sameNavWhileInChat && store.currentNav === navKey) {
+    tabsStore.syncFromRouteNav(navKey)
+  }
+}
 
 const VALID_NAVS: NavKey[] = [
   'login',
@@ -28,6 +42,7 @@ const VALID_NAVS: NavKey[] = [
   'regression',
   'releases',
   'settings',
+  'chatSim',
 ]
 
 // ==================== ⌘K 全局快速检索跳转面板状态 ====================
@@ -59,7 +74,9 @@ function openCommandPalette() {
   cmdkOpen.value = true
   cmdkQuery.value = ''
   cmdkScope.value = 'all'
-  const nextIdx = filteredCmdkItems.value.findIndex((it) => it.navKey !== store.currentNav)
+  const nextIdx = filteredCmdkItems.value.findIndex(
+    (it) => tabsStore.isChatIframeActive || it.navKey !== store.currentNav,
+  )
   cmdkActiveIndex.value = nextIdx >= 0 ? nextIdx : 0
   nextTick(() => {
     cmdkInputRef.value?.focus()
@@ -149,6 +166,17 @@ const allCmdkItems = computed<CmdkItem[]>(() => {
       navKey: 'settings',
       keywords: '引擎与系统设置 settings 系统设置 提示词 模型 配置',
     },
+    {
+      uid: 'nav:chatSim',
+      kind: 'nav',
+      kindLabel: '导航模块',
+      icon: 'play',
+      code: '',
+      title: '聊天窗口模拟',
+      subtitle: '基线发布治理 · 嵌入式智能填报窗口联调与新页签模拟',
+      navKey: 'chatSim',
+      keywords: '聊天窗口模拟 chatSim embed 嵌入联调 智能填报 postMessage',
+    },
   ]
 
   const tplList = store.templates.map((t): CmdkItem => {
@@ -221,21 +249,30 @@ watch([cmdkQuery, cmdkScope], () => {
   cmdkActiveIndex.value = 0
 })
 
-function selectCmdkItem(item: CmdkItem) {
+async function selectCmdkItem(item: CmdkItem) {
   closeCommandPalette()
   if (item.kind === 'template' && item.tplId !== undefined) {
-    void store.openTemplateWorkbench(item.tplId, 'body')
+    await store.openTemplateWorkbench(item.tplId, 'body')
+    if (store.currentNav === 'workbench') {
+      tabsStore.syncFromRouteNav('workbench')
+    }
     return
   }
   if (item.kind === 'skill' && item.skillId) {
-    void store.openSkillDetail(item.skillId)
+    await store.openSkillDetail(item.skillId)
+    if (store.currentNav === 'skills') {
+      tabsStore.syncFromRouteNav('skills')
+    }
     return
   }
   if (item.kind === 'api' && item.apiName) {
-    void store.openApiDetail(item.apiName, 'schema')
+    await store.openApiDetail(item.apiName, 'schema')
+    if (store.currentNav === 'apis') {
+      tabsStore.syncFromRouteNav('apis')
+    }
     return
   }
-  store.navigate(item.navKey)
+  navigateFromShell(item.navKey)
 }
 
 function onCmdkInputKeydown(e: KeyboardEvent) {
@@ -249,17 +286,20 @@ function onCmdkInputKeydown(e: KeyboardEvent) {
   } else if (e.key === 'Enter') {
     e.preventDefault()
     const target = filteredCmdkItems.value[cmdkActiveIndex.value]
-    if (target) selectCmdkItem(target)
+    if (target) void selectCmdkItem(target)
   }
 }
 
 // ==================== 路由双向同步与全局快捷键 ====================
-// 双向同步 store.currentNav 与 Vue Router：store → 路由
+// 双向同步 store.currentNav、全局多页签状态与 Vue Router：store → 页签栏 & 路由
 watch(
   () => store.currentNav,
   (nav) => {
     if (nav === 'login') {
       cmdkOpen.value = false
+      tabsStore.resetAll()
+    } else {
+      tabsStore.syncFromRouteNav(nav)
     }
     if (route.name !== nav) {
       router.replace({ name: nav }).catch(() => {})
@@ -312,7 +352,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
       store.closeModal()
     } else if (store.activeDrawer) {
       store.closeDrawer()
-    } else if (store.currentNav === 'workbench' && store.ideDebugMaximized) {
+    } else if (!tabsStore.isChatIframeActive && store.currentNav === 'workbench' && store.ideDebugMaximized) {
       e.preventDefault()
       store.ideDebugMaximized = false
       return
@@ -339,7 +379,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
   if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 's') {
     if (e.defaultPrevented || store.currentNav === 'login') return
     e.preventDefault()
-    if (cmdkOpen.value || store.activeModal || store.activeDrawer) return
+    if (cmdkOpen.value || store.activeModal || store.activeDrawer || tabsStore.isChatIframeActive) return
     if (store.currentNav === 'workbench') {
       store.handleSaveDraft()
     } else if (store.currentNav === 'skills' && store.skillsSubView === 'detail') {
@@ -355,6 +395,9 @@ function onGlobalKeydown(e: KeyboardEvent) {
 onMounted(() => {
   document.documentElement.setAttribute('data-theme', store.theme)
   window.addEventListener('keydown', onGlobalKeydown)
+  if (store.currentNav !== 'login' && !tabsStore.isChatIframeActive) {
+    tabsStore.syncFromRouteNav(store.currentNav)
+  }
   store.bootstrap()
 })
 
@@ -370,21 +413,23 @@ const navGroups = computed(() => [
         key: 'templates' as NavKey,
         label: '核查模板',
         icon: 'template',
-        active: store.currentNav === 'templates' || store.currentNav === 'workbench',
+        active:
+          !tabsStore.isChatIframeActive &&
+          (store.currentNav === 'templates' || store.currentNav === 'workbench'),
         badge: store.templates.length > 0 ? String(store.templates.length) : '',
       },
       {
         key: 'skills' as NavKey,
         label: 'Skill 能力库',
         icon: 'skill',
-        active: store.currentNav === 'skills',
+        active: !tabsStore.isChatIframeActive && store.currentNav === 'skills',
         badge: store.skills.length > 0 ? String(store.skills.length) : '',
       },
       {
         key: 'apis' as NavKey,
         label: 'API调用',
         icon: 'api',
-        active: store.currentNav === 'apis',
+        active: !tabsStore.isChatIframeActive && store.currentNav === 'apis',
         badge: store.apis.length > 0 ? String(store.apis.length) : '',
       },
     ],
@@ -396,14 +441,14 @@ const navGroups = computed(() => [
         key: 'runs' as NavKey,
         label: '运行流水记录',
         icon: 'run',
-        active: store.currentNav === 'runs',
+        active: !tabsStore.isChatIframeActive && store.currentNav === 'runs',
         badge: '',
       },
       {
         key: 'regression' as NavKey,
         label: '基准回归测试',
         icon: 'regression',
-        active: store.currentNav === 'regression',
+        active: !tabsStore.isChatIframeActive && store.currentNav === 'regression',
         badge: '',
       },
     ],
@@ -415,14 +460,21 @@ const navGroups = computed(() => [
         key: 'releases' as NavKey,
         label: '发布版本基线',
         icon: 'release',
-        active: store.currentNav === 'releases',
+        active: !tabsStore.isChatIframeActive && store.currentNav === 'releases',
         badge: store.currentLiveRelease.rev !== '—' ? store.currentLiveRelease.rev : '',
       },
       {
         key: 'settings' as NavKey,
         label: '引擎与系统设置',
         icon: 'settings',
-        active: store.currentNav === 'settings',
+        active: !tabsStore.isChatIframeActive && store.currentNav === 'settings',
+        badge: '',
+      },
+      {
+        key: 'chatSim' as NavKey,
+        label: '聊天窗口模拟',
+        icon: 'play',
+        active: !tabsStore.isChatIframeActive && store.currentNav === 'chatSim',
         badge: '',
       },
     ],
@@ -468,7 +520,7 @@ function handleUserMenuCommand(cmd: string) {
       <div
         class="sidebar-brand"
         title="智能申告核查平台 · 业务支撑 · 数智稽核中台"
-        @click="store.navigate('templates')"
+        @click="navigateFromShell('templates')"
       >
         <span v-if="store.sidebarCollapsed" class="brand-collapsed-mark">申告</span>
         <div class="brand-copy">
@@ -490,7 +542,7 @@ function handleUserMenuCommand(cmd: string) {
             class="nav-item"
             :class="{ active: item.active }"
             :title="store.sidebarCollapsed ? item.label : undefined"
-            @click="store.navigate(item.key)"
+            @click="navigateFromShell(item.key)"
           >
             <span class="nav-icon"><SvgIcon :name="item.icon" :size="15" /></span>
             <span class="nav-label">{{ item.label }}</span>
@@ -519,7 +571,12 @@ function handleUserMenuCommand(cmd: string) {
       <header class="topbar">
         <div class="topbar-left">
           <div class="breadcrumb">
-            <template v-if="store.currentNav === 'templates'">
+            <template v-if="tabsStore.activeChatTab">
+              <span class="breadcrumb-link" @click="navigateFromShell('chatSim')">聊天窗口模拟</span>
+              <span class="breadcrumb-sep">/</span>
+              <span class="breadcrumb-current">智能填报 · {{ tabsStore.activeChatTab.orderId }}</span>
+            </template>
+            <template v-else-if="store.currentNav === 'templates'">
               <span class="breadcrumb-current">核查模板</span>
             </template>
             <template v-else-if="store.currentNav === 'workbench'">
@@ -562,6 +619,9 @@ function handleUserMenuCommand(cmd: string) {
             <template v-else-if="store.currentNav === 'settings'">
               <span class="breadcrumb-current">引擎与系统设置</span>
             </template>
+            <template v-else-if="store.currentNav === 'chatSim'">
+              <span class="breadcrumb-current">聊天窗口模拟</span>
+            </template>
           </div>
 
           <div class="topbar-divider"></div>
@@ -574,7 +634,7 @@ function handleUserMenuCommand(cmd: string) {
                 ? `点击查看发布版本基线 · 发版时间 ${store.currentLiveRelease.time}`
                 : '点击查看发布版本基线'
             "
-            @click="store.navigate('releases')"
+            @click="navigateFromShell('releases')"
           >
             <span class="live-dot"></span>
             <span class="mono" style="font-weight: 500">{{ liveVersionText }}</span>
@@ -630,9 +690,25 @@ function handleUserMenuCommand(cmd: string) {
         </div>
       </header>
 
-      <!-- 页面主体内容 -->
-      <main class="main-content">
-        <router-view />
+      <!-- 右侧全局多页签导航栏（专注全屏模式下自动收起让位） -->
+      <WorkspaceTabsBar v-if="!store.isFocusFullscreen" />
+
+      <!-- 页面主体内容：路由视图 KeepAlive 保活 + 动态聊天窗口 iframe v-show 保活 -->
+      <main class="main-content" :class="{ 'is-chat-iframe-active': tabsStore.isChatIframeActive }">
+        <div v-show="!tabsStore.isChatIframeActive" class="route-view-host">
+          <router-view v-slot="{ Component, route: r }">
+            <KeepAlive :max="12">
+              <component :is="Component" :key="String(r.name || r.path)" />
+            </KeepAlive>
+          </router-view>
+        </div>
+
+        <ChatIframeTabPane
+          v-for="chatTab in tabsStore.chatTabs"
+          :key="chatTab.key"
+          v-show="tabsStore.activeTabKey === chatTab.key"
+          :tab="chatTab"
+        />
       </main>
     </div>
 
@@ -731,3 +807,24 @@ function handleUserMenuCommand(cmd: string) {
     <GlobalModals />
   </div>
 </template>
+
+<style>
+.main-content.is-chat-iframe-active {
+  padding: 0;
+}
+
+.route-view-host {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.route-view-host > * {
+  flex: 1;
+  min-height: 0;
+}
+</style>

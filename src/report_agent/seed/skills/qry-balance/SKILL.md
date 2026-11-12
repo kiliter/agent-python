@@ -80,6 +80,9 @@ apis:
   - 提交 `status="found"`，`value` 是行对象数组，每行四个键：`充值时间`、`支付方式`、`充值金额`、`流水号`，值分别与该记录的 `payDatetime`、`payTypeName`、`amount`、`soNbr` **逐字完全一致**。
   - `evidence` 为字段级列表：每一行引用其来源接口记录 `{"type":"api","resultId": row["resultId"], "row": row["row"], "column": "payDatetime"}`（平台按整条记录核对该行全部单元格）。
 - **所有账期查询成功（`ok=true`）但命中 0 条流水时（各账期 `count=0` 或区间筛选后 `total=0`）**：
-  - **必须提交 `status="found"`、`value=[]`**，并在 `evidence` 中附上本次 `query_result` 或 `call_api` 的工具证据 `{"type":"tool","callId":"..."}`（或成功接口结果的 `{"type":"api","resultId":"...","row":0,"column":"payDatetime"}`），`reasoning` 写明“各账期接口查询成功，指定充值时间范围内无流水记录”。
+  - **必须提交 `status="found"`、`value=[]`**，并在 `evidence` 中附上结果为 0 行的查询证据：
+    - 若原接口返回 `count > 0` 但按日期区间筛选后 `total == 0`（或跨账期汇总 0 行），**必须**引用第 3 步 `total == 0` 的 `query_result` 返回的 `{"type":"tool","callId":"..."}`；
+    - 若原接口直接返回 `count == 0`，可引用该 `call_api` 返回的 `{"type":"tool","callId":"..."}`（或 `count == 0` 结果的 `{"type":"api","resultId":"...","row":0,"column":""}`），以及第 3 步 `total == 0` 的 `query_result` `callId`；
+    - 严禁在原接口 `count > 0` 时引用 `type="api"` 充当空列表证据，也严禁引用 `load_skill` 的 `callId`！`reasoning` 写明“各账期接口查询成功，指定充值时间范围内无流水记录”。
 - **仅当缺少必要入参、充值时间无法解析，或任一账期接口调用失败（`ok=false`）时**：
   - 提交 `status="not_found"`、`value=null`。

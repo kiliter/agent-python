@@ -240,6 +240,7 @@ const acTop = ref(44)
 
 const suppressAcAnnotation = Annotation.define<boolean>()
 const externalSyncAnnotation = Annotation.define<boolean>()
+const refreshJinjaHighlightAnnotation = Annotation.define<boolean>()
 
 const darkHighlightStyle = HighlightStyle.define([
   { tag: tags.heading, color: '#79c0ff', fontWeight: '700' },
@@ -279,80 +280,88 @@ function syncCursorPos(v: EditorView) {
 function buildJinjaDecorations(v: EditorView): DecorationSet {
   const ranges: Range<Decoration>[] = []
   const doc = v.state.doc
+  if (doc.length === 0) return Decoration.none
   const definedNames = new Set(store.templateFields.map(f => f.name))
   const undefinedNames = new Set(store.undefinedBodyFields)
   const selectedName = activeInspectorFieldName.value
 
-  for (let i = 1; i <= doc.lines; i++) {
-    const line = doc.line(i)
-    const text = line.text
-    let lineHasUndefined = false
+  const scanRanges = v.visibleRanges.length > 0 ? v.visibleRanges : [{ from: 0, to: doc.length }]
+  let lastLineNo = 0
+  for (const { from, to } of scanRanges) {
+    const startLine = doc.lineAt(from).number
+    const endLine = doc.lineAt(to).number
+    for (let i = Math.max(startLine, lastLineNo + 1); i <= endLine; i++) {
+      lastLineNo = i
+      const line = doc.line(i)
+      const text = line.text
+      let lineHasUndefined = false
 
-    const combinedRe = /(\{%[^\n]*?%\})|(\{\{([^{}\n]+)\}\})/g
-    let m: RegExpExecArray | null
-    while ((m = combinedRe.exec(text)) !== null) {
-      if (m[1]) {
-        const blockStart = line.from + m.index
-        const blockText = m[1]
-        const blockEnd = blockStart + blockText.length
-        ranges.push(Decoration.mark({ class: 'jinja-tag' }).range(blockStart, blockStart + 2))
+      const combinedRe = /(\{%[^\n]*?%\})|(\{\{([^{}\n]+)\}\})/g
+      let m: RegExpExecArray | null
+      while ((m = combinedRe.exec(text)) !== null) {
+        if (m[1]) {
+          const blockStart = line.from + m.index
+          const blockText = m[1]
+          const blockEnd = blockStart + blockText.length
+          ranges.push(Decoration.mark({ class: 'jinja-tag' }).range(blockStart, blockStart + 2))
 
-        const innerStart = blockStart + 2
-        const innerText = blockText.slice(2, -2)
-        const tokenRe = /\b(if|elif|else|endif|and|or|not|in)\b|("[^"]*")|([\u4e00-\u9fa5A-Za-z0-9_]+)/g
-        let tm: RegExpExecArray | null
-        while ((tm = tokenRe.exec(innerText)) !== null) {
-          const start = innerStart + tm.index
-          const end = start + tm[0].length
-          if (tm[1]) {
-            ranges.push(Decoration.mark({ class: 'jinja-kw' }).range(start, end))
-          } else if (tm[2]) {
-            ranges.push(Decoration.mark({ class: 'jinja-str' }).range(start, end))
-          } else if (tm[3]) {
-            const fname = tm[3]
-            const exists = definedNames.has(fname)
-            const isSel = Boolean(selectedName && fname === selectedName)
-            const cls = ['jinja-var', !exists ? 'undefined' : '', isSel ? 'is-ide-selected' : '']
-              .filter(Boolean)
-              .join(' ')
-            ranges.push(
-              Decoration.mark({
-                class: cls,
-                attributes: {
-                  'data-field': fname,
-                  title: exists ? `点击在右侧编辑字段规则：${fname}` : `未定义变量：${fname}（点击在右侧补建）`,
-                },
-              }).range(start, end),
-            )
+          const innerStart = blockStart + 2
+          const innerText = blockText.slice(2, -2)
+          const tokenRe = /\b(if|elif|else|endif|and|or|not|in)\b|("[^"]*")|([\u4e00-\u9fa5A-Za-z0-9_]+)/g
+          let tm: RegExpExecArray | null
+          while ((tm = tokenRe.exec(innerText)) !== null) {
+            const start = innerStart + tm.index
+            const end = start + tm[0].length
+            if (tm[1]) {
+              ranges.push(Decoration.mark({ class: 'jinja-kw' }).range(start, end))
+            } else if (tm[2]) {
+              ranges.push(Decoration.mark({ class: 'jinja-str' }).range(start, end))
+            } else if (tm[3]) {
+              const fname = tm[3]
+              const exists = definedNames.has(fname)
+              const isSel = Boolean(selectedName && fname === selectedName)
+              const cls = ['jinja-var', !exists ? 'undefined' : '', isSel ? 'is-ide-selected' : '']
+                .filter(Boolean)
+                .join(' ')
+              ranges.push(
+                Decoration.mark({
+                  class: cls,
+                  attributes: {
+                    'data-field': fname,
+                    title: exists ? `点击在右侧编辑字段规则：${fname}` : `未定义变量：${fname}（点击在右侧补建）`,
+                  },
+                }).range(start, end),
+              )
+            }
           }
+
+          ranges.push(Decoration.mark({ class: 'jinja-tag' }).range(blockEnd - 2, blockEnd))
+        } else if (m[2] && m[3] !== undefined) {
+          const start = line.from + m.index
+          const end = start + m[2].length
+          const fname = m[3].split('|')[0].trim()
+          if (!fname) continue
+          const exists = definedNames.has(fname)
+          const isSel = Boolean(selectedName && fname === selectedName)
+          if (undefinedNames.has(fname)) lineHasUndefined = true
+          const cls = ['jinja-var', !exists ? 'undefined' : '', isSel ? 'is-ide-selected' : '']
+            .filter(Boolean)
+            .join(' ')
+          ranges.push(
+            Decoration.mark({
+              class: cls,
+              attributes: {
+                'data-field': fname,
+                title: exists ? `点击在右侧编辑字段规则：${fname}` : `未定义变量：${fname}（点击在右侧补建）`,
+              },
+            }).range(start, end),
+          )
         }
-
-        ranges.push(Decoration.mark({ class: 'jinja-tag' }).range(blockEnd - 2, blockEnd))
-      } else if (m[2] && m[3] !== undefined) {
-        const start = line.from + m.index
-        const end = start + m[2].length
-        const fname = m[3].split('|')[0].trim()
-        if (!fname) continue
-        const exists = definedNames.has(fname)
-        const isSel = Boolean(selectedName && fname === selectedName)
-        if (undefinedNames.has(fname)) lineHasUndefined = true
-        const cls = ['jinja-var', !exists ? 'undefined' : '', isSel ? 'is-ide-selected' : '']
-          .filter(Boolean)
-          .join(' ')
-        ranges.push(
-          Decoration.mark({
-            class: cls,
-            attributes: {
-              'data-field': fname,
-              title: exists ? `点击在右侧编辑字段规则：${fname}` : `未定义变量：${fname}（点击在右侧补建）`,
-            },
-          }).range(start, end),
-        )
       }
-    }
 
-    if (lineHasUndefined) {
-      ranges.push(Decoration.line({ class: 'line-error' }).range(line.from))
+      if (lineHasUndefined) {
+        ranges.push(Decoration.line({ class: 'line-error' }).range(line.from))
+      }
     }
   }
 
@@ -366,7 +375,11 @@ const jinjaHighlightPlugin = ViewPlugin.fromClass(
       this.decorations = buildJinjaDecorations(v)
     }
     update(u: ViewUpdate) {
-      if (u.docChanged || u.viewportChanged || u.transactions.length > 0) {
+      if (
+        u.docChanged ||
+        u.viewportChanged ||
+        u.transactions.some(tr => Boolean(tr.annotation(refreshJinjaHighlightAnnotation)))
+      ) {
         this.decorations = buildJinjaDecorations(u.view)
       }
     }
@@ -760,7 +773,9 @@ watch(
     activeInspectorFieldName.value,
   ],
   () => {
-    view?.dispatch({ annotations: suppressAcAnnotation.of(true) })
+    view?.dispatch({
+      annotations: [suppressAcAnnotation.of(true), refreshJinjaHighlightAnnotation.of(true)],
+    })
   },
 )
 
@@ -801,7 +816,7 @@ async function refreshStaticPreview() {
   const seq = ++previewSeq
   staticPreviewLoading.value = true
   try {
-    const res = await platformApi.renderPreview(id, store.bodyText || '', {})
+    const res = await platformApi.renderPreview(id, store.bodyText || '', {}, store.templateFields)
     if (seq !== previewSeq) return
     staticPreviewText.value = res.text || ''
     staticPreviewError.value = res.error
@@ -829,7 +844,12 @@ watch(
     store.currentTemplateId,
     tpl.value.onlineRev,
     store.onlineBaselineSeq,
-    store.templateFields.map(f => `${f.name}:${f.whenMissing}:${f.defaultValue}`).join('|'),
+    store.templateFields
+      .map(
+        f =>
+          `${f.name}:${f.type}:${f.whenMissing}:${f.defaultValue}:${(f.columns || []).map(c => `${c.name}:${c.type}`).join(',')}`,
+      )
+      .join('|'),
   ],
   () => scheduleStaticPreview(),
 )
@@ -912,8 +932,22 @@ interface BaselineOption {
   label: string
 }
 
+const hasServerDraft = computed(
+  () =>
+    Boolean(store.templateDetail?.draft) ||
+    (store.conflictInfo != null && store.conflictInfo.status !== 'NO_DRAFT') ||
+    store.ideDiffTargetRev === 'draft',
+)
+
 const diffBaselineOptions = computed<BaselineOption[]>(() => {
   const opts: BaselineOption[] = []
+  if (hasServerDraft.value) {
+    const revNum = store.conflictInfo?.revision ?? store.templateDetail?.draft?.revision
+    opts.push({
+      value: 'draft',
+      label: revNum != null ? `服务端最新草稿 (修订 #${revNum})` : '服务端最新草稿',
+    })
+  }
   if (hasOnline.value) {
     opts.push({ value: 'online', label: `当前线上 (${tpl.value.onlineRev})` })
   }
@@ -931,7 +965,7 @@ async function loadBaselineForDiff(targetRev?: string) {
   if (!id) return
   const validValues = diffBaselineOptions.value.map(o => o.value)
   let ver = targetRev ?? diffBaselineRev.value
-  if (!ver || ver === 'working' || ver === 'draft' || !validValues.includes(ver)) {
+  if (!ver || ver === 'working' || !validValues.includes(ver)) {
     ver = hasOnline.value ? 'online' : validValues[0] || ''
   }
   diffBaselineRev.value = ver
@@ -965,6 +999,10 @@ async function loadBaselineForDiff(targetRev?: string) {
     }
   } catch (err) {
     if (reqSeq !== diffLoadSeq) return
+    if (ver === 'draft' && hasOnline.value) {
+      void loadBaselineForDiff('online')
+      return
+    }
     diffError.value = errorMessage(err)
     baselineDetail.value = null
   } finally {
@@ -1036,6 +1074,10 @@ const fieldDiffSummary = computed<SimpleItemChange[]>(() => {
   const baseMap = new Map(baselineDetail.value.fields.map(f => [f.name, f]))
   const currMap = new Map(store.templateFields.map(f => [f.name, f]))
   const list: SimpleItemChange[] = []
+  const serializeCols = (f: TemplateField) =>
+    (f.columns || [])
+      .map(c => `${c.name}:${c.type}:${(c.enumValues || []).join(',')}:${c.description || ''}`)
+      .join('|')
 
   store.templateFields.forEach(f => {
     const prev = baseMap.get(f.name)
@@ -1050,7 +1092,8 @@ const fieldDiffSummary = computed<SimpleItemChange[]>(() => {
       prev.description !== f.description ||
       (prev.format || '') !== (f.format || '') ||
       Boolean(prev.quoteWhole) !== Boolean(f.quoteWhole) ||
-      prev.enumValues.join('|') !== f.enumValues.join('|')
+      prev.enumValues.join('|') !== f.enumValues.join('|') ||
+      serializeCols(prev) !== serializeCols(f)
     ) {
       list.push({ name: f.name, change: 'modified' })
     }
@@ -1058,6 +1101,32 @@ const fieldDiffSummary = computed<SimpleItemChange[]>(() => {
   baselineDetail.value.fields.forEach(prev => {
     if (!currMap.has(prev.name)) {
       list.push({ name: prev.name, change: 'removed' })
+    }
+  })
+  return list
+})
+
+const inputDiffSummary = computed<SimpleItemChange[]>(() => {
+  if (!baselineDetail.value) return []
+  const baseMap = new Map((baselineDetail.value.inputs || []).map(i => [i.key, i]))
+  const currMap = new Map(store.templateInputs.map(i => [i.key, i]))
+  const list: SimpleItemChange[] = []
+  store.templateInputs.forEach(inp => {
+    const prev = baseMap.get(inp.key)
+    if (!prev) {
+      list.push({ name: inp.key, change: 'added' })
+    } else if (
+      Boolean(prev.required) !== Boolean(inp.required) ||
+      (prev.pattern || '') !== (inp.pattern || '') ||
+      (prev.desc || '') !== (inp.desc || '') ||
+      (prev.sample || '') !== (inp.sample || '')
+    ) {
+      list.push({ name: inp.key, change: 'modified' })
+    }
+  })
+  ;(baselineDetail.value.inputs || []).forEach(prev => {
+    if (!currMap.has(prev.key)) {
+      list.push({ name: prev.key, change: 'removed' })
     }
   })
   return list
@@ -1882,15 +1951,18 @@ onBeforeUnmount(() => {
             <span v-if="fieldDiffSummary.length > 0" class="diff-stat">
               字段变更 {{ fieldDiffSummary.length }}
             </span>
+            <span v-if="inputDiffSummary.length > 0" class="diff-stat">
+              入参变更 {{ inputDiffSummary.length }}
+            </span>
             <span v-if="skillDiffSummary.length > 0" class="diff-stat">
               规程变更 {{ skillDiffSummary.length }}
             </span>
           </div>
         </div>
 
-        <!-- 字段与规程变更摘要带 -->
+        <!-- 字段、入参与规程变更摘要带 -->
         <div
-          v-if="fieldDiffSummary.length > 0 || skillDiffSummary.length > 0"
+          v-if="fieldDiffSummary.length > 0 || inputDiffSummary.length > 0 || skillDiffSummary.length > 0"
           class="diff-meta-strip"
         >
           <template v-if="fieldDiffSummary.length > 0">
@@ -1905,6 +1977,17 @@ onBeforeUnmount(() => {
             >
               {{ fc.change === 'added' ? '+' : fc.change === 'removed' ? '-' : '~' }}{{ fc.name }}
             </button>
+          </template>
+          <template v-if="inputDiffSummary.length > 0">
+            <span class="diff-meta-title" style="margin-left: 6px">入参变更：</span>
+            <span
+              v-for="ic in inputDiffSummary"
+              :key="'ic-' + ic.name"
+              class="diff-item-chip mono"
+              :class="`is-${ic.change}`"
+            >
+              {{ ic.change === 'added' ? '+' : ic.change === 'removed' ? '-' : '~' }}{{ ic.name }}
+            </span>
           </template>
           <template v-if="skillDiffSummary.length > 0">
             <span class="diff-meta-title" style="margin-left: 6px">规程变更：</span>
@@ -1928,7 +2011,7 @@ onBeforeUnmount(() => {
             当前模板尚未发布任何历史版本，暂无可对比基线。
           </div>
           <div
-            v-else-if="diffAddedCount === 0 && diffRemovedCount === 0 && fieldDiffSummary.length === 0 && skillDiffSummary.length === 0"
+            v-else-if="diffAddedCount === 0 && diffRemovedCount === 0 && fieldDiffSummary.length === 0 && inputDiffSummary.length === 0 && skillDiffSummary.length === 0"
             class="diff-empty-box"
           >
             当前工作区内容与所选基准版本完全一致，无行级或规则差异。

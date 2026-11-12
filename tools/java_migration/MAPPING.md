@@ -23,22 +23,24 @@
 | second-confirmation-sms | second-confirmation-sms | querySMSSendInfo | 二次确认短信 | 手机号码、业务名称、创建时间 | — | `date_range`、`query_result` |
 | verification-sms | verification-sms | querySMSSendInfo | 验证码短信 | 手机号码、业务名称、创建时间 | — | `date_range`、`query_result` |
 | original-package-name | original-package-name | querySMSSendInfo | 原套餐名称 | 手机号码、创建时间 | business-sms | `date_range`、`query_result`、`time_diff`、`regex_extract` |
-| reminder-sms | reminder-sms | querySMSSendInfo | 提醒短信、提醒日期（yyyy-MM-dd） | 手机号码、创建时间（补年份/回退日）、deadlineDate（可选） | business-sms | `extract_dates`、`date_shift`、`query_result`、`format_date` |
+| reminder-sms | reminder-sms | querySMSSendInfo | 提醒短信、提醒日期（yyyy-MM-dd） | 手机号码、创建时间（仅补年份）、deadlineDate（可选） | business-sms | `extract_dates`、`date_shift`、`query_result`、`format_date` |
 | renewal-reminder-sms | renewal-reminder-sms | querySMSSendInfo | 续约提醒类型、到期续约提醒时间、到期续约提醒短信内容、是否续约成功、续约成功提醒时间、续约成功提醒短信内容 | 手机号码、业务名称、创建时间（补年份）、deadlineDate（可选） | business-sms | `extract_dates`、`date_shift`、`regex_extract`、`query_result(anyOf)`、`format_date` |
 | number-portability-sms | number-portability-sms | querySMSSendInfo | 发送日期（yyyy-MM-dd）、携转资格回复短信 | 手机号码、创建时间 | — | `date_range`、`query_result`、`format_date` |
-| billing-cycle-sms | billing-cycle-sms | querySMSSendInfo（逐月） | 账期短信提醒列表（list：账期月/提醒类型/提醒时间/提醒次数/短信内容） | 手机号码、账单（`yyyyMM$yyyyMM`） | — | `expand_period`、`query_result(resultIds, between)`、`format_date` |
+| billing-cycle-sms | billing-cycle-sms | querySMSSendInfo（逐月） | 账期短信提醒列表（list：账期月/提醒类型/提醒时间/提醒次数/短信内容） | 手机号码、账单（`yyyyMM$yyyyMM` 闭区间） | — | `expand_period`、`query_result(resultIds, between)`、`format_date` |
 | qry-balance | qry-balance | BOSS_QryBalanceFlowLog（逐账期） | 充值流水（list：充值时间/支付方式/充值金额/流水号） | 充值号码（含 extraInfo）→手机号码、充值时间（含 extraInfo 办理日期） | — | `expand_period`、`query_result(resultIds, between prefixLen=8)` |
 | pretty-number-info | pretty-number-info | cc_pretty_num_info_query | 靓号等级、靓号活动名称、手机号类别 | 手机号码 | — | `query_result(equals msisdn)` |
 
-入参规范：以当前 Python 系统中文入参名为准，不注入与正文字段重名的 `客户号码` 入参，全量资源 `validate_all` 保持 **0 errors, 0 warnings**。
+入参规范：以当前 Python 系统中文入参名为准，不注入与正文字段重名的 `客户号码` 入参，关联 `reminder-sms` / `renewal-reminder-sms` 的 5 个模板（`105, 108, 112, 120, 129`）显式声明可选入参 `deadlineDate`，全量资源 `validate_all` 保持 **0 errors, 0 warnings**。
 
 模板配置要点：
-- `受理渠道`：`enum [热线, 掌上营业厅, 其他]`，`whenMissing: value`，`defaultValue: 其他`。
-- `手机号类别`：`whenMissing: value`，`defaultValue: 非靓号`；`靓号等级`（`quote`）、`靓号活动名称`（`derive`，支持多档 JSON 数组按 `、` 拼接）：`whenMissing: placeholder`（模板 131 非靓号时由 `手机号类别 == "靓号"` 分支跳过不输出；模板 132 缺失时保留占位符与 Pebble 一致）。
-- `有设备押金`（模板 120）：`whenMissing: empty`，缺失时渲染为空字符串，自动进入 `{% else %}` 输出 `- 无{{商品名称}}设备押金记录。`。
+- `受理渠道`：`enum [热线, 掌上营业厅, 其他]`，`whenMissing: value`，`defaultValue: 其他`（`订购短信` 为 `not_found` 时直接提交 `not_found` 走默认值，不引用 `not_found` 前置字段）。
+- `手机号类别`：`whenMissing: value`，`defaultValue: 非靓号`；`靓号等级`（`quote`）、`靓号活动名称`（`derive`，支持多档 JSON 数组按 `、` 拼接）：`whenMissing: placeholder`；`cc_pretty_num_info_query.yaml` 配置 `response.success.missingAs: failure`，顶层网关故障（无 `content.ret_code`）准确判为 `ok=false`。
+- `安装地址`（模板 121）：`evidence: derive`，`whenMissing: value`，`defaultValue: 无`（单据有地址引 `document`，无单据时从 `extraInfo` 提取并引 `input: extraInfo`）。
+- `标准资费`（模板 `100, 101, 102, 103, 104, 116, 119, 122, 125, 126`）：`evidence: derive`，支持将原文“月费10元”标准化为“10元/月”并引用单据或订购短信记录。
+- `有设备押金`（模板 120）与 `违约责任`（模板 111、114）：`whenMissing: empty`；模板 115 `违约责任` 保留 `whenMissing: placeholder`（第 19 行直接输出）并在第 59 行条件补加 `and 违约责任 != "{{违约责任}}"`，彻底消除占位符恒真分支。
 - `是否续约成功`：找不到时提交 `not_found`（不得推断为“否”），模板 `{% if 是否续约成功 == "是" %}` 自然不展示。
 - `订购短信`、`二次确认短信`、`验证码短信`、各类短信内容：`evidence: quote`，`quoteWhole: true`。
-- 列表字段（`充值流水`、`账期短信提醒列表`）：必要入参齐备且接口调用成功（`ok=true`）但命中 0 行时，提交 `status="found"`、`value=[]` 并附工具/接口证据（运行状态 `SUCCESS`）；仅缺参或接口失败（`ok=false`）时提交 `status="not_found"`、`value=null`（正文生效分支遍历该列表时运行状态标为 `PARTIAL`）。
+- 列表字段（`充值流水`、`账期短信提醒列表`）：必要入参齐备且接口调用成功（`ok=true`）但命中 0 行时，提交 `status="found"`、`value=[]`，并引用 `total=0` 的 `query_result` 或 `count=0` 的 `call_api` 工具 `callId`（严禁引用 `load_skill` 或非空表 `api`）；仅缺参或接口失败（`ok=false`）时提交 `status="not_found"`、`value=null`。
 
 ## 3. 接口契约与对拍校验结果
 
@@ -63,9 +65,9 @@ Skill 逻辑校验：`check_skills.py` 使用平台确定性工具函数在 mock
 
 ### 二期已修复项（与旧 Java 缺陷行为的预期差异）
 
-- **R2 `reminder-sms` 活动编号误识别为日期缺陷（二期已修复）**：
+- **R2 `reminder-sms` 活动编号误识别为日期缺陷与无到期日跳过策略（已修复）**：
   - **旧 Java 行为**：宽松正则 `(\d{4})\D{0,3}(\d{1,2})\D{0,3}(\d{1,2})` 不做日历校验，会把 `（编号：25JS206149）。\n1.` 误算成非法日期 `20614901`，导致查询窗口变成 `20614901000000～20614901235959` 而查不到提醒短信。
-  - **Python 现行行为**：改用确定性工具 `extract_dates(text=订购短信, defaultYear=创建时间)` 提取经日历合法性校验的真实日期（传入非空 `deadlineDate` 时优先解析；订购短信无合法日期时回退 `创建时间` 当天），再用 `date_shift(date=目标日期, days=0)` 生成当天窗口。示例短信正确提取 `20271201`（窗口 `20271201000000～20271201235959`）。
+  - **Python 现行行为**：改用确定性工具 `extract_dates(text=订购短信, defaultYear=创建时间)` 提取经日历合法性校验的真实日期（传入非空 `deadlineDate` 时优先解析；若未传 `deadlineDate` 且订购短信 `count == 0` 无合法到期日，与 Java 一致**直接跳过接口查询**并返回 `not_found`，绝不回退 `创建时间` 当天以防误取办理日 `【订购提醒】`），再用 `date_shift(date=目标日期, days=0)` 生成当天窗口。示例短信正确提取 `20271201`（窗口 `20271201000000～20271201235959`）。
 - **R3 确定性逻辑手算风险（二期已解决）**：
   - 平台已补齐确定性工具：`extract_dates`、`date_shift`、`expand_period`、`time_diff`、`regex_extract`，并增强 `query_result` 支持 `startsWith`、`between`（含 `endValue`、`prefixLen`）、`anyOf` 或条件组、`resultIds` 多结果合并筛选排序。全部 Skill 已由手算规则升级为工具调用。
 - **R4 `list` 字段空值 vs 缺失语义（二期已升级）**：
@@ -81,9 +83,9 @@ Skill 逻辑校验：`check_skills.py` 使用平台确定性工具函数在 mock
   - **Python 现行行为**：改用 `expand_period(period=充值时间)` + `query_result(resultIds=..., where=[between prefixLen=8])`，纯年月 `202607` 自动展开为整月 `20260701～20260731`，正确保留该月全部流水并按 `payDatetime` 倒序排列。
 - **R10 日期窗口计算（二期已统一）**：
   - 统一通过经日历校验的 `date_range`、`extract_dates`、`date_shift`、`expand_period` 计算起止时间，不再向网关拼接非法日期。
-- **R17 模板 120 `有设备押金` 死分支缺陷（二期已修复）**：
-  - **旧 Java 行为**：`PebbleTemplateEngine.render()` 把空/缺失变量填充为非空占位符 `"{{ 有设备押金 }}"`，导致 `{% if 有设备押金 %}` 恒为真，`{% else %}- 无{{商品名称}}设备押金记录。{% endif %}` 成为永远不可达的死代码。
-  - **Python 现行行为**：`field_catalog.yaml` 将 `有设备押金` 设为 `whenMissing: empty`，无押金记录提交 `not_found` 时置为空字符串，Jinja2 正确进入 `{% else %}` 输出 `- 无{{商品名称}}设备押金记录。`。
+- **R17 模板 120 `有设备押金` 与模板 111 / 114 / 115 `违约责任` 占位符恒真/死分支缺陷（已修复）**：
+  - **旧 Java 行为**：`PebbleTemplateEngine.render()` 把空/缺失变量填充为非空占位符 `"{{ 字段名 }}"`，导致模板 120 `{% if 有设备押金 %}` 恒真（`{% else %}` 死代码），模板 111 / 114 / 115 `{% if 违约责任 != "" %}` 恒真（缺失时仍输出违约金/违约行为段落）。
+  - **Python 现行行为**：`field_catalog.yaml` 将模板 120 `有设备押金` 与模板 111、114 `违约责任`（`visible: false`）设为 `whenMissing: empty`；`generate.py` 为模板 115 第 59 行条件补加 `and 违约责任 != "{{违约责任}}"`（保留第 19 行占位符输出），同时在 `verify_structure.py` 增加 S8/S9 AST 静态门禁阻断回归。
 
 ### 其余已确认的常规说明（保持不变）
 

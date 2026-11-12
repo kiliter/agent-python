@@ -19,7 +19,7 @@ inputs:
   sample: '20260705'
 - key: extraInfo
   required: false
-  description: 上游附加信息（JSON 文本），可能包含充值号码、办理日期、手机号等
+  description: 上游附加信息（JSON 文本），可能包含充值号码、办理日期、手机号、安装地址等
   sample: '{"充值号码":"13900001234","办理日期":"20260705"}'
 fields:
 - name: 充值流水
@@ -35,7 +35,7 @@ fields:
     description: 充值订单号/流水号
   evidence: quote
   whenMissing: empty
-  description: 按 Skill qry-balance 查询充值号码/手机号码在充值时间所属账期的余额流水，每条充值记录一行，单元格原样取自接口记录， evidence 引用每一行对应的接口记录；各账期接口调用成功但匹配 0 条流水时，必须提交 status="found"、value=[] 并附上查询工具或接口证据；仅在缺少必要入参或任一账期接口报错时提交 not_found。
+  description: 按 Skill qry-balance 查询充值号码/手机号码在充值时间所属账期的余额流水，每条充值记录一行，单元格原样取自接口记录， evidence 引用每一行对应的接口记录；各账期接口调用成功但匹配 0 条流水时，必须提交 status="found"、value=[] 并附上结果为 0 行的 query_result 或 count=0 的 call_api 工具 callId 证据（严禁引用 load_skill）；仅在缺少必要入参或任一账期接口报错时提交 not_found。
 - name: 客户号码
   evidence: derive
-  description: 优先从单据中摘取充值的客户号码，或依次取入参「充值号码」（含 extraInfo 中的充值号码）、「手机号码」（Java 该模板没有 rule，按字段名从单据/入参抽取）。
+  description: 优先取入参「extraInfo」中的充值号码（或入参「充值号码」），其次从单据中摘取充值的 11 位客户号码，都没有时取入参「手机号码」（Java 该模板没有 rule，优先级与同族充值争议模板对齐）。

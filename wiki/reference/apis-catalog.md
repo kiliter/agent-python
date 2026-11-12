@@ -47,8 +47,8 @@ updated: 2026-11-12
   - `手机号码`（必填，`^\d{11}$`）：11 位手机号
 - **请求头与报文特点**：`route_type='2'`、`route_value=${手机号码}`，`content.msisdn_list.msisdn=${手机号码}`。
 - **成功与无数据判定**：
-  - `noData`：`operation_out.content.ret_code == "1"`（如“号码不存在”，归为正常非靓号 0 条记录）；
-  - `success`：`operation_out.content.ret_code == "0"`（`missingAs: success`）。
+  - `noData`：`operation_out.content.ret_code == "1"`（如“号码不存在”，优先命中并归为正常非靓号 0 条记录 `ok=True, count=0, noData=True`）；
+  - `success`：`operation_out.content.ret_code == "0"`，且 **`missingAs: failure`**（当网关返回顶层异常如 `<resp_code>9999</resp_code>` 且报文缺失 `<content><ret_code>` 时，严格判为 `ok=False` 并提取错误描述，避免把网关级故障静默误判为“非靓号”）。
 - **抽取路径与列（`operation_out.content.msisdn_list`）**：`msisdn`、`grade`（如 `GRADE_002`）、`price`、`default_event_code`，以及点分嵌套列 `level_info.level`、`level_info.event_code`、`level_info.event_name`（多档次时自动存为 JSON 数组字符串）、`level_info.event_description`。
 
 ## 相关页面

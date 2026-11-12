@@ -6,9 +6,11 @@
   - Python：生产代码 build_render_context() + render_body()
 逐字比对渲染结果。仅做以下已确认的归一化/修复预期核对：
   1. CRLF → LF；Java 缺失占位符 `{{ 字段 }}` → Python 的 `{{字段}}`。
-  2. 模板 120（宽带业务续约争议类）中 `有设备押金` 缺失时，Java PebbleTemplateEngine 因把空值写成非空字符串
-     `"{{ 有设备押金 }}"` 导致 `{% else %}` 死分支；二期已修复为 `whenMissing: empty`，校验 Python 正确进入
-     `{% else %}` 输出 `- 无<商品名称>设备押金记录。`，且其余全部文本与 Pebble 逐字一致。
+  2. 模板 120（宽带业务续约争议类）中 `有设备押金` 缺失，以及模板 111（合约套餐提前解约处理类）、
+     114（合约活动提前解约类）、115（合约活动违约争议处理模板）中 `违约责任` 缺失时，Java PebbleTemplateEngine
+     因把空值写成非空字符串 `"{{ 字段 }}"` 导致条件恒真/死分支；Python 侧已修复为缺失时不进入违约段落
+     （120 进入 `{% else %}` 输出 `- 无<商品名称>设备押金记录。`，115 第 19 行仍保留 `{{违约责任}}` 占位符），
+     核对修复段落外其余全部文本与 Pebble 逐字一致。
 
 场景覆盖：全部找到（不含数字 / 含数字两套值）、全部找不到、每个枚举字段逐值（含找不到）、
 条件置空标量字段缺失、枚举字段全组合（组合数不超过 512 时）、列表字段空列表(found) / 缺失(not_found) / 1 行 / 3 行。
@@ -52,6 +54,8 @@ _RULE_KEY_RE = re.compile(r"服务争议点\d+\s*[:：]\s*([^\r\n]+)")
 _JAVA_PLACEHOLDER_RE = re.compile(r"\{\{ (\S+?) \}\}")
 MAX_COMBOS = 512
 _DEPOSIT_IF_LINE = "- 设备押金{押金金额}元已于{退还日期}退还至{退还账户}。"
+_TPL111_BREACH_TAIL = "\n因活动未到期，客户如需办理套餐变更，需按协议违约条款支付违约金中断活动后办理。\n\n"
+_TPL114_BREACH_TAIL = "\n因活动未到期，客户如需提前中断活动，需按协议违约条款支付违约金后办理。\n\n"
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +95,11 @@ def scenarios(tpl: Template) -> list[tuple[str, dict[str, dict[str, Any]]]]:
     fields = tpl.definition.fields
     enums = [f for f in fields if f.type == "enum"]
     lists = [f for f in fields if f.type == "list"]
-    empty_cond_scalars = [f for f in fields if f.type not in ("enum", "list") and not f.visible and f.whenMissing == "empty"]
+    cond_scalars = [
+        f for f in fields
+        if f.type not in ("enum", "list")
+        and ((not f.visible and f.whenMissing == "empty") or f'!= "{{{{{f.name}}}}}"' in tpl.body)
+    ]
 
     def base(variant: int, list_rows: int = 3) -> dict[str, dict[str, Any]]:
         rep = {}
@@ -104,7 +112,7 @@ def scenarios(tpl: Template) -> list[tuple[str, dict[str, dict[str, Any]]]]:
         ("全部找到-含数字", base(1)),
         ("全部找不到", {f.name: dict(_MISSING) for f in fields}),
     ]
-    for f in empty_cond_scalars:
+    for f in cond_scalars:
         for variant in (0, 1):
             rep = base(variant)
             rep[f.name] = dict(_MISSING)
@@ -158,13 +166,27 @@ def java_values(tpl: Template, report: dict[str, dict[str, Any]]) -> dict[str, s
 
 
 def _apply_intentional_fixes(tpl: Template, report: dict[str, dict[str, Any]], ctx: dict[str, Any], java_text: str) -> str:
-    """对二期有意修复的 Java 渲染死分支缺陷，换算修复后的期望文本再逐字比对。#Created By AiCoding(codex)"""
+    """对主动修复的 Java 渲染占位符恒真/死分支缺陷，换算修复后的期望文本再逐字比对。#Created By AiCoding(codex)"""
     if tpl.id == 120:
         dep_ans = report.get("有设备押金") or _MISSING
         dep_found = dep_ans.get("status") == "found" and bool(dep_ans.get("value"))
         if not dep_found:
             prod = str(ctx.get("商品名称", "{{商品名称}}"))
             return java_text.replace(_DEPOSIT_IF_LINE, f"- 无{prod}设备押金记录。", 1)
+    if tpl.id in (111, 114, 115):
+        breach_ans = report.get("违约责任") or _MISSING
+        breach_found = breach_ans.get("status") == "found" and bool(breach_ans.get("value"))
+        if not breach_found:
+            if tpl.id == 111 and java_text.endswith(_TPL111_BREACH_TAIL):
+                return java_text[: -len(_TPL111_BREACH_TAIL)]
+            if tpl.id == 114 and java_text.endswith(_TPL114_BREACH_TAIL):
+                return java_text[: -len(_TPL114_BREACH_TAIL)]
+            if tpl.id == 115:
+                act = str(ctx.get("违约行为", "{{违约行为}}"))
+                tm = str(ctx.get("违约时间", "{{违约时间}}"))
+                tpl115_tail = f"\n1. 违约行为：{act}2. 违约时间：{tm}\n因活动期间，客户号码{act}，故根据协议约定，无法享受活动优惠。\n\n"
+                if java_text.endswith(tpl115_tail):
+                    return java_text[: -len(tpl115_tail)]
     return java_text
 
 

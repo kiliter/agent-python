@@ -49,15 +49,20 @@ class GatewayClient(Protocol):
 
 
 _DECL_RE = re.compile(rb"^(?:\xef\xbb\xbf)?\s*<\?xml[^>]*encoding=[\"']([A-Za-z0-9_\-]+)[\"']", re.I)
+_XML_DECL_STRIP_RE = re.compile(r"^\s*<\?xml[^>]*\?>")
+_DOCTYPE_OR_ENTITY_HINT_RE = re.compile(r"<!\s*(?:DOCTYPE|ENTITY)", re.IGNORECASE)
 
 
 def sanitize_xml_text(text: str) -> str:
-    """移除 XML 1.0 不允许的控制字符与非法数字字符引用。"""
+    """移除 XML 1.0 不允许的控制字符与非法数字字符引用。#Created By AiCoding(codex)"""
     if not text:
         return ""
     cleaned = text.lstrip("\ufeff")
-    cleaned = _INVALID_XML_CHAR_REF_RE.sub("", cleaned)
-    return _INVALID_XML_CHARS_RE.sub("", cleaned)
+    if "&#" in cleaned:
+        cleaned = _INVALID_XML_CHAR_REF_RE.sub("", cleaned)
+    if _INVALID_XML_CHARS_RE.search(cleaned):
+        cleaned = _INVALID_XML_CHARS_RE.sub("", cleaned)
+    return cleaned
 
 
 def decode_xml(body: bytes, header_charset: str | None) -> str:
@@ -93,16 +98,20 @@ def _check_xml_security(xml_text: str) -> None:
 
 
 def parse_xml(text: str) -> ET.Element:
-    """解析 XML 文本（去掉声明、清理非法控制字符并防范 XXE/实体扩展）。"""
+    """单遍安全解析 XML 文本（仅在出现 DOCTYPE/ENTITY 字面线索时启用 expat 词法复核，防范 XXE/实体扩展并放行 CDATA）。#Created By AiCoding(codex)"""
     if not text or not text.strip():
         raise ET.ParseError("响应内容为空")
     if len(text) > MAX_XML_CHARS:
         raise ET.ParseError(f"XML 报文超过最大长度限制（{MAX_XML_CHARS} 字符）")
     cleaned = sanitize_xml_text(text)
-    cleaned = re.sub(r"^\s*<\?xml[^>]*\?>", "", cleaned, count=1).strip()
+    if cleaned.lstrip().startswith("<?xml"):
+        cleaned = _XML_DECL_STRIP_RE.sub("", cleaned, count=1).strip()
+    else:
+        cleaned = cleaned.strip()
     if not cleaned:
         raise ET.ParseError("响应内容为空")
-    _check_xml_security(cleaned)
+    if _DOCTYPE_OR_ENTITY_HINT_RE.search(cleaned):
+        _check_xml_security(cleaned)
     return ET.fromstring(cleaned)
 
 
@@ -331,7 +340,7 @@ def extract_records(contract: ApiContract, root: ET.Element) -> ApiCallResult:
             if resp.success.missingAs == "failure":
                 return ApiCallResult(ok=False, error=f"响应中没有 {resp.success.path}")
         elif code != resp.success.equals:
-            desc = _first_text(root, ["resp_desc", "respDesc", "message", "msg", "faultstring"])
+            desc = _first_text(root, ["resp_desc", "respDesc", "ret_msg", "retMsg", "message", "msg", "faultstring"])
             return ApiCallResult(ok=False, error=f"业务返回码 {code}" + (f"：{desc}" if desc else ""))
     if mode == "none":
         return ApiCallResult(ok=True, records=[], no_data=False)
@@ -352,12 +361,18 @@ def extract_records(contract: ApiContract, root: ET.Element) -> ApiCallResult:
 
 def _first_text(root: ET.Element, tags: list[str]) -> str | None:
     wanted = set(tags)
+    found_by_tag: dict[str, str] = {}
+    for el in root.iter():
+        tag = _local_tag(el.tag)
+        if tag in wanted and tag not in found_by_tag and not _is_xsi_nil(el):
+            txt = (el.text or "").strip()
+            if txt:
+                found_by_tag[tag] = txt
+                if len(found_by_tag) == len(wanted):
+                    break
     for tag in tags:
-        for el in root.iter():
-            if _local_tag(el.tag) == tag and not _is_xsi_nil(el) and (el.text or "").strip():
-                return (el.text or "").strip()
-        if tag not in wanted:
-            continue
+        if tag in found_by_tag:
+            return found_by_tag[tag]
     return None
 
 
@@ -476,17 +491,46 @@ def _flatten_json_dict(d: dict[str, Any]) -> dict[str, str]:
 
 
 def _extract_json_dotted(item: dict[str, Any], dotted_key: str) -> tuple[bool, str]:
-    """按显式声明的点分列名（如 userInfo.userName 或 detail.eff）从 JSON 字典提取嵌套值。"""
+    """按显式声明的点分列名（如 userInfo.userName 或 level_info.event_name）从 JSON 字典提取嵌套值。
+
+    #Created By AiCoding(codex)
+    对齐 XML _extract_xml_dotted：路径段遇到 list 时遍历列表内字典聚合非空值（单值返回标量字符串，多值序列化为紧凑 JSON 数组）。
+    """
     parts = [p.strip() for p in dotted_key.split(".") if p.strip()]
     if len(parts) < 2:
         return False, ""
-    cur: Any = item
-    for part in parts:
-        if isinstance(cur, dict) and part in cur:
-            cur = cur[part]
-        else:
+    nodes: list[Any] = [item]
+    saw_list = False
+    for idx, part in enumerate(parts):
+        is_last = idx == len(parts) - 1
+        nxt: list[Any] = []
+        found_key = False
+        for cur in nodes:
+            if isinstance(cur, dict) and part in cur:
+                found_key = True
+                val = cur[part]
+                if isinstance(val, list) and not is_last:
+                    saw_list = True
+                    nxt.extend(x for x in val if x is not None)
+                else:
+                    nxt.append(val)
+        if not found_key:
             return False, ""
-    return True, _json_cell_to_str(cur)
+        if not nxt:
+            return (True, "") if is_last else (False, "")
+        nodes = nxt
+    if not saw_list and len(nodes) == 1:
+        return True, _json_cell_to_str(nodes[0])
+    non_empty: list[Any] = []
+    for n in nodes:
+        if _is_empty_json_record(n):
+            continue
+        non_empty.append(n.strip() if isinstance(n, str) else n)
+    if not non_empty:
+        return True, ""
+    if len(non_empty) == 1:
+        return True, _json_cell_to_str(non_empty[0])
+    return True, _json_cell_to_str(non_empty)
 
 
 def _json_item_to_record(
@@ -572,7 +616,9 @@ def extract_json_records(contract: ApiContract, data: Any) -> ApiCallResult:
                 if resp.success.missingAs == "failure":
                     return ApiCallResult(ok=False, error=f"响应中没有 {resp.success.path}")
             elif code != resp.success.equals:
-                desc = _first_json_text(data, ["resp_desc", "respDesc", "message", "msg", "error_msg", "faultstring"])
+                desc = _first_json_text(
+                    data, ["resp_desc", "respDesc", "ret_msg", "retMsg", "message", "msg", "error_msg", "faultstring"]
+                )
                 return ApiCallResult(ok=False, error=f"业务返回码 {code}" + (f"：{desc}" if desc else ""))
         if mode == "none":
             return ApiCallResult(ok=True, records=[], no_data=False)

@@ -2,8 +2,9 @@
 # 迁移自 Java pretty-number-info/scripts/assembly.groovy + extract.groovy，接口文档 design_docs/靓号接口.docx。
 # 请求与 Java 一致：route_type=2、route_value=手机号，content.msisdn_list.msisdn=手机号；其余公共字段走 XmlBaseRequest 默认值。
 # 响应：operation_out.content.ret_code=0 成功，1 失败（如“XX号码不存在”）；msisdn_list 为 0 条表示非靓号。
-# 【差异】Java extract 对任何 ret_code≠0（含缺失）都返回 {}（=非靓号）。契约只能把 ret_code=1 声明为“无数据”，
-#   其它非 0 值在 Python 中是“调用失败”，字段按找不到处理；模板中“手机号类别”的默认值必须是“非靓号”，最终展示一致。
+# 【差异】Java extract 对任何 ret_code≠0（含缺失）都返回 {}（=非靓号）。契约仅将 ret_code=1 声明为“无数据”，
+#   其它非 0 值或缺少 content.ret_code（如顶层网关故障 resp_code=9999）在 Python 中一律判为“调用失败”（ok=false），
+#   字段按找不到处理，绝不把网关故障静默当作正常“非靓号”；模板中“手机号类别”的默认值是“非靓号”。
 name: cc_pretty_num_info_query
 title: 靓号号码信息查询
 description: 按手机号查询是否为靓号以及靓号等级、价格、默认活动和档次信息（营销活动名称）。没有记录表示非靓号。
@@ -35,7 +36,7 @@ response:
   success:
     path: operation_out.content.ret_code
     equals: '0'
-    missingAs: success
+    missingAs: failure
   records:
     path: operation_out.content.msisdn_list
     columns:

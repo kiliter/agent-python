@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -23,7 +24,7 @@ from ..domain.resources import (Issue, ResourceSet, SYSTEM_PROMPT_FILE, load_tem
 from ..domain.skill import SKILL_FILE, Skill, SkillParseError, parse_skill_markdown
 from ..domain.template import (BODY_FILE, OFFLINE_FILE, TEMPLATE_FILE, Template, TemplateDef, dump_template_yaml,
                                parse_template_yaml)
-from .drafts import DraftStore
+from .drafts import DraftConflict, DraftStore
 from .fsutil import now_iso
 from .layout import REV_RE, SYSTEM_PROMPT_KEY, DataLayout, InvalidResource, ResourceRef
 from .publisher import Change, NothingToPublish, Publisher, PublishResult
@@ -86,6 +87,72 @@ class ResourceService:
         self.drafts = drafts
         self.publisher = publisher
         self.lock = lock
+        self._draft_mutation_seq = 0
+        self._overlay_lock = threading.Lock()
+        self._overlay_cache: tuple[tuple[Any, ...], ResourceSet] | None = None
+
+    def _bump_draft_seq(self) -> None:
+        """草稿或发布状态变更时递增序号，使 overlay() 内存缓存立即失效。"""
+        with self._overlay_lock:
+            self._draft_mutation_seq += 1
+            self._overlay_cache = None
+
+    def _drafts_fingerprint(self) -> tuple[tuple[str, str, str, int, int], ...]:
+        """采集 drafts/ 下活跃草稿文件的轻量 (kind, key, file, mtime_ns, size) 指纹，兼顾直接写盘测试场景。"""
+        root = self.layout.drafts
+        if not root.is_dir():
+            return ()
+        entries: list[tuple[str, str, str, int, int]] = []
+        try:
+            with os.scandir(root) as kind_it:
+                for kind_entry in kind_it:
+                    if kind_entry.name.startswith(".") or not kind_entry.is_dir():
+                        continue
+                    try:
+                        with os.scandir(kind_entry.path) as key_it:
+                            for key_entry in key_it:
+                                if key_entry.name.startswith(".") or not key_entry.is_dir():
+                                    continue
+                                try:
+                                    with os.scandir(key_entry.path) as file_it:
+                                        for f_entry in file_it:
+                                            try:
+                                                st = f_entry.stat()
+                                                entries.append((
+                                                    kind_entry.name,
+                                                    key_entry.name,
+                                                    f_entry.name,
+                                                    st.st_mtime_ns,
+                                                    st.st_size,
+                                                ))
+                                            except OSError:
+                                                continue
+                                except OSError:
+                                    continue
+                    except OSError:
+                        continue
+        except OSError:
+            return ()
+        entries.sort()
+        return tuple(entries)
+
+    def _check_missing_draft_conflict(
+        self,
+        ref: ResourceRef,
+        expected_revision: int | None,
+        change: dict[str, Any] | None,
+    ) -> None:
+        """当客户端携带正整数草稿 revision 但服务端草稿已被他人发布或丢弃时，触发 409 冲突保护。"""
+        if expected_revision is not None and expected_revision > 0 and not self.drafts.exists(ref):
+            raise DraftConflict({
+                "kind": ref.kind,
+                "key": ref.key,
+                "revision": 0,
+                "baseRev": change["rev"] if change else None,
+                "updatedBy": (change or {}).get("operator", ""),
+                "updatedAt": (change or {}).get("time", ""),
+                "status": "NO_DRAFT",
+            })
 
     # ================================================================ 通用
     def live(self) -> tuple[str | None, ResourceSet]:
@@ -144,7 +211,10 @@ class ResourceService:
 
     def discard(self, ref: ResourceRef) -> bool:
         """放弃草稿。"""
-        return self.drafts.delete(ref)
+        deleted = self.drafts.delete(ref)
+        if deleted:
+            self._bump_draft_seq()
+        return deleted
 
     def publish_draft(self, ref: ResourceRef, operator: str, note: str = "", type_label: str = "发布",
                       summary: str | None = None) -> PublishResult:
@@ -153,8 +223,10 @@ class ResourceService:
             raise NothingToPublish("草稿内容与线上版本一致，无需发布")
         title = self.title_of(ref)
         summary = summary or f"{type_label} {self.summary_label(ref, title)}"
-        return self.publisher.publish([Change(ref, "publish", title=title, source="draft")], operator,
-                                      type_label, summary, note)
+        result = self.publisher.publish([Change(ref, "publish", title=title, source="draft")], operator,
+                                        type_label, summary, note)
+        self._bump_draft_seq()
+        return result
 
     def _same_as_online(self, ref: ResourceRef) -> bool:
         """草稿解析后是否与线上一致（忽略 YAML 注释、键顺序等格式差异）。"""
@@ -205,8 +277,10 @@ class ResourceService:
         """把资源恢复到某个历史版本：draft_only 只写入草稿；publish_now 直接发布为新版本。"""
         self.releases.entry(target_rev)
         tree = self.releases.ensure_materialized(target_rev)
-        if not (tree / ref.tree_path()).exists():
+        target_path = tree / ref.tree_path()
+        if not target_path.exists():
             raise ResourceNotFound(f"{ref.label()} 在 {target_rev} 中不存在")
+        target_offline = ref.kind == "template" and (target_path / OFFLINE_FILE).exists()
         title = self.title_of(ref)
         if mode == "publish_now":
             summary = f"回退 {self.summary_label(ref, title)} 至 {target_rev}" + (f"（{reason}）" if reason else "")
@@ -215,14 +289,33 @@ class ResourceService:
                     [Change(ref, "rollback", title=title, source="tree", source_dir=tree)],
                     operator, "回退", summary, reason)
                 self.drafts.delete(ref)
-            return {"mode": mode, "rev": result.entry["rev"], "targetRev": target_rev}
+                self._bump_draft_seq()
+            return {
+                "mode": mode,
+                "rev": result.entry["rev"],
+                "targetRev": target_rev,
+                "targetOffline": target_offline,
+            }
         files = self._files_from_tree(ref, tree)
         state_online = self.releases.online_change(ref)
+        action = f"rollback:{target_rev}:offline-source" if target_offline else f"rollback:{target_rev}"
         with self.lock:
             self.drafts.write(ref, files, operator, base_rev=state_online["rev"] if state_online else None,
-                              action=f"rollback:{target_rev}")
-            self.drafts.rebase(ref, state_online["rev"] if state_online else None, action=f"rollback:{target_rev}")
-        return {"mode": mode, "rev": target_rev, "targetRev": target_rev}
+                              action=action)
+            self.drafts.rebase(ref, state_online["rev"] if state_online else None, action=action)
+            self._bump_draft_seq()
+        out: dict[str, Any] = {
+            "mode": mode,
+            "rev": target_rev,
+            "targetRev": target_rev,
+            "targetOffline": target_offline,
+        }
+        if target_offline:
+            out["warning"] = (
+                f"注意：目标版本 {target_rev} 中该模板处于已下线归档状态；"
+                "恢复到草稿仅载入其模板定义与正文（不含下线标记），核对发布后将作为上线版本生效"
+            )
+        return out
 
     def _files_from_tree(self, ref: ResourceRef, tree) -> dict[str, str]:
         """从一棵发布树中取出资源文件内容（用于写入草稿）。"""
@@ -232,9 +325,26 @@ class ResourceService:
                     if p.is_file() and p.name not in (OFFLINE_FILE, ".meta.json")}
         return {self.drafts.single_file_name(ref): path.read_text(encoding="utf-8")}
 
+    @staticmethod
+    def _clone_resource_set(rs: ResourceSet) -> ResourceSet:
+        """返回浅拷贝，避免外部调用方修改缓存字典或问题列表。"""
+        return ResourceSet(
+            system_prompt=rs.system_prompt,
+            templates=dict(rs.templates),
+            skills=dict(rs.skills),
+            apis=dict(rs.apis),
+            load_issues=list(rs.load_issues),
+        )
+
     def overlay(self) -> ResourceSet:
-        """线上资源叠加全部草稿（试运行“用草稿”时使用）。草稿无法解析的跳过并记录问题。"""
-        _, live = self.live()
+        """线上资源叠加全部草稿（试运行“用草稿”及工作台聚合读取使用），按 (live_rev, seq, 草稿指纹) 缓存。"""
+        live_rev, live = self.live()
+        fp = self._drafts_fingerprint()
+        with self._overlay_lock:
+            cache_key = (live_rev, self._draft_mutation_seq, fp)
+            if self._overlay_cache is not None and self._overlay_cache[0] == cache_key:
+                return self._clone_resource_set(self._overlay_cache[1])
+
         rs = ResourceSet(system_prompt=live.system_prompt, templates=dict(live.templates),
                          skills=dict(live.skills), apis=dict(live.apis))
         for key in self.drafts.list_keys("template"):
@@ -261,7 +371,15 @@ class ResourceService:
         sp = self.drafts.read_file(SP_REF, SYSTEM_PROMPT_FILE)
         if sp is not None:
             rs.system_prompt = sp
-        return rs
+
+        with self._overlay_lock:
+            if (live_rev, self._draft_mutation_seq, fp) == (
+                self.releases.live_rev(),
+                self._draft_mutation_seq,
+                self._drafts_fingerprint(),
+            ):
+                self._overlay_cache = ((live_rev, self._draft_mutation_seq, fp), rs)
+        return self._clone_resource_set(rs)
 
     # ================================================================ 模板
     def _template_from_draft(self, tid: int) -> Template | None:
@@ -307,8 +425,12 @@ class ResourceService:
         ref = tpl_ref(tpl.id)
         change = self.releases.online_change(ref)
         files = {TEMPLATE_FILE: dump_template_yaml(tpl.definition), BODY_FILE: tpl.body}
-        return self.drafts.write(ref, files, operator, base_rev=change["rev"] if change else None,
-                                 expected_revision=expected_revision, action=action)
+        with self.lock:
+            self._check_missing_draft_conflict(ref, expected_revision, change)
+            meta = self.drafts.write(ref, files, operator, base_rev=change["rev"] if change else None,
+                                     expected_revision=expected_revision, action=action)
+        self._bump_draft_seq()
+        return meta
 
     def validate_template_working(self, tid: int, tpl: Template | None = None) -> list[Issue]:
         """校验模板工作副本（Skill 引用按“线上 + 草稿”判断）。"""
@@ -327,8 +449,10 @@ class ResourceService:
             raise NothingToPublish(f"模板 {tid} 已处于下线状态")
         title = self.title_of(ref)
         marker = {"by": operator, "at": now_iso(), "reason": reason}
-        return self.publisher.publish([Change(ref, "offline", title=title, source="none", offline_marker=marker)],
-                                      operator, "下线", f"下线 {self.summary_label(ref, title)}", reason)
+        result = self.publisher.publish([Change(ref, "offline", title=title, source="none", offline_marker=marker)],
+                                        operator, "下线", f"下线 {self.summary_label(ref, title)}", reason)
+        self._bump_draft_seq()
+        return result
 
     def restore_template(self, tid: int, operator: str) -> dict[str, Any]:
         """恢复已下线的模板：用线上内容生成一份草稿，发布后重新上线。"""
@@ -380,9 +504,13 @@ class ResourceService:
             raise InvalidResource(f"frontmatter 中 name={skill.id} 必须与 Skill 标识 {sid} 一致")
         ref = skill_ref(sid)
         change = self.releases.online_change(ref)
-        return self.drafts.write(ref, {SKILL_FILE: markdown}, operator,
-                                 base_rev=change["rev"] if change else None,
-                                 expected_revision=expected_revision, action=action)
+        with self.lock:
+            self._check_missing_draft_conflict(ref, expected_revision, change)
+            meta = self.drafts.write(ref, {SKILL_FILE: markdown}, operator,
+                                     base_rev=change["rev"] if change else None,
+                                     expected_revision=expected_revision, action=action)
+        self._bump_draft_seq()
+        return meta
 
     def validate_skill_working(self, sid: str) -> list[Issue]:
         sk = self.skill_working(sid)
@@ -434,9 +562,13 @@ class ResourceService:
             raise InvalidResource("；".join(errors))
         ref = api_ref(name)
         change = self.releases.online_change(ref)
-        return self.drafts.write(ref, {f"{name}.yaml": yaml_text}, operator,
-                                 base_rev=change["rev"] if change else None,
-                                 expected_revision=expected_revision, action=action)
+        with self.lock:
+            self._check_missing_draft_conflict(ref, expected_revision, change)
+            meta = self.drafts.write(ref, {f"{name}.yaml": yaml_text}, operator,
+                                     base_rev=change["rev"] if change else None,
+                                     expected_revision=expected_revision, action=action)
+        self._bump_draft_seq()
+        return meta
 
     # ================================================================ 系统提示词
     def system_prompt(self, version: str = "working") -> str:
@@ -457,8 +589,12 @@ class ResourceService:
         if not text.strip():
             raise InvalidResource("系统提示词不能为空")
         change = self.releases.online_change(SP_REF)
-        return self.drafts.write(SP_REF, {SYSTEM_PROMPT_FILE: text}, operator,
-                                 base_rev=change["rev"] if change else None, expected_revision=expected_revision)
+        with self.lock:
+            self._check_missing_draft_conflict(SP_REF, expected_revision, change)
+            meta = self.drafts.write(SP_REF, {SYSTEM_PROMPT_FILE: text}, operator,
+                                     base_rev=change["rev"] if change else None, expected_revision=expected_revision)
+        self._bump_draft_seq()
+        return meta
 
 
 def template_from_payload(tid: int, base: Template | None, defn_data: dict[str, Any], body: str | None) -> Template:

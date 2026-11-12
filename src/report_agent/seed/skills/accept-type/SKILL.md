@@ -35,6 +35,5 @@ apis: []
 
 ## 提交要求
 
-- 本字段**总是有值**（Java 默认值 `其他`），不要提交 not_found。
-- 证据：`{"type":"field","name":"订购短信"}`；订购短信找到时再加上订购短信那条记录 `{"type":"api","resultId":...,"row":...,"column":"smsContent"}`；用了 `text_contains` 时可以加 `{"type":"tool","callId":...}`。
-- reasoning 写明命中的关键词，或“订购短信未找到/未含渠道关键词，按其他处理”。
+- **当 `订购短信` 为 `found` 时**：提交 `status="found"`，值为 `"热线"`、`"掌上营业厅"` 或 `"其他"`；`evidence` 引用 `{"type":"field","name":"订购短信"}` 及订购短信对应的记录 `{"type":"api","resultId":...,"row":...,"column":"smsContent"}`（用了 `text_contains` 时一并加 `{"type":"tool","callId":...}`），`reasoning` 写明命中的渠道关键词或未含渠道关键词。
+- **当 `订购短信` 为 `not_found`（未查到、接口失败、入参缺失）时**：提交 `status="not_found"`、`value=null`，`reasoning` 写明“订购短信未找到，由模板默认值按其他处理”（严禁引用状态为 `not_found` 的前置字段作为 `found` 证据；模板已配置 `whenMissing: value, defaultValue: "其他"`，会自动输出 `"其他"`）。

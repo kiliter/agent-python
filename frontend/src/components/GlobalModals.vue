@@ -459,14 +459,19 @@ async function handleSaveAndLeave() {
       </div>
       <div class="modal-body">
         <div style="font-size: 13px; line-height: 1.6">
-          草稿已被 <strong>{{ store.conflictInfo?.updatedBy || '其他用户' }}</strong>
-          于 <strong class="mono">{{ store.conflictInfo?.updatedAt || '—' }}</strong> 修改<template
-            v-if="store.conflictInfo?.revision != null"
-          >（草稿修订号 <code class="mono">{{ store.conflictInfo.revision }}</code>）</template>，你的修改尚未保存。
+          <template v-if="store.conflictInfo?.status === 'NO_DRAFT'">
+            当前模板的服务端草稿已被<strong>其他会话发布或放弃</strong>，你的本地修改尚未保存，可点击“查看版本差异”对比线上最新内容。
+          </template>
+          <template v-else>
+            草稿已被 <strong>{{ store.conflictInfo?.updatedBy || '其他用户' }}</strong>
+            于 <strong class="mono">{{ store.conflictInfo?.updatedAt || '—' }}</strong> 修改<template
+              v-if="store.conflictInfo?.revision != null"
+            >（草稿修订号 <code class="mono">{{ store.conflictInfo.revision }}</code>）</template>，你的修改尚未保存。
+          </template>
         </div>
       </div>
       <div class="modal-footer">
-        <button class="btn" @click="locateTab('history')">查看版本差异</button>
+        <button class="btn" @click="store.openConflictDraftDiff()">查看版本差异</button>
         <button class="btn btn-primary" @click="handleConflictReload">重新加载（放弃我的修改）</button>
       </div>
     </div>

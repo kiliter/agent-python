@@ -30,26 +30,26 @@ updated: 2026-11-12
    - 自动填充统一网关公共头默认值（`request_type="1"`、`organ_id="1"`、`request_source="1"`、`sysfunc_id=processCode` 等），允许契约按需覆盖（如 `BOSS_QryBalanceFlowLog` 覆盖 `organ_id="3001"`、`verify_code="1002"`）；
    - 支持 `${入参名}` 字符串插值，以及平台内置动态占位符 **`${$now}`**（定义在 `BUILTIN_PLACEHOLDERS`，每次组包时动态注入当前本地时间 `yyyyMMddHHmmss`）。
 4. **响应判定与多模式记录抽取（`response`）**：
-   - **判定顺序**：**先判 `noData`（如 `resp_desc` 含“无短信记录”或靓号 `ret_code == "1"`），命中即视为 `ok=True, count=0, noData=True`**；未命中时再判 `success`（`equals` + `missingAs: "success" | "failure"`）。
+   - **判定顺序**：**先判 `noData`（如 `resp_desc` 含“无短信记录”或靓号 `ret_code == "1"`），命中即视为 `ok=True, count=0, noData=True`**；未命中时再判 `success`（`equals` + `missingAs: "success" | "failure"`；如 `BOSS_QryBalanceFlowLog` 与 `cc_pretty_num_info_query` 均设为 `missingAs: failure`，确保顶层网关报错无业务 `ret_code` 时准确判为 `ok=False`），错误描述自动兼容提取 `resp_desc`、`ret_msg` / `retMsg` 等字段。
    - **记录抽取（`RecordsSpec`）**：
      - `mode` 支持 5 种形态：`auto`（默认，兼容列表与单对象）、`list`、`object`、`scalar`、`none`；
-     - 支持点分深层列路径（如靓号接口的 `level_info.event_name`，遇到多档次列表时自动序列化为 JSON 数组文本以便后续解析）与嵌套对象扁平化 `flatten: true`。
+     - XML 与 JSON 双协议统一支持点分深层列路径（`_extract_json_dotted` 与 XML 对齐：路径中途遇到 `list[dict]` 时自动遍历聚合非空值，多档次序列化为 JSON 数组文本，单值返回标量）与嵌套对象扁平化 `flatten: true`。
 
-## 2. 统一网关客户端（`gateway/unified_xml.py#UnifiedGatewayClient`）
+## 2. 统一网关客户端（`gateway/unified_xml.py#UnifiedGatewayXmlClient`）
 
 ### 2.1 Jackson 3 字节级兼容 XML 序列化（`build_request_xml`）
 
 前代 Java 版的 `CommonRequestToolService#toXmlRequest` 使用 Jackson 3 `XmlMapper` 序列化 `XmlBaseRequest` POJO，具有鲜明特征。`build_request_xml` 提供两种 `GATEWAY_XML_STYLE`：
-- **`style="java"`（默认）**：顶层字段严格按字母序排列（`_JAVA_FIELD_ORDER`），契约未显式设置的公共字段输出 `<operator_id xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:nil="true"/>`，空字符串输出普通空标签 `<sendPort/>`，不带 `<?xml ...?>` 声明头。经 `tools/java_migration/check_skills.py` 对拍，与 Java 编译产物生成的真实报文**逐字节完全一致**。
+- **`style="java"`（默认）**：顶层字段严格按字母序排列（`_JAVA_ORDER`），契约未显式设置的公共字段输出 `<operator_id xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:nil="true"/>`，空字符串输出普通空标签 `<sendPort/>`，不带 `<?xml ...?>` 声明头。经 `tools/java_migration/check_skills.py` 对拍，与 Java 编译产物生成的真实报文**逐字节完全一致**。
 - **`style="clean"`**：带 UTF-8 XML 声明头，省略值为 `None` 的公共字段标签。
 
-### 2.2 防 XXE 安全的 XML 解析（`parse_xml`）
+### 2.2 单遍防 XXE 安全的 XML 解析（`parse_xml`）与并发保护
 
-标准库 `xml.etree.ElementTree` 默认允许内部实体扩展（存在 Billion Laughs 内存放大风险）。`parse_xml` 自定义 `_SafeXMLTreeBuilder`，在底层 `expat` 解析器上挂载 `EntityDeclHandler` 与 `StartDoctypeDeclHandler` 钩子，一旦响应报文包含任何 `<!DOCTYPE` 或 `<!ENTITY` 声明立即抛出 `DefusedXmlException` 拒绝解析，并在解析后统一剥离 XML Namespace 前缀以简化路径寻址。
+标准库 `xml.etree.ElementTree` 默认允许内部实体扩展（存在 Billion Laughs 内存放大风险）。`parse_xml` 自定义 `_SafeXMLTreeBuilder`，在底层 `expat` 解析器上挂载 `EntityDeclHandler` 与 `StartDoctypeDeclHandler` 钩子，一旦响应报文包含任何 `<!DOCTYPE` 或 `<!ENTITY` 声明立即拒绝解析，并在单遍构建过程中剥离 XML Namespace 前缀。同时 `UnifiedGatewayXmlClient` 内置异步并发信号量（`GATEWAY_MAX_CONCURRENCY`，默认 `32`），防止突发跨月查询洪峰打满下游统一网关。
 
 ### 2.3 JSON 连接器支持
 
-当 `contract.connector == "unified-gateway-json"` 时，`UnifiedGatewayClient` 自动将构造好的 `operation_in` 报文以 `application/json` 发送，并用 `json.loads` 解析响应树，复用同一套 `extract_from_parsed` 判定与列抽取逻辑。
+当 `contract.connector == "unified-gateway-json"` 时，`UnifiedGatewayXmlClient` 自动将构造好的 `operation_in` 报文以 `application/json` 发送，并用 `parse_json_body` + `extract_json_records` 解析响应树，与 XML 共享一致的 `noData`/`success` 判定与多元素点分列抽取语义。
 
 ## 3. 本地 Mock 网关（`gateway/mock.py#MockGatewayClient`）
 

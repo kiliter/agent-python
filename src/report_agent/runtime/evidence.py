@@ -23,6 +23,8 @@ from .workspace import Workspace
 VALUE_TOOLS = {"format_date"}
 _MAX_SHOW = 300
 _ZERO_WIDTH_SET = frozenset("\ufeff\u200b\u200c\u200d")
+_ZERO_WIDTH_RE = re.compile(r"[\ufeff\u200b\u200c\u200d]+")
+_WS_COLLAPSE_RE = re.compile(r"\s+")
 _STRICT_NUM_RE = re.compile(r"^[+-]?(?:0|[1-9]\d*)(?:\.\d+)?$")
 
 
@@ -71,8 +73,11 @@ def _normalize_ws_with_map(text: str) -> tuple[str, list[tuple[int, int]]]:
 
 
 def _collapse_ws(text: str) -> str:
-    norm, _ = _normalize_ws_with_map(text)
-    return norm
+    """用预编译正则快速折叠空白字符（不分配 spans 偏移数组）。#Created By AiCoding(codex)"""
+    if not text:
+        return ""
+    cleaned = _ZERO_WIDTH_RE.sub("", text) if _ZERO_WIDTH_RE.search(text) else text
+    return _WS_COLLAPSE_RE.sub(" ", cleaned).strip()
 
 
 def _as_decimal(val: Any) -> Decimal | None:
@@ -123,49 +128,127 @@ def _contains_with_ws(container: str, target: str) -> bool:
     return norm_target in _collapse_ws(container)
 
 
-def locate_quote_in_document(document: str, quote: str, value: str | None = None) -> list[dict[str, int]]:
+class DocumentIndex:
+    """单据原文定位索引（惰性缓存行偏移与空白折叠映射，避免同一次运行重复扫描长单据）。#Created By AiCoding(codex)"""
+
+    __slots__ = ("document", "_line_starts", "_norm_doc", "_doc_map")
+
+    def __init__(self, document: str) -> None:
+        self.document = document or ""
+        self._line_starts: list[int] | None = None
+        self._norm_doc: str | None = None
+        self._doc_map: list[tuple[int, int]] | None = None
+
+    @property
+    def line_starts(self) -> list[int]:
+        if self._line_starts is None:
+            starts: list[int] = []
+            acc = 0
+            for ln in self.document.splitlines(keepends=True):
+                starts.append(acc)
+                acc += len(ln)
+            self._line_starts = starts
+        return self._line_starts
+
+    def normalized(self) -> tuple[str, list[tuple[int, int]]]:
+        if self._norm_doc is None or self._doc_map is None:
+            self._norm_doc, self._doc_map = _normalize_ws_with_map(self.document)
+        return self._norm_doc, self._doc_map
+
+    def locate(self, quote: str, value: str | None = None) -> list[dict[str, int]]:
+        document = self.document
+        if not document or not quote or not quote.strip():
+            return []
+        raw_spans: list[tuple[int, int]] = []
+        pos = 0
+        while (idx := document.find(quote, pos)) != -1:
+            raw_spans.append((idx, idx + len(quote)))
+            pos = idx + 1
+
+        if not raw_spans:
+            norm_doc, doc_map = self.normalized()
+            norm_quote = _collapse_ws(quote)
+            if norm_quote and norm_doc:
+                pos = 0
+                while (idx := norm_doc.find(norm_quote, pos)) != -1:
+                    orig_start = doc_map[idx][0]
+                    orig_end = doc_map[idx + len(norm_quote) - 1][1]
+                    if not raw_spans or raw_spans[-1] != (orig_start, orig_end):
+                        raw_spans.append((orig_start, orig_end))
+                    pos = idx + 1
+
+        if len(raw_spans) > 1 and value and value.strip():
+            narrowed = [sp for sp in raw_spans if _contains_with_ws(document[sp[0]:sp[1]], value)]
+            if narrowed:
+                raw_spans = narrowed
+
+        if not raw_spans:
+            return []
+        line_starts = self.line_starts
+        out: list[dict[str, int]] = []
+        for start, end in raw_spans:
+            last = max(start, end - 1)
+            while last > start and document[last] in "\r\n":
+                last -= 1
+            start_line = bisect_right(line_starts, start) if line_starts else 1
+            end_line = bisect_right(line_starts, last) if line_starts else 1
+            out.append({"offset": start, "endOffset": end, "line": max(1, start_line), "endLine": max(1, end_line)})
+        return out
+
+
+def get_document_index(ws: Workspace | None, document: str) -> DocumentIndex:
+    """获取或初始化绑定在工作区上的 DocumentIndex。#Created By AiCoding(codex)"""
+    doc = document or ""
+    if ws is None:
+        return DocumentIndex(doc)
+    cached = ws._doc_index
+    if isinstance(cached, DocumentIndex) and ws._doc_index_source == doc:
+        return cached
+    idx = DocumentIndex(doc)
+    ws._doc_index = idx
+    ws._doc_index_source = doc
+    return idx
+
+
+def locate_quote_in_document(
+    document: str,
+    quote: str,
+    value: str | None = None,
+    *,
+    index: DocumentIndex | None = None,
+) -> list[dict[str, int]]:
     """在单据原文中定位引用片段的全部匹配位置，返回按偏移排序的 {offset, endOffset, line, endLine} 列表。"""
     if not document or not quote or not quote.strip():
         return []
-    lines_keep = document.splitlines(keepends=True)
-    line_starts: list[int] = []
-    acc = 0
-    for ln in lines_keep:
-        line_starts.append(acc)
-        acc += len(ln)
+    doc_idx = index if (index is not None and index.document == document) else DocumentIndex(document)
+    return doc_idx.locate(quote, value=value)
 
-    def _span_to_loc(start: int, end: int) -> dict[str, int]:
-        last = max(start, end - 1)
-        while last > start and document[last] in "\r\n":
-            last -= 1
-        start_line = bisect_right(line_starts, start) if line_starts else 1
-        end_line = bisect_right(line_starts, last) if line_starts else 1
-        return {"offset": start, "endOffset": end, "line": max(1, start_line), "endLine": max(1, end_line)}
 
-    raw_spans: list[tuple[int, int]] = []
-    pos = 0
-    while (idx := document.find(quote, pos)) != -1:
-        raw_spans.append((idx, idx + len(quote)))
-        pos = idx + 1
+def _find_reachable_cycle(start: str, graph: dict[str, list[str]]) -> list[str] | None:
+    """检测从 start 出发沿字段引用图是否能到达任意环（含 C -> A <-> B 指向环的节点）。#Created By AiCoding(codex)"""
+    done: set[str] = set()
 
-    if not raw_spans:
-        norm_doc, doc_map = _normalize_ws_with_map(document)
-        norm_quote = _collapse_ws(quote)
-        if norm_quote and norm_doc:
-            pos = 0
-            while (idx := norm_doc.find(norm_quote, pos)) != -1:
-                orig_start = doc_map[idx][0]
-                orig_end = doc_map[idx + len(norm_quote) - 1][1]
-                if not raw_spans or raw_spans[-1] != (orig_start, orig_end):
-                    raw_spans.append((orig_start, orig_end))
-                pos = idx + 1
+    def _dfs(node: str, path: list[str], on_path: set[str]) -> list[str] | None:
+        for nxt in graph.get(node, []):
+            if nxt == node and node != start:
+                return [*path, nxt]
+            if nxt in on_path:
+                return [*path, nxt]
+            if nxt in done:
+                continue
+            hit = _dfs(nxt, [*path, nxt], on_path | {nxt})
+            if hit is not None:
+                return hit
+        done.add(node)
+        return None
 
-    if len(raw_spans) > 1 and value and value.strip():
-        narrowed = [sp for sp in raw_spans if _contains_with_ws(document[sp[0]:sp[1]], value)]
-        if narrowed:
-            raw_spans = narrowed
-
-    return [_span_to_loc(s, e) for s, e in raw_spans]
+    for first in graph.get(start, []):
+        if first == start:
+            continue
+        hit = _dfs(first, [start, first], {start, first})
+        if hit is not None:
+            return hit
+    return None
 
 
 @dataclass
@@ -185,12 +268,104 @@ class EvidenceChecker:
         self.inputs = inputs or {}
         self.document = document or ""
         self.ws = workspace
+        self._doc_index = get_document_index(workspace, self.document)
+
+    def _compute_supported_found_fields(self, report: dict[str, dict[str, Any]]) -> set[str]:
+        """计算有效处于 found 状态且非悬空依赖 not_found 的字段集合（不动点收敛）。#Created By AiCoding(codex)"""
+        supported: set[str] = {
+            f.name
+            for f in self.template.definition.fields
+            if isinstance(report.get(f.name), dict) and report[f.name].get("status") == "found"
+        }
+        changed = True
+        while changed:
+            changed = False
+            for fname in list(supported):
+                fdef = self.template.definition.field(fname)
+                ans = report.get(fname)
+                if fdef is None or not isinstance(ans, dict):
+                    supported.discard(fname)
+                    changed = True
+                    continue
+                raw_ev = ans.get("evidence")
+                if not isinstance(raw_ev, list):
+                    continue
+                ev_dicts = [e for e in raw_ev if isinstance(e, dict)]
+                field_refs = [
+                    str(e.get("name") or "")
+                    for e in ev_dicts
+                    if e.get("type") == "field"
+                    and str(e.get("name") or "") != fname
+                    and self.template.definition.field(str(e.get("name") or "")) is not None
+                ]
+                if not field_refs:
+                    continue
+                if all(ref in supported for ref in field_refs):
+                    continue
+                is_empty_list = fdef.is_list and isinstance(ans.get("value"), list) and len(ans["value"]) == 0
+                if not self._has_supporting_real_source(ev_dicts, supported, is_empty_list=is_empty_list):
+                    supported.discard(fname)
+                    changed = True
+        return supported
+
+    def _has_supporting_real_source(
+        self,
+        evidence: list[dict[str, Any]],
+        supported_fields: set[str],
+        *,
+        is_empty_list: bool = False,
+    ) -> bool:
+        """判断证据列表中是否存在至少一条真实有效支撑源（api/document/非空 input/有效 found 的前置 field）。#Created By AiCoding(codex)"""
+        for e in evidence:
+            t = e.get("type")
+            if t == "api":
+                if is_empty_list:
+                    raw_row = e.get("row")
+                    rid = str(e.get("resultId") or "")
+                    res = self.ws.results.get(rid)
+                    if (
+                        not isinstance(raw_row, bool)
+                        and (raw_row is None or (isinstance(raw_row, int) and raw_row == 0))
+                        and res is not None
+                        and res.ok
+                        and len(res.records) == 0
+                    ):
+                        return True
+                elif self._cell(e)[2] is None:
+                    return True
+            elif t == "document":
+                quote = scalar_to_str(e.get("quote"))
+                if quote.strip() and self._doc_index.locate(quote):
+                    return True
+            elif t == "input":
+                key = e.get("key")
+                if (
+                    isinstance(key, str)
+                    and key in self.inputs
+                    and self.inputs[key] is not None
+                    and scalar_to_str(self.inputs[key]).strip() != ""
+                ):
+                    return True
+            elif t == "field":
+                ref_name = str(e.get("name") or "")
+                if ref_name in supported_fields:
+                    return True
+            elif is_empty_list and t == "tool":
+                call = self.ws.tool_calls.get(str(e.get("callId") or ""))
+                if call and call.ok and isinstance(call.output, dict):
+                    if call.tool == "call_api" and call.output.get("count") == 0 and not isinstance(call.output.get("count"), bool):
+                        return True
+                    if call.tool == "query_result" and call.output.get("total") == 0 and not isinstance(call.output.get("total"), bool):
+                        return True
+        return False
 
     def check(self, report: dict[str, dict[str, Any]]) -> list[FieldIssue]:
         if not isinstance(report, dict):
             return [FieldIssue(f.name, "报告结构不合法") for f in self.template.definition.fields]
         issues: list[FieldIssue] = []
         found_field_refs: dict[str, list[str]] = {}
+        supported_fields = self._compute_supported_found_fields(report)
+
         for f in self.template.definition.fields:
             ans = report.get(f.name)
             if ans is None or not isinstance(ans, dict):
@@ -202,7 +377,11 @@ class EvidenceChecker:
             if status != "found":
                 issues.append(FieldIssue(f.name, f"无效的字段状态 {status!r}，只能是 found 或 not_found"))
                 continue
-            field_msgs = self._check_list_field(f, ans) if f.is_list else self._check_field(f, ans)
+            field_msgs = (
+                self._check_list_field(f, ans, supported_fields=supported_fields)
+                if f.is_list
+                else self._check_field(f, ans, supported_fields=supported_fields)
+            )
             issues.extend(FieldIssue(f.name, m) for m in field_msgs)
             raw_ev = ans.get("evidence") or []
             if isinstance(raw_ev, list):
@@ -211,47 +390,67 @@ class EvidenceChecker:
                     found_field_refs[f.name] = refs
 
         for start in found_field_refs:
-            stack = [(n, [start, n]) for n in found_field_refs.get(start, []) if n != start]
-            visited: set[str] = set()
-            while stack:
-                curr, path = stack.pop()
-                if curr == start:
-                    issues.append(FieldIssue(start, f"字段证据引用存在循环依赖：{' -> '.join(path)}"))
-                    break
-                if curr in visited:
-                    continue
-                visited.add(curr)
-                for nxt in found_field_refs.get(curr, []):
-                    stack.append((nxt, [*path, nxt]))
+            cycle_path = _find_reachable_cycle(start, found_field_refs)
+            if cycle_path is not None:
+                issues.append(FieldIssue(start, f"字段证据引用存在循环依赖：{' -> '.join(cycle_path)}"))
         return issues
 
     # ------------------------------------------------------------------
-    def _check_empty_list_evidence(self, f: FieldDef, evidence: list[dict[str, Any]]) -> list[str]:
+    def _check_empty_list_evidence(
+        self,
+        f: FieldDef,
+        evidence: list[dict[str, Any]],
+        *,
+        supported_fields: set[str],
+    ) -> list[str]:
         """校验合法空列表（status=found, value=[]）的查询证据。
 
         #Created By AiCoding(codex)
-        空列表表示已成功查询数据源但确无匹配记录，仍须提供至少一条查询证据：
-        - type=tool：callId 存在且 ok=True（如 call_api 或 query_result 的 callId），即使 f.evidence=quote 也允许；
-        - type=api：resultId 存在且 res.ok=True（res.records 为空也不因行号越界报错）；
+        空列表表示已成功查询数据源但确无匹配记录，仍须提供至少一条 0 条结果的查询证据：
+        - type=tool：仅允许 ok=True 的 call_api（count=0）或 query_result（total=0），严禁 load_skill 或非零结果；
+        - type=api：仅当 res.ok=True、len(res.records)=0 且 row 省略或为 0 时有效；原表有记录时须改引 query_result；
         - type=document：单据片段真实存在。
-        derive 列表字段可额外附带存在的 input/field 证据，但仍至少要有一条 tool/api/document 查询证据。
+        derive 列表字段可额外附带合法的 input/field 证据，但仍至少要有一条上述查询证据。
         """
         msgs: list[str] = []
         has_query_proof = False
+        allow_nf_field = self._has_supporting_real_source(evidence, supported_fields, is_empty_list=True)
         for e in evidence:
             t = e.get("type")
             if t == "tool":
-                has_query_proof = True
                 cid = str(e.get("callId") or "")
                 call = self.ws.tool_calls.get(cid)
                 if call is None:
                     msgs.append(f"工具调用 {cid} 不存在")
                 elif not call.ok:
                     msgs.append(f"工具调用 {cid} 执行失败，不能作为证据")
+                elif call.tool == "load_skill":
+                    msgs.append("load_skill 仅用于阅读技能说明，不能作为字段证据")
+                elif call.tool not in ("call_api", "query_result"):
+                    msgs.append(
+                        f"工具调用 {cid}（{call.tool}）不是数据查询工具；空列表请引用 count=0 的 call_api 或 total=0 的 query_result 调用"
+                    )
+                elif call.tool == "call_api":
+                    cnt = call.output.get("count") if isinstance(call.output, dict) else None
+                    if isinstance(cnt, bool) or cnt != 0:
+                        msgs.append(
+                            f"工具调用 {cid}（call_api）返回记录数为 {cnt}，不为 0；若经筛选后无匹配记录，请引用 total=0 的 query_result 调用 callId"
+                        )
+                    else:
+                        has_query_proof = True
+                else:
+                    tot = call.output.get("total") if isinstance(call.output, dict) else None
+                    if isinstance(tot, bool) or tot != 0:
+                        msgs.append(f"工具调用 {cid}（query_result）筛选结果数为 {tot}，不为 0，不能作为空列表证据")
+                    else:
+                        has_query_proof = True
             elif t == "api":
-                has_query_proof = True
-                if isinstance(e.get("row"), bool):
+                raw_row = e.get("row")
+                if isinstance(raw_row, bool):
                     msgs.append("row 必须是整数行号，不能是布尔值")
+                    continue
+                if raw_row is not None and (not isinstance(raw_row, int) or raw_row != 0):
+                    msgs.append(f"空列表引用接口证据时 row 只能省略或填 0（当前为 {raw_row!r}）")
                     continue
                 rid = str(e.get("resultId") or "")
                 res = self.ws.results.get(rid)
@@ -259,13 +458,24 @@ class EvidenceChecker:
                     msgs.append(f"接口结果 {rid} 不存在")
                 elif not res.ok:
                     msgs.append(f"接口结果 {rid} 调用失败，不能作为证据")
+                elif len(res.records) > 0:
+                    msgs.append(
+                        f"接口结果 {rid} 原始记录数为 {len(res.records)}（不为 0）；若经条件筛选后无匹配记录，请改引用 total=0 的 query_result 工具 callId"
+                    )
+                else:
+                    has_query_proof = True
             elif t == "document":
-                has_query_proof = True
                 quote = scalar_to_str(e.get("quote"))
-                if not (quote.strip() and locate_quote_in_document(self.document, quote)):
+                if not (quote.strip() and self._doc_index.locate(quote)):
                     msgs.append(f"单据中找不到片段「{_short(quote)}」")
+                else:
+                    has_query_proof = True
             elif f.evidence == "derive" and t in ("input", "field"):
-                msgs.extend(self._check_ref_exists(f, e))
+                msgs.extend(
+                    self._check_ref_exists(
+                        f, e, supported_fields=supported_fields, allow_not_found_field=allow_nf_field
+                    )
+                )
             else:
                 msgs.append(f"空列表（value=[]）不允许使用 {t!r} 类型证据，请引用查询过的 tool、api 或 document 证据")
         if not has_query_proof and not msgs:
@@ -273,7 +483,13 @@ class EvidenceChecker:
                         "若缺少必要入参未查询请提交 status=not_found")
         return msgs
 
-    def _check_list_field(self, f: FieldDef, ans: dict[str, Any]) -> list[str]:
+    def _check_list_field(
+        self,
+        f: FieldDef,
+        ans: dict[str, Any],
+        *,
+        supported_fields: set[str],
+    ) -> list[str]:
         """校验列表字段（type=list）：支持合法空列表（value=[]）与非空列表逐行核对。
 
         #Created By AiCoding(codex)
@@ -291,7 +507,7 @@ class EvidenceChecker:
         if len(evidence) != len(raw_evidence):
             return ["evidence 中存在格式不合法的条目"]
         if len(rows) == 0:
-            return self._check_empty_list_evidence(f, evidence)
+            return self._check_empty_list_evidence(f, evidence, supported_fields=supported_fields)
 
         col_names = f.column_names()
         msgs: list[str] = []
@@ -325,21 +541,64 @@ class EvidenceChecker:
             quotes = [e for e in evidence if e.get("type") in ("api", "document")]
             if not quotes:
                 return ["原文引用字段必须引用接口记录（type=api）或单据片段（type=document）"]
-            sources: list[tuple[Any, str]] = []
+            # #Created By AiCoding(codex) 按 (resultId, row) 去重展开接口行，并在循环外一次性构建 O(1) 集合与拼接检索索引
+            seen_api_rows: set[tuple[str, int]] = set()
+            seen_scalars: set[tuple[type[Any], Any]] = set()
+            unique_vals: list[Any] = []
             for e in quotes:
-                err = self._check_ref_exists(f, e)
+                err = self._check_ref_exists(f, e, supported_fields=supported_fields)
                 if err:
                     msgs.extend(err)
                     continue
                 if e.get("type") == "api":
-                    res = self.ws.results[str(e.get("resultId") or "")]
-                    rec = res.records[e["row"]]
-                    sources.extend((v, scalar_to_str(v)) for v in rec.values() if not isinstance(v, (list, dict)))
+                    rid = str(e.get("resultId") or "")
+                    row_idx = int(e["row"])
+                    if (rid, row_idx) in seen_api_rows:
+                        continue
+                    seen_api_rows.add((rid, row_idx))
+                    rec = self.ws.results[rid].records[row_idx]
+                    for v in rec.values():
+                        if v is not None and not isinstance(v, (list, dict)):
+                            key = (type(v), v)
+                            if key not in seen_scalars:
+                                seen_scalars.add(key)
+                                unique_vals.append(v)
                 else:
                     quote = scalar_to_str(e.get("quote"))
-                    sources.append((quote, quote))
+                    if quote:
+                        key = (str, quote)
+                        if key not in seen_scalars:
+                            seen_scalars.add(key)
+                            unique_vals.append(quote)
             if msgs:
                 return msgs
+
+            str_set: set[str] = set()
+            norm_set: set[str] = set()
+            bool_any_set: set[str] = set()
+            bool_only_set: set[str] = set()
+            non_bool_vals: list[Any] = []
+            for v in unique_vals:
+                s = scalar_to_str(v)
+                if s:
+                    str_set.add(s)
+                    ns = _collapse_ws(s)
+                    if ns:
+                        norm_set.add(ns)
+                    low = s.strip().lower()
+                    if low in ("true", "false"):
+                        bool_any_set.add(low)
+                        if isinstance(v, bool):
+                            bool_only_set.add(low)
+                if not isinstance(v, bool):
+                    non_bool_vals.append(v)
+
+            joined_src = "\x00".join(s for s in str_set if "\x00" not in s)
+            nul_srcs = [s for s in str_set if "\x00" in s]
+            joined_norm = "\x00".join(ns for ns in norm_set if "\x00" not in ns)
+            nul_norms = [ns for ns in norm_set if "\x00" in ns]
+            num_set: set[Decimal] | None = None
+
             for i, row in enumerate(rows):
                 for col in f.columns:
                     if col.type == "enum":
@@ -348,18 +607,57 @@ class EvidenceChecker:
                     cell = scalar_to_str(raw_cell)
                     if not cell.strip():
                         continue
-                    if not any(_contains_with_ws(src, cell) or _values_equivalent(raw_cell, raw_src)
-                               for raw_src, src in sources):
-                        msgs.append(f"第 {i + 1} 行（value[{i}]）列「{col.name}」的值「{_short(cell)}」"
-                                    "没有逐字出现在引用的任何接口记录或单据片段中；请为该行补充出处证据")
+                    # 1) O(1) 原文全等或单次拼接子串扫描（命中时免调 _collapse_ws）
+                    if cell in str_set:
+                        continue
+                    if ("\x00" not in cell and cell in joined_src) or any(
+                        cell in s for s in (str_set if "\x00" in cell else nul_srcs)
+                    ):
+                        continue
+                    # 2) O(1) 空白折叠全等或单次折叠子串扫描
+                    norm_cell = _collapse_ws(cell)
+                    if norm_cell:
+                        if norm_cell in norm_set:
+                            continue
+                        if ("\x00" not in norm_cell and norm_cell in joined_norm) or any(
+                            norm_cell in ns for ns in (norm_set if "\x00" in norm_cell else nul_norms)
+                        ):
+                            continue
+                    # 3) 布尔大小写兼容与 Decimal 数值等价兜底（完全对齐 _values_equivalent 语义）
+                    low_cell = cell.strip().lower()
+                    if isinstance(raw_cell, bool):
+                        if low_cell in bool_any_set:
+                            continue
+                    else:
+                        if low_cell in bool_only_set:
+                            continue
+                        cell_num = _as_decimal(raw_cell)
+                        if cell_num is not None:
+                            if num_set is None:
+                                num_set = {d for v in non_bool_vals if (d := _as_decimal(v)) is not None}
+                            if cell_num in num_set:
+                                continue
+                    msgs.append(f"第 {i + 1} 行（value[{i}]）列「{col.name}」的值「{_short(cell)}」"
+                                "没有逐字出现在引用的任何接口记录或单据片段中；请为该行补充出处证据")
             return msgs
 
+        allow_nf_field = self._has_supporting_real_source(evidence, supported_fields, is_empty_list=False)
         for e in evidence:
-            msgs.extend(self._check_ref_exists(f, e))
+            msgs.extend(
+                self._check_ref_exists(
+                    f, e, supported_fields=supported_fields, allow_not_found_field=allow_nf_field
+                )
+            )
         return msgs
 
     # ------------------------------------------------------------------
-    def _check_field(self, f: FieldDef, ans: dict[str, Any]) -> list[str]:
+    def _check_field(
+        self,
+        f: FieldDef,
+        ans: dict[str, Any],
+        *,
+        supported_fields: set[str],
+    ) -> list[str]:
         raw_value = ans.get("value")
         value = scalar_to_str(raw_value)
         if raw_value is None or value.strip() == "":
@@ -399,13 +697,21 @@ class EvidenceChecker:
                 elif not _values_equivalent(raw_value, self.inputs[key]):
                     msgs.append(f"值「{_short(value)}」与入参「{key}」的值「{_short(self.inputs[key])}」不一致")
         else:
+            allow_nf_field = self._has_supporting_real_source(evidence, supported_fields, is_empty_list=False)
             value_tool_outputs: list[Any] = []
             for e in evidence:
-                msgs.extend(self._check_ref_exists(f, e))
+                msgs.extend(
+                    self._check_ref_exists(
+                        f, e, supported_fields=supported_fields, allow_not_found_field=allow_nf_field
+                    )
+                )
                 if e.get("type") == "tool":
                     call = self.ws.tool_calls.get(str(e.get("callId") or ""))
                     if call and call.ok and call.tool in VALUE_TOOLS and isinstance(call.output, dict):
-                        value_tool_outputs.append(call.output.get("value", ""))
+                        if "value" in call.output:
+                            value_tool_outputs.append(call.output.get("value", ""))
+                        if isinstance(call.output.get("values"), list):
+                            value_tool_outputs.extend(call.output["values"])
             if value_tool_outputs and not any(_values_equivalent(raw_value, out) for out in value_tool_outputs):
                 shown = [scalar_to_str(o) for o in value_tool_outputs]
                 msgs.append(f"值「{value}」与引用的工具输出 {shown} 不一致；请直接使用工具输出")
@@ -426,7 +732,7 @@ class EvidenceChecker:
         quote = scalar_to_str(e.get("quote"))
         if not quote.strip():
             return ["单据引用缺少 quote"]
-        if not locate_quote_in_document(self.document, quote):
+        if not self._doc_index.locate(quote):
             return [f"单据中找不到片段「{_short(quote)}」，请从单据原文逐字复制"]
         if f.quoteWhole and _normalize_line_endings(value) != _normalize_line_endings(quote):
             return [f"必须整段原样引用：值应与引用片段「{_short(quote)}」完全一致"]
@@ -451,19 +757,30 @@ class EvidenceChecker:
         raw_cell = rec[col]
         return raw_cell, scalar_to_str(raw_cell), None
 
-    def _check_ref_exists(self, f: FieldDef, e: dict[str, Any]) -> list[str]:
+    def _check_ref_exists(
+        self,
+        f: FieldDef,
+        e: dict[str, Any],
+        *,
+        supported_fields: set[str] | None = None,
+        allow_not_found_field: bool = False,
+    ) -> list[str]:
         t = e.get("type")
         if t == "api":
             _, _, err = self._cell(e)
             return [err] if err else []
         if t == "document":
             quote = scalar_to_str(e.get("quote"))
-            return [] if quote.strip() and locate_quote_in_document(self.document, quote) else [
+            return [] if quote.strip() and self._doc_index.locate(quote) else [
                 f"单据中找不到片段「{_short(quote)}」"
             ]
         if t == "input":
             key = e.get("key")
-            return [] if isinstance(key, str) and key in self.inputs else [f"入参「{key}」没有传入"]
+            if not isinstance(key, str) or key not in self.inputs:
+                return [f"入参「{key}」没有传入"]
+            if self.inputs[key] is None or scalar_to_str(self.inputs[key]).strip() == "":
+                return [f"入参「{key}」为空，不能作为 found 证据"]
+            return []
         if t == "tool":
             cid = str(e.get("callId") or "")
             call = self.ws.tool_calls.get(cid)
@@ -471,12 +788,18 @@ class EvidenceChecker:
                 return [f"工具调用 {cid} 不存在"]
             if not call.ok:
                 return [f"工具调用 {cid} 执行失败，不能作为证据"]
+            if call.tool == "load_skill":
+                return ["load_skill 仅用于阅读技能说明，不能作为字段证据"]
             return []
         if t == "field":
             target_name = str(e.get("name") or "")
             if target_name == f.name:
                 return [f"字段「{f.name}」不能引用自身作为证据"]
-            return [] if self.template.definition.field(target_name) else [f"字段「{target_name}」不存在"]
+            if not self.template.definition.field(target_name):
+                return [f"字段「{target_name}」不存在"]
+            if supported_fields is not None and target_name not in supported_fields and not allow_not_found_field:
+                return [f"引用的前置字段「{target_name}」状态为 not_found，不能作为 found 结论的证据"]
+            return []
         return [f"未知的证据类型 {t}"]
 
 

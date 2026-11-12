@@ -444,3 +444,158 @@ def test_system_prompt_historical_versions_rollback_and_new_api_default_path(con
         api_yaml = client.get("/api/v1/apis/queryUserProfile", headers=h).json()["yamlText"]
         parsed = yaml.safe_load(api_yaml)
         assert parsed["response"]["records"]["path"] == "operation_out.content"
+
+
+def test_api_key_settings_hot_reload_masking_rollback_and_legacy_fallback(
+    container,
+    case_c01: dict[str, Any],
+    tmp_path: Path,
+):
+    """验证 /api/v1/settings/api-key* 鉴权、重新生成/修改/清空对 reports 与 chat 免重启热生效、历史脱敏及旧配置兼容。"""
+    report_body = {
+        "templateId": 1001,
+        "params": case_c01["inputs"],
+        "document": case_c01["documentText"],
+    }
+    chat_body = {
+        "userId": "u_hot_key",
+        "orderId": "ORD_HOT_KEY_01",
+        "inputs": {"手机号码": case_c01["inputs"]["手机号码"]},
+        "document": "测试单据",
+    }
+
+    with _make_client(container) as client:
+        # 1. 未登录访问 /api/v1/settings/api-key* 全部返回 401
+        assert client.get("/api/v1/settings/api-key").status_code == 401
+        assert client.put("/api/v1/settings/api-key", json={"apiKeys": "k1"}).status_code == 401
+        assert client.post("/api/v1/settings/api-key/regenerate").status_code == 401
+
+        h = _login(client)
+
+        # 2. 初始状态读取 GET /api/v1/settings/api-key（来自 conftest 的 upstream-key）
+        r_init = client.get("/api/v1/settings/api-key", headers=h)
+        assert r_init.status_code == 200, r_init.text
+        init_info = r_init.json()
+        assert init_info == {
+            "configured": True,
+            "apiKeys": "upstream-key",
+            "primaryKey": "upstream-key",
+            "masked": "ups***-key",
+            "count": 1,
+            "activeRev": "c1",
+        }
+        assert client.post("/api/v1/reports", json=report_body, headers={"X-API-Key": "upstream-key"}).status_code == 200
+        assert client.post("/api/v1/chat/sessions", json=chat_body, headers={"X-API-Key": "upstream-key"}).status_code == 200
+
+        # 3. POST /api/v1/settings/api-key/regenerate：生成新密钥，旧 Key 立即 401，新 Key 立即 200
+        r_regen = client.post("/api/v1/settings/api-key/regenerate", headers=h, json={"note": "定期轮换密钥"})
+        assert r_regen.status_code == 200, r_regen.text
+        regen_data = r_regen.json()
+        new_key = regen_data["primaryKey"]
+        assert new_key.startswith("ra_") and len(new_key) > 20
+        assert regen_data["configured"] is True
+        assert regen_data["apiKeys"] == new_key
+        assert regen_data["count"] == 1
+        assert regen_data["activeRev"] == "c2"
+        assert regen_data["runtimeState"]["activeRev"] == "c2"
+        assert regen_data["runtimeState"]["config"]["hasReportApiKeys"] is True
+        assert regen_data["runtimeState"]["config"]["reportApiKeyCount"] == 1
+        assert "reportApiKeys" not in regen_data["runtimeState"]["config"]
+
+        # 旧 Key 立即失效（401），新 Key 立即生效（200）
+        assert client.post("/api/v1/reports", json=report_body, headers={"X-API-Key": "upstream-key"}).status_code == 401
+        assert client.post("/api/v1/chat/sessions", json=chat_body, headers={"X-API-Key": "upstream-key"}).status_code == 401
+        assert client.post("/api/v1/reports", json=report_body, headers={"X-API-Key": new_key}).status_code == 200
+        assert client.post(
+            "/api/v1/chat/sessions",
+            json={**chat_body, "orderId": "ORD_HOT_KEY_02"},
+            headers={"X-API-Key": new_key},
+        ).status_code == 200
+
+        # 4. 非法字符（含空白或控制字符）返回 400 INVALID_RUNTIME_CONFIG 且不破坏现有密钥
+        for bad_raw in ("bad key with space", "key1\nkey2", "key1\x00bad"):
+            r_bad = client.put("/api/v1/settings/api-key", headers=h, json={"apiKeys": bad_raw})
+            assert r_bad.status_code == 400 and r_bad.json()["code"] == "INVALID_RUNTIME_CONFIG"
+        assert container.runtime_config.active_rev() == "c2"
+
+        # 5. PUT /api/v1/settings/api-key 手动配置多把逗号分隔密钥
+        r_multi = client.put(
+            "/api/v1/settings/api-key",
+            headers=h,
+            json={"apiKeys": "  key_alpha_12345 , key_beta_67890  ", "note": "配置双密钥灰度"},
+        )
+        assert r_multi.status_code == 200, r_multi.text
+        multi_data = r_multi.json()
+        assert multi_data["configured"] is True
+        assert multi_data["apiKeys"] == "key_alpha_12345,key_beta_67890"
+        assert multi_data["primaryKey"] == "key_alpha_12345"
+        assert multi_data["masked"] == "key***2345, key***7890"
+        assert multi_data["count"] == 2
+        assert multi_data["activeRev"] == "c3"
+
+        assert client.post("/api/v1/reports", json=report_body, headers={"X-API-Key": new_key}).status_code == 401
+        assert client.post("/api/v1/reports", json=report_body, headers={"X-API-Key": "key_alpha_12345"}).status_code == 200
+        assert client.post(
+            "/api/v1/chat/sessions",
+            json={**chat_body, "orderId": "ORD_HOT_KEY_03"},
+            headers={"X-API-Key": "key_beta_67890"},
+        ).status_code == 200
+
+        # 6. PUT /api/v1/settings/api-key 清空密钥 -> 立即进入免鉴权放行模式
+        r_clear = client.put("/api/v1/settings/api-key", headers=h, json={"apiKeys": " ,  ", "note": "清空免鉴权"})
+        assert r_clear.status_code == 200, r_clear.text
+        clear_data = r_clear.json()
+        assert clear_data["configured"] is False
+        assert clear_data["apiKeys"] == ""
+        assert clear_data["primaryKey"] == ""
+        assert clear_data["masked"] == ""
+        assert clear_data["count"] == 0
+        assert clear_data["activeRev"] == "c4"
+
+        assert client.post("/api/v1/reports", json=report_body).status_code == 200
+        assert client.post("/api/v1/chat/sessions", json={**chat_body, "orderId": "ORD_HOT_KEY_04"}).status_code == 200
+
+        # 7. 验证 /settings/runtime 与 /settings/runtime/revisions 绝不泄露任何明文 API Key
+        rt_text = client.get("/api/v1/settings/runtime", headers=h).text
+        revs = client.get("/api/v1/settings/runtime/revisions", headers=h).json()
+        revs_text = json.dumps(revs, ensure_ascii=False)
+        for secret_plain in ("upstream-key", new_key, "key_alpha_12345", "key_beta_67890"):
+            assert secret_plain not in rt_text
+            assert secret_plain not in revs_text
+        c3_rev = next(x for x in revs if x["rev"] == "c3")
+        assert c3_rev["changedKeys"] == ["reportApiKeys"]
+        assert c3_rev["config"]["reportApiKeysMasked"] == "key***2345, key***7890"
+        assert c3_rev["config"]["reportApiKeyCount"] == 2
+        assert "reportApiKeys" not in c3_rev["config"]
+
+        # 8. 回退至 c1 后，立即恢复为仅 upstream-key 有效（免鉴权立即关闭）
+        r_rb = client.post(
+            "/api/v1/settings/runtime/rollback",
+            headers=h,
+            json={"targetRev": "c1", "reason": "恢复初始调用密钥"},
+        )
+        assert r_rb.status_code == 200, r_rb.text
+        assert client.post("/api/v1/reports", json=report_body).status_code == 401
+        assert client.post("/api/v1/reports", json=report_body, headers={"X-API-Key": "upstream-key"}).status_code == 200
+
+    # 9. 兼容旧版 current.json（缺失 reportApiKeys 键）自动回退到 fallback_settings 并归一化保存
+    legacy_dir = tmp_path / "legacy_data"
+    legacy_settings = Settings(
+        _env_file=None,
+        data_dir=legacy_dir,
+        gateway_mode="mock",
+        llm_api_key="test",
+        admin_token_secret="test-secret",
+        report_api_keys="  legacy-env-key-001 , legacy-env-key-002  ",
+    )
+    c_legacy = build_container(legacy_settings, model=scripted_model())
+    cur_file = c_legacy.layout.config / "runtime" / "current.json"
+    cur_doc = json.loads(cur_file.read_text(encoding="utf-8"))
+    cur_doc["config"].pop("reportApiKeys", None)
+    cur_file.write_text(json.dumps(cur_doc, ensure_ascii=False), encoding="utf-8")
+
+    c_reloaded = build_container(legacy_settings, model=scripted_model())
+    assert c_reloaded.runtime_config.active().config.reportApiKeys == "legacy-env-key-001,legacy-env-key-002"
+    assert c_reloaded.settings.report_api_key_set() == {"legacy-env-key-001", "legacy-env-key-002"}
+    upgraded_doc = json.loads(cur_file.read_text(encoding="utf-8"))
+    assert upgraded_doc["config"]["reportApiKeys"] == "legacy-env-key-001,legacy-env-key-002"

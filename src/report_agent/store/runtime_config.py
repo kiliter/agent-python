@@ -70,6 +70,7 @@ _ORDERED_FIELDS: tuple[str, ...] = (
     "gatewayAccessToken",
     "gatewayXmlStyle",
     "gatewayConnectTimeoutS",
+    "reportApiKeys",
 )
 
 
@@ -90,6 +91,21 @@ def mask_secret(value: str | None) -> str:
     if len(value) <= 10:
         return f"{value[:2]}***{value[-2:]}"
     return f"{value[:3]}***{value[-4:]}"
+
+
+def split_api_keys(raw: str | None) -> list[str]:
+    """按逗号切分调用 API Key 字符串，返回去首尾空白且保序去重的非空列表。"""
+    if not raw or not isinstance(raw, str):
+        return []
+    return list(dict.fromkeys(k.strip() for k in raw.split(",") if k.strip()))
+
+
+def mask_api_keys(raw: str | None) -> str:
+    """按逗号切分非空 API Key，逐项脱敏后以 ', ' 连接；为空返回 ''。"""
+    keys = split_api_keys(raw)
+    if not keys:
+        return ""
+    return ", ".join(mask_secret(k) for k in keys)
 
 
 def _chmod_safe(path_or_fd: Path | int, mode: int) -> None:
@@ -267,6 +283,31 @@ def _resolve_secret(raw: Any, current_secret: str, clear_flag: bool, label: str,
     return cleaned
 
 
+def _resolve_api_keys(raw: Any, current_keys: str, clear_flag: bool, errors: list[str]) -> str:
+    if clear_flag:
+        return ""
+    if raw is None:
+        return current_keys
+    if not isinstance(raw, str):
+        errors.append("调用凭证 reportApiKeys 必须是字符串")
+        return current_keys
+    if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", raw):
+        errors.append("调用凭证 reportApiKeys 包含非法控制字符")
+        return current_keys
+    cleaned = raw.strip()
+    masked_current = mask_api_keys(current_keys)
+    if not cleaned or cleaned == "***" or cleaned == masked_current:
+        return current_keys
+    keys = split_api_keys(cleaned)
+    if not keys or ", ".join(keys) == masked_current:
+        return current_keys
+    for k in keys:
+        if _WHITESPACE_OR_CTRL_RE.search(k):
+            errors.append("调用凭证 reportApiKeys 单把密钥不能包含空白或控制字符")
+            return current_keys
+    return ",".join(keys)
+
+
 @dataclass(frozen=True)
 class RuntimeConfig:
     """受版本化热更新管理的全部运行参数。"""
@@ -299,6 +340,8 @@ class RuntimeConfig:
     gatewayAccessToken: str
     gatewayXmlStyle: XmlStyle
     gatewayConnectTimeoutS: float
+    # Upstream & Embed Auth
+    reportApiKeys: str = ""
 
     @classmethod
     def from_settings(cls, s: Settings) -> RuntimeConfig:
@@ -329,6 +372,7 @@ class RuntimeConfig:
             gatewayAccessToken=s.gateway_access_token.get_secret_value() if s.gateway_access_token else "",
             gatewayXmlStyle=s.gateway_xml_style,
             gatewayConnectTimeoutS=float(s.gateway_connect_timeout_s),
+            reportApiKeys=",".join(split_api_keys(s.report_api_keys)),
         )
 
     @classmethod
@@ -366,6 +410,7 @@ class RuntimeConfig:
             gatewayAccessToken=str(merged["gatewayAccessToken"] or ""),
             gatewayXmlStyle=merged["gatewayXmlStyle"] if merged["gatewayXmlStyle"] in _VALID_XML_STYLES else base.gatewayXmlStyle,
             gatewayConnectTimeoutS=float(merged["gatewayConnectTimeoutS"]),
+            reportApiKeys=",".join(split_api_keys(str(merged["reportApiKeys"] or ""))),
         )
 
     def to_storage_dict(self) -> dict[str, Any]:
@@ -374,6 +419,7 @@ class RuntimeConfig:
 
     def to_public_dict(self) -> dict[str, Any]:
         """转换为管理端公开字典（绝不暴露任何明文密钥）。"""
+        keys = split_api_keys(self.reportApiKeys)
         return {
             "llmBaseUrl": self.llmBaseUrl,
             "hasLlmApiKey": bool(self.llmApiKey),
@@ -403,6 +449,9 @@ class RuntimeConfig:
             "gatewayAccessTokenMasked": mask_secret(self.gatewayAccessToken),
             "gatewayXmlStyle": self.gatewayXmlStyle,
             "gatewayConnectTimeoutS": self.gatewayConnectTimeoutS,
+            "hasReportApiKeys": bool(keys),
+            "reportApiKeysMasked": mask_api_keys(self.reportApiKeys),
+            "reportApiKeyCount": len(keys),
         }
 
     def to_effective_settings(self, base_settings: Settings) -> Settings:
@@ -434,6 +483,7 @@ class RuntimeConfig:
                 "gateway_access_token": SecretStr(self.gatewayAccessToken),
                 "gateway_xml_style": self.gatewayXmlStyle,
                 "gateway_connect_timeout_s": self.gatewayConnectTimeoutS,
+                "report_api_keys": self.reportApiKeys,
             }
         )
 
@@ -499,6 +549,11 @@ class RuntimeConfig:
         ):
             errors.append("网关连接超时 gatewayConnectTimeoutS 必须大于 0")
 
+        for k in split_api_keys(self.reportApiKeys):
+            if _WHITESPACE_OR_CTRL_RE.search(k):
+                errors.append("调用凭证 reportApiKeys 单把密钥不能包含空白或控制字符")
+                break
+
         if errors:
             raise RuntimeConfigValidationError(errors)
 
@@ -509,6 +564,7 @@ class RuntimeConfig:
         clear_llm_api_key: bool = False,
         clear_gateway_app_id: bool = False,
         clear_gateway_access_token: bool = False,
+        clear_report_api_keys: bool = False,
     ) -> RuntimeConfig:
         """在当前配置上应用局部或全量更新补丁，处理密钥保留/清空并做严格类型与边界校验。"""
         errors: list[str] = []
@@ -655,6 +711,12 @@ class RuntimeConfig:
             "gatewayAccessToken",
             errors,
         )
+        report_api_keys = _resolve_api_keys(
+            patch.get("reportApiKeys"),
+            self.reportApiKeys,
+            clear_report_api_keys,
+            errors,
+        )
 
         if errors:
             raise RuntimeConfigValidationError(errors)
@@ -685,6 +747,7 @@ class RuntimeConfig:
             gatewayAccessToken=gateway_access_token,
             gatewayXmlStyle=xml_style,
             gatewayConnectTimeoutS=connect_timeout_s,
+            reportApiKeys=report_api_keys,
         )
         candidate.validate()
         return candidate
@@ -869,6 +932,24 @@ class RuntimeConfigStore:
                 summary = str(cur.get("summary") or "")
                 note = str(cur.get("note") or "")
                 changed_keys = [str(k) for k in (cur.get("changedKeys") or []) if isinstance(k, str)]
+                # 兼容旧版 current.json 缺失新增字段（如 reportApiKeys）时归一化回写保存
+                normalized_dict = cfg.to_storage_dict()
+                if cur["config"] != normalized_dict:
+                    _atomic_write_json_600(
+                        self.current_path,
+                        {
+                            "activeRev": rev,
+                            "n": n,
+                            "time": ts,
+                            "operator": op,
+                            "type": type_label,
+                            "source": source,
+                            "summary": summary,
+                            "note": note,
+                            "changedKeys": changed_keys,
+                            "config": normalized_dict,
+                        },
+                    )
                 # 确保对应的不可变版本快照也存在（兼容崩溃恢复）
                 rev_path = self._revision_path(rev)
                 if not rev_path.exists():
@@ -884,7 +965,7 @@ class RuntimeConfigStore:
                             "summary": summary,
                             "note": note,
                             "changedKeys": changed_keys,
-                            "config": cfg.to_storage_dict(),
+                            "config": normalized_dict,
                         },
                     )
                 _chmod_safe(self.current_path, 0o600)
@@ -1019,6 +1100,7 @@ class RuntimeConfigStore:
         clear_llm_api_key: bool = False,
         clear_gateway_app_id: bool = False,
         clear_gateway_access_token: bool = False,
+        clear_report_api_keys: bool = False,
         note: str = "",
     ) -> tuple[RuntimeSnapshot, bool]:
         """校验并持久化新运行配置版本；若无任何键值变化则返回 (当前快照, False)。"""
@@ -1029,6 +1111,7 @@ class RuntimeConfigStore:
                 clear_llm_api_key=clear_llm_api_key,
                 clear_gateway_app_id=clear_gateway_app_id,
                 clear_gateway_access_token=clear_gateway_access_token,
+                clear_report_api_keys=clear_report_api_keys,
             )
             changed_keys = current.config.diff_keys(new_cfg)
             if not changed_keys:

@@ -23,20 +23,19 @@ updated: 2026-11-12
 
 仅针对 `business-sms` 选定的**那唯一一条** `订购短信` 原文做不清洗的精确子串判断（可调用 `text_contains(target=关键词, text=订购短信原文, normalize=false)` 辅助核验），按固定顺序命中即停：
 
-| 顺序 | `订购短信` 原文条件 | `受理渠道` 结论 |
-|------|---------------------|-----------------|
-| 1 | 包含 `热线渠道` | `热线` |
-| 2 | 包含 `线上渠道` | `掌上营业厅` |
-| 3 | 以上均不包含 | `其他` |
-| — | 上游 `订购短信` 为 `not_found`（未查到、网关失败或入参缺失） | `其他` |
+| 顺序 | `订购短信` 原文条件 | `受理渠道` 提交结果与渲染结论 |
+|------|---------------------|-------------------------------|
+| 1 | 包含 `热线渠道` | `status="found"`, `value="热线"` |
+| 2 | 包含 `线上渠道` | `status="found"`, `value="掌上营业厅"` |
+| 3 | 以上均不包含 | `status="found"`, `value="其他"` |
+| — | 上游 `订购短信` 为 `not_found`（未查到、网关失败或入参缺失） | 提交 `status="not_found", value=null`（由模板 `whenMissing: value, defaultValue: "其他"` 自动输出 `"其他"`） |
 
 > 注意：`热线渠道` 优先级高于 `线上渠道`；绝不可去非订购短信的其它短信记录中寻找渠道词。
 
 ## 3. 证据提交要求
 
-- 本字段总是有确定枚举值（兜底为 `其他`），正常情况下始终提交 `status="found"`；
-- 必带字段级依赖证据 `{"type": "field", "name": "订购短信"}`；
-- 当 `订购短信` 已找到时，一并附上该条短信的接口记录证据 `{"type": "api", "resultId": ..., "row": ..., "column": "smsContent"}`（若调用了 `text_contains` 可附加其 `callId`）。若上游 `订购短信` 事后因证据校验不合规被系统降级，`_cascade_degraded_fields` 会沿 `field` 证据自动级联处理，模板缺省值 `其他` 仍保证渲染安全。
+- **当 `订购短信` 为 `found` 时**：提交 `status="found"`，在 `evidence` 中同时附上 `{"type": "field", "name": "订购短信"}` 以及该条订购短信记录 `{"type": "api", "resultId": ..., "row": ..., "column": "smsContent"}`（若调用了 `text_contains` 可附加其 `callId`）；
+- **当 `订购短信` 为 `not_found` 时**：直接提交 `status="not_found", value=null`（`evidence: []`），严禁将 `not_found` 的前置字段作为 `found` 结论的唯一证据提交（否则会被 `EvidenceChecker` 拦截）。模板字段配置的 `whenMissing: value, defaultValue: "其他"` 保证报告依然稳定按 `"其他"` 分支渲染且不会误标 `PARTIAL`；若上游 `订购短信` 交卷时因证据校验不合规被系统降级，`_cascade_degraded_fields` 也会沿 `field` 证据自动级联降级。
 
 ## 相关页面
 

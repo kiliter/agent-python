@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import secrets
 from typing import Any, Literal
 
 import yaml
@@ -19,7 +20,12 @@ from ..domain.skill import build_skill_markdown
 from ..gateway import unified_xml
 from ..store.fsutil import fmt_time
 from ..store.layout import API_NAME_RE, REV_RE, SKILL_ID_RE
-from ..store.runtime_config import RuntimeConfigStore, RuntimeConfigValidationError
+from ..store.runtime_config import (
+    RuntimeConfigStore,
+    RuntimeConfigValidationError,
+    mask_api_keys,
+    split_api_keys,
+)
 from ..store.service import SP_REF, InvalidResource, api_ref, skill_ref
 from .auth import require_user
 from .common import bad_request, container, not_found, operator
@@ -559,7 +565,7 @@ def publish_system_prompt(request: Request, body: SysPromptBody) -> dict[str, An
     """发布系统提示词。传入 sysPromptText 时先保存为草稿再发布。"""
     c = container(request)
     if body.sysPromptText is not None:
-        c.service.save_system_prompt(body.sysPromptText, operator(request))
+        c.service.save_system_prompt(body.sysPromptText, operator(request), body.revision)
     if not c.drafts.exists(SP_REF):
         raise bad_request("没有需要发布的草稿", "NO_DRAFT")
     result = c.service.publish_draft(SP_REF, operator(request), body.note)
@@ -658,6 +664,7 @@ async def update_runtime_settings(request: Request, body: Any = Body(default=Non
     clear_llm = _flag_bool(patch.get("clearLlmApiKey"), "clearLlmApiKey")
     clear_app_id = _flag_bool(patch.get("clearGatewayAppId"), "clearGatewayAppId")
     clear_token = _flag_bool(patch.get("clearGatewayAccessToken"), "clearGatewayAccessToken")
+    clear_report_keys = _flag_bool(patch.get("clearReportApiKeys"), "clearReportApiKeys")
 
     c = container(request)
     op = operator(request)
@@ -670,10 +677,12 @@ async def update_runtime_settings(request: Request, body: Any = Body(default=Non
             clear_llm_api_key=clear_llm,
             clear_gateway_app_id=clear_app_id,
             clear_gateway_access_token=clear_token,
+            clear_report_api_keys=clear_report_keys,
             note=raw_note or "",
         )
         if did_change:
             c.apply_runtime_config()
+            request.app.state.report_keys = c.settings.report_api_key_set()
         return store.public_state(), did_change
 
     try:
@@ -707,6 +716,7 @@ async def rollback_runtime_settings(request: Request, body: RuntimeRollbackBody)
         store = _runtime_store(c)
         store.rollback(body.targetRev, body.reason, op)
         c.apply_runtime_config()
+        request.app.state.report_keys = c.settings.report_api_key_set()
         return {**store.public_state(), "targetRev": body.targetRev.strip()}
 
     try:
@@ -738,6 +748,7 @@ async def sync_runtime_settings_from_env(request: Request, body: RuntimeSyncEnvB
         )
         if did_change:
             c.apply_runtime_config()
+            request.app.state.report_keys = c.settings.report_api_key_set()
         return store.public_state(), did_change
 
     try:
@@ -747,3 +758,104 @@ async def sync_runtime_settings_from_env(request: Request, body: RuntimeSyncEnvB
     if changed and hasattr(c.gateway, "aclose_retired"):
         await c.gateway.aclose_retired()
     return state
+
+
+# ============================================================================ 上游与嵌入调用凭证（X-API-Key）
+def _api_key_payload(snap) -> dict[str, Any]:
+    cfg = snap.config
+    keys = split_api_keys(cfg.reportApiKeys)
+    return {
+        "configured": bool(keys),
+        "apiKeys": cfg.reportApiKeys,
+        "primaryKey": keys[0] if keys else "",
+        "masked": mask_api_keys(cfg.reportApiKeys),
+        "count": len(keys),
+        "activeRev": snap.rev,
+    }
+
+
+class ApiKeyUpdateBody(BaseModel):
+    apiKeys: str = ""
+    note: str = ""
+
+
+class ApiKeyRegenerateBody(BaseModel):
+    note: str = ""
+
+
+@router.get("/settings/api-key")
+def get_api_key_settings(request: Request) -> dict[str, Any]:
+    """读取当前生效的上游与聊天嵌入调用 API Key（受管理端登录态保护）。"""
+    snap = _runtime_store(container(request)).active()
+    return _api_key_payload(snap)
+
+
+@router.put("/settings/api-key")
+async def update_api_key_settings(request: Request, body: ApiKeyUpdateBody) -> dict[str, Any]:
+    """修改或清空调用 API Key，持久化至运行配置并免重启立即热生效。"""
+    c = container(request)
+    op = operator(request)
+    raw = body.apiKeys or ""
+    clean_note = (body.note or "").strip()
+
+    def _do_update_key() -> tuple[dict[str, Any], bool]:
+        store = _runtime_store(c)
+        has_ctrl = bool(re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", raw))
+        cleaned_items = split_api_keys(raw)
+        if not cleaned_items and not has_ctrl:
+            snap, did_change = store.update(
+                {},
+                op,
+                clear_report_api_keys=True,
+                note=clean_note or "清空调用 API Key",
+            )
+        else:
+            snap, did_change = store.update(
+                {"reportApiKeys": raw},
+                op,
+                note=clean_note or "更新调用 API Key",
+            )
+        if did_change:
+            c.apply_runtime_config()
+            request.app.state.report_keys = c.settings.report_api_key_set()
+        return {**_api_key_payload(snap), "runtimeState": store.public_state()}, did_change
+
+    try:
+        out, changed = await asyncio.to_thread(_do_update_key)
+    except RuntimeConfigValidationError as exc:
+        raise bad_request(str(exc), "INVALID_RUNTIME_CONFIG", errors=exc.errors) from exc
+    if changed and hasattr(c.gateway, "aclose_retired"):
+        await c.gateway.aclose_retired()
+    return out
+
+
+@router.post("/settings/api-key/regenerate")
+async def regenerate_api_key_settings(
+    request: Request,
+    body: ApiKeyRegenerateBody | None = Body(default=None),
+) -> dict[str, Any]:
+    """重新生成高强度调用 API Key，原密钥免重启立即失效。"""
+    c = container(request)
+    op = operator(request)
+    clean_note = (body.note if body else "").strip()
+    new_key = f"ra_{secrets.token_urlsafe(24)}"
+
+    def _do_regenerate() -> tuple[dict[str, Any], bool]:
+        store = _runtime_store(c)
+        snap, did_change = store.update(
+            {"reportApiKeys": new_key},
+            op,
+            note=clean_note or "重新生成调用 API Key",
+        )
+        if did_change:
+            c.apply_runtime_config()
+            request.app.state.report_keys = c.settings.report_api_key_set()
+        return {**_api_key_payload(snap), "runtimeState": store.public_state()}, did_change
+
+    try:
+        out, changed = await asyncio.to_thread(_do_regenerate)
+    except RuntimeConfigValidationError as exc:
+        raise bad_request(str(exc), "INVALID_RUNTIME_CONFIG", errors=exc.errors) from exc
+    if changed and hasattr(c.gateway, "aclose_retired"):
+        await c.gateway.aclose_retired()
+    return out

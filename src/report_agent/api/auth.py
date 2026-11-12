@@ -105,11 +105,12 @@ class UserStore:
 
 
 class TokenService:
-    """签发与校验会话令牌。"""
+    """签发与校验会话令牌（带吊销表容量上限与过期清理兜底）。"""
 
-    def __init__(self, secret: bytes, ttl_s: int) -> None:
+    def __init__(self, secret: bytes, ttl_s: int, max_revoked: int = 8192) -> None:
         self.secret = secret
         self.ttl_s = ttl_s
+        self.max_revoked = max(64, int(max_revoked))
         self._revoked: dict[str, float] = {}
         self._lock = threading.Lock()
 
@@ -156,61 +157,170 @@ class TokenService:
             exp = float(payload.get("exp", 0))
         except (TypeError, ValueError):
             return None
-        if exp < time.time():
+        now = time.time()
+        if exp < now:
             return None
+        nonce = payload.get("n")
         with self._lock:
-            if payload.get("n") in self._revoked:
-                return None
+            rev_exp = self._revoked.get(nonce) if isinstance(nonce, str) else None
+            if rev_exp is not None:
+                if rev_exp <= now:
+                    self._revoked.pop(nonce, None)
+                else:
+                    return None
         return User(payload["u"], str(payload.get("d") or payload["u"]), str(payload.get("r") or "")), payload
 
     def revoke(self, payload: dict) -> None:
+        nonce = str(payload.get("n") or "").strip()
+        if not nonce:
+            return
         with self._lock:
             now = time.time()
+            try:
+                exp = float(payload.get("exp", now))
+            except (TypeError, ValueError):
+                exp = now
             self._revoked = {k: v for k, v in self._revoked.items() if v > now}
-            self._revoked[payload.get("n", "")] = float(payload.get("exp", now))
+            if exp <= now:
+                self._revoked.pop(nonce, None)
+                return
+            self._revoked.pop(nonce, None)
+            while len(self._revoked) >= self.max_revoked:
+                # 按最早过期时间优先驱逐，防止高频登出撑爆进程内存
+                earliest_key = min(self._revoked, key=self._revoked.__getitem__)
+                self._revoked.pop(earliest_key, None)
+            self._revoked[nonce] = exp
 
 
 class LoginGuard:
-    """登录失败限流：同一用户名连续失败 5 次锁定 5 分钟（带容量上限与抗用户名喷洒驱逐）。"""
+    """登录失败限流：同一用户名连续失败 5 次锁定 5 分钟。
 
-    def __init__(self, max_failures: int = 5, lock_s: int = 300, max_entries: int = 4096) -> None:
+    防护要点：
+    1. 真实存在账号（known_user=True）受保护记录在 _known_users 中，海量随机未知账号喷洒绝不能驱逐真实账号的失败计数或锁定状态；
+    2. 未知账号首次失败绝不驱逐当前仍处于锁定态（until > now 且 count >= max_failures）的条目；
+    3. 叠加客户端 IP 维度辅助防爆破桶，限制单源高频枚举喷洒。
+    """
+
+    def __init__(
+        self,
+        max_failures: int = 5,
+        lock_s: int = 300,
+        max_entries: int = 4096,
+        ip_max_failures: int | None = None,
+        max_ip_entries: int = 4096,
+    ) -> None:
         self.max_failures = max_failures
         self.lock_s = lock_s
         self.max_entries = max(16, int(max_entries))
+        self.ip_max_failures = ip_max_failures if ip_max_failures is not None else max(20, max_failures * 4)
+        self.max_ip_entries = max(16, int(max_ip_entries))
         self._fails: dict[str, tuple[int, float]] = {}
+        self._known_users: set[str] = set()
+        self._ip_fails: dict[str, tuple[int, float]] = {}
         self._lock = threading.Lock()
 
-    def check(self, username: str) -> None:
+    def check(self, username: str, *, client_ip: str | None = None) -> None:
         now = time.time()
+        user_locked = False
+        ip_locked = False
         with self._lock:
             count, until = self._fails.get(username, (0, 0.0))
             if until and until <= now:
                 self._fails.pop(username, None)
-                return
-        if count >= self.max_failures and until > now:
+            elif count >= self.max_failures and until > now:
+                user_locked = True
+
+            if client_ip:
+                ip_count, ip_until = self._ip_fails.get(client_ip, (0, 0.0))
+                if ip_until and ip_until <= now:
+                    self._ip_fails.pop(client_ip, None)
+                elif ip_count >= self.ip_max_failures and ip_until > now:
+                    ip_locked = True
+
+        if user_locked or ip_locked:
             raise HTTPException(429, detail={"code": "LOGIN_LOCKED", "message": "登录失败次数过多，请 5 分钟后再试"})
 
-    def fail(self, username: str) -> None:
+    def _record_ip_fail_locked(self, client_ip: str, now: float) -> None:
+        ip_count, ip_until = self._ip_fails.pop(client_ip, (0, 0.0))
+        if ip_until <= now:
+            ip_count = 0
+        if len(self._ip_fails) >= self.max_ip_entries:
+            self._ip_fails = {k: v for k, v in self._ip_fails.items() if v[1] > now}
+        if len(self._ip_fails) >= self.max_ip_entries:
+            need = len(self._ip_fails) - self.max_ip_entries + 1
+            unlocked_ips = [k for k, v in self._ip_fails.items() if v[0] < self.ip_max_failures][:need]
+            for k in unlocked_ips:
+                self._ip_fails.pop(k, None)
+            if len(self._ip_fails) >= self.max_ip_entries and ip_count == 0:
+                return
+            while len(self._ip_fails) >= self.max_ip_entries:
+                self._ip_fails.pop(next(iter(self._ip_fails)))
+        self._ip_fails[client_ip] = (ip_count + 1, now + self.lock_s)
+
+    def fail(self, username: str, *, known_user: bool = False, client_ip: str | None = None) -> None:
         now = time.time()
         with self._lock:
+            if client_ip:
+                self._record_ip_fail_locked(client_ip, now)
+
+            is_known = known_user or (username in self._known_users)
+            if known_user and username and (username in self._known_users or len(self._known_users) < self.max_entries):
+                self._known_users.add(username)
+                is_known = True
+
             count, until = self._fails.pop(username, (0, 0.0))
             if until <= now:
                 count = 0
+
             if len(self._fails) >= self.max_entries:
                 self._fails = {k: v for k, v in self._fails.items() if v[1] > now}
+
             if len(self._fails) >= self.max_entries:
-                # 优先淘汰尚未触发锁定的低频噪声条目，保护已被锁定的暴力破解目标不被冲刷解锁
                 need = len(self._fails) - self.max_entries + 1
-                unlocked_keys = [k for k, v in self._fails.items() if v[0] < self.max_failures][:need]
-                for k in unlocked_keys:
+                # 1. 优先淘汰未知账号且未锁定的低频噪声
+                evict_keys = [
+                    k for k, v in self._fails.items()
+                    if k not in self._known_users and v[0] < self.max_failures
+                ][:need]
+                for k in evict_keys:
                     self._fails.pop(k, None)
+
+            if len(self._fails) >= self.max_entries:
+                need = len(self._fails) - self.max_entries + 1
+                if is_known:
+                    # 2. 真实存在账号需要写入时，可淘汰任意未知账号（即便未知账号已达失败阈值）
+                    unknown_keys = [k for k in self._fails if k not in self._known_users][:need]
+                    for k in unknown_keys:
+                        self._fails.pop(k, None)
+                elif count == 0:
+                    # 未知新账号若桶内全是真实账号或已锁定账号，直接丢弃该噪声账号，绝不冲刷已有锁定/真实账号
+                    unknown_keys = [
+                        k for k, v in self._fails.items()
+                        if k not in self._known_users and v[0] < self.max_failures
+                    ][:need]
+                    for k in unknown_keys:
+                        self._fails.pop(k, None)
+                    if len(self._fails) >= self.max_entries:
+                        return
+
+            if len(self._fails) >= self.max_entries:
+                # 3. 极端情况（桶内全部是真实存在账号）：优先淘汰未锁定的真实账号
+                need = len(self._fails) - self.max_entries + 1
+                unlocked_known = [k for k, v in self._fails.items() if v[0] < self.max_failures][:need]
+                for k in unlocked_known:
+                    self._fails.pop(k, None)
+                if not is_known and len(self._fails) >= self.max_entries:
+                    return
                 while len(self._fails) >= self.max_entries:
                     self._fails.pop(next(iter(self._fails)))
+
             self._fails[username] = (count + 1, now + self.lock_s)
 
-    def success(self, username: str) -> None:
+    def success(self, username: str, *, client_ip: str | None = None) -> None:
         with self._lock:
             self._fails.pop(username, None)
+            if client_ip:
+                self._ip_fails.pop(client_ip, None)
 
 
 def token_from_request(request: Request) -> str | None:
@@ -233,8 +343,12 @@ def require_user(request: Request) -> User:
 
 
 def require_report_key(request: Request) -> None:
-    """上游业务接口依赖：配置了 REPORT_API_KEYS 时必须携带 X-API-Key。"""
-    keys: set[str] = request.app.state.report_keys
+    """上游业务接口依赖：配置了 REPORT_API_KEYS 时必须携带 X-API-Key（优先读取容器热更新生效配置）。"""
+    c = getattr(request.app.state, "container", None)
+    if c is not None and getattr(c, "settings", None) is not None:
+        keys: set[str] = c.settings.report_api_key_set()
+    else:
+        keys = getattr(request.app.state, "report_keys", set())
     if not keys:
         return
     key = request.headers.get("x-api-key", "").strip()

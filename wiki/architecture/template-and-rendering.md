@@ -46,15 +46,15 @@ updated: 2026-11-12
 
 通过 `runtime/render.py#field_render` 与 `domain/jinja_env.py#render_body` 协作，平台在单次渲染中动态收集真正展示在报告中的字段集合 `used`：
 
-### 3.1 标量包装器 `TrackedValue(str)` + `_TrackedCodeGenerator`
+### 3.1 标量包装器 `TrackedValue(str)` + `_TrackedCodeGenerator` + 过滤器透传
 
 - **条件判断不记展示**：在 `{% if 受理渠道 == "热线" %}` 中做比较或布尔求值时不会经过 `finalize`，不记入 `used`；
-- **字符串拼接与滤镜不断链**：重写 `strip`/`replace`/`lower`/`+` 并定制编译器 `_TrackedCodeGenerator`（拦截 Jinja2 `~` 拼接 `visit_Concat` 与 `+` 运算），确保 `{{ 字段A ~ 字段B }}` 拼接后仍保留所有关联字段名并在最终 `finalize` 输出时一并记入 `used`。
+- **字符串拼接与过滤器不断链**：重写 `strip`/`replace`/`lower`/`+`，定制编译器 `_TrackedCodeGenerator`（拦截 Jinja2 `~` 拼接 `visit_Concat` 与 `+` 运算），并包装内置过滤器与 `_TrackedSandboxEnvironment.call_filter`（收集入参及 `list`/`tuple` 容器元素中 `TrackedValue` 的 `field_names` 与 `missing` 标记），确保 `{{ 字段A ~ 字段B }}` 或 `{{ [订购短信] | join(",") }}` 转换后仍保留关联字段名并在最终 `finalize` 输出时一并记入 `used`。
 
-### 3.2 列表包装器 `TrackedList(list)` + `_ACTIVE_USED`
+### 3.2 列表包装器 `TrackedList(list)` + `_ACTIVE_USED` + 预编译模板缓存
 
-- **`{% if 列表 %}` 仅调 `bool()`（走 `__len__`）**：不会触发 `__iter__`，因此不会把未走到的列表误记为已展示；
-- **`{% for item in 列表 %}` 触发 `__iter__`**：`_TrackedTemplate.render` 通过 `ContextVar`（`_ACTIVE_USED`）绑定当前环境的 `used` 集合。一旦生效分支执行 `{% for %}` 迭代 `TrackedList`，`__iter__` 立即将列表字段名写入 `active_used`：
+- **`{% if 列表 %}` 仅调 `bool()`（走 `__len__`）**：不会触发 `__iter__`；为防止模板作者编写 `{% if 充值流水 %}` 在 `not_found` 时漏掉 `PARTIAL` 追踪，`domain/resources.py` 在静态校验中会对 `{% if 列表字段 %}` 发出 `LIST_IN_IF_CONDITION` 告警，引导改用 `{% for item in 列表 %}...{% else %}...{% endfor %}`。
+- **`{% for item in 列表 %}` 触发 `__iter__`**：`render_body` 与 `_TrackedTemplate.render` 统一通过 `ContextVar`（`_ACTIVE_USED`）绑定当前协程独立的 `used` 集合，使全局共享沙箱环境配合 `@lru_cache(maxsize=256)` 缓存预编译 `Template` 对象实现百倍级渲染加速且并发零串扰。一旦生效分支执行 `{% for %}` 迭代 `TrackedList`，`__iter__` 立即将列表字段名写入 `_ACTIVE_USED`：
   - 合法空列表（`status="found", value=[]`）：`missing=False`，状态为 `found`，不进 `missingShown` → **`SUCCESS`**；
   - 缺失列表（`status="not_found", value=None`）：`missing=True`，若模板生效分支遍历了该列表（且 `visible: true`），则进入 `missingShown` → **`PARTIAL`**；若该 `{% for %}` 位于未命中的 `{% if %}` 分支内未执行，则不进入 `used`，不影响 **`SUCCESS`**。
 

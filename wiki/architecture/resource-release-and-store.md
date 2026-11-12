@@ -9,6 +9,7 @@ sources:
   - src/report_agent/store/drafts.py
   - src/report_agent/store/publisher.py
   - src/report_agent/store/service.py
+  - src/report_agent/store/cases.py
   - src/report_agent/store/runs.py
   - src/report_agent/store/runtime_config.py
 updated: 2026-11-12
@@ -52,16 +53,16 @@ DATA_DIR/
 
 ## 2. 草稿叠加视图与乐观锁控制（`DraftStore` + `ResourceService`）
 
-### 2.1 三种快照视图（`ResourceService.snapshot`）
+### 2.1 三种快照视图与读路径轻量化（`ResourceService` + `ReleaseStore` + `CaseStore`）
 
-1. **`"online"`（线上视图）**：直接加载 `releases/current` 指向的不可变目录树，并在内存中按当前激活的 `rev` 做缓存（软链接未切换时零磁盘重复解析开销）。所有上游 `/api/v1/reports` 请求固定读取此视图。
-2. **`"rN"`（指定历史版本视图）**：加载 `releases/rN/`；若该早期快照目录因容量淘汰已被清理，`ReleaseStore.ensure_dir("rN")` 会自动根据 `index.jsonl` 中记录的 Git Commit SHA，调用 `git archive` 即时解压重建 `releases/rN/` 目录树。
-3. **`"draft"`（草稿叠加视图）**：以当前线上快照为基底，将 `drafts/` 下所有存在的未发布草稿按 `(kind, key)` 覆盖上去（Overlay），供工作台在线预览与试运行（Dry-run）验证。
+1. **`"online"`（线上视图）**：加载 `releases/current` 指向的不可变目录树并缓存在 `ReleaseStore._snapshots`（有界 LRU）中；提供微秒级同步快路径 `ReleaseStore.try_live_snapshot()`（仅执行 `os.readlink(current)` 并在缓存命中时零线程切换直返），同时按 `(mtime_ns, size)` 指纹缓存 `releases/index.jsonl`。所有上游 `/api/v1/reports` 请求固定读取此视图。
+2. **`"rN"`（指定历史版本视图）**：加载 `releases/rN/`；若该早期快照目录因容量淘汰已被清理，`ReleaseStore.ensure_materialized("rN")` 会自动根据 `index.jsonl` 中记录的 Git Commit SHA，调用 `git archive` 即时解压重建 `releases/rN/` 目录树。
+3. **`"draft"`（草稿叠加视图）**：以当前线上快照为基底，将 `drafts/` 下所有未发布草稿按 `(kind, key)` 覆盖上去（Overlay）。`ResourceService.overlay()` 基于 `(live_rev, _draft_mutation_seq, _drafts_fingerprint())` 维护内存缓存，任意草稿写/删/发布/回滚递增序号立即失效，消除工作台试运行与详情查询重复扫盘开销；`CaseStore.count(template_id)` 采用 `os.scandir` + `(mtime_ns, size)` 指纹轻量头校验统计用例数，免除全量 `yaml.safe_load` 反序列化。
 
-### 2.2 乐观锁防多人覆盖与基线漂移检测
+### 2.2 全粒度乐观锁防多人覆盖与基线漂移检测
 
 每个草稿目录下的 `.meta.json` 维护两个关键版本字段：
-- **`revision`（草稿递增修订号）**：每次保存草稿自动 `+1`。前端调用 `PUT .../draft` 时传入打开时读到的 `expected_revision`；若已被他人抢先保存，`DraftStore.save_files` 立即抛出 `DraftConflictError`（HTTP 409 `DRAFT_CONFLICT`），返回最新修改人与时间。
+- **`revision`（草稿递增修订号）**：每次保存或细粒度修改草稿自动 `+1`。不仅整包保存 `PUT .../draft` 校验 `revision`，细粒度字段/技能接口（`save_field`、`delete_field`、`batch_evidence`、`reorder_fields`、`update_skills` 及 `publish_system_prompt`）也统一支持传入 `revision` 乐观锁校验（不一致或草稿已被他人发布清空时返回 HTTP 409 `CONFLICT`），并在响应中返回最新 `revision` 与 `draft` 元信息。
 - **`baseRev`（草稿创建时的线上版本）**：若保存草稿期间其他人发布了同一资源的新版本，导致 `draft.baseRev != item.onlineRev`，`POST .../validate` 会返回 `drift` 漂移告警，提示维护人员对比线上变更后再发布。
 
 ## 3. 单点发布、原子切换与紧急回退（`Publisher` + `ReleaseStore`）
@@ -84,14 +85,16 @@ flowchart LR
 - **全量交叉引用门禁**：即使只发布一个 Skill 或删除一个接口，也会把候选整棵资源树加载出来跑 `validate_all()`——若某线上模板仍在引用被删改的 Skill/API，发布会被 422 `PUBLISH_BLOCKED` 拦截并自动回滚 `repo/` 工作区。
 - **POSIX 原子软链切换（`ReleaseStore.switch_current`）**：先在同目录创建临时软链 `.current.<pid>.tmp -> rN`，再调用 `os.replace` 原子覆盖 `current`。线上高并发读取在任何微秒都不会读到“写了一半的目录”或空指针。
 - **两种回退手段**：
-  - **资源级回退（`rollback_resource`）**：支持 `draft_only`（把历史版本内容提取为草稿先试跑）或 `publish_now`（生成新版本 `r{N+1}` 上线该资源的历史状态，不影响其它资源）；
+  - **资源级回退（`rollback_resource`）**：支持 `draft_only`（把历史版本内容提取为草稿先试跑；若目标历史版本含 `.offline` 下线标记，显式返回 `targetOffline: True` 与 `warning` 提示）或 `publish_now`（生成新版本 `r{N+1}` 上线该资源的历史状态，不影响其它资源）；
   - **全局紧急切换（`emergency_switch`）**：不产生新版本，直接把 `releases/current` 软链接秒切回历史版本 `rK`，同时把 `repo/` 工作区对齐到 `rK`，用于线上突发故障秒级止血。
 
 ## 4. 异步运行记录存储（`RunStore`）与运行期热更新（`RuntimeConfigStore`）
 
-### 4.1 `RunStore` 单写协程队列
+### 4.1 `RunStore` 单写协程队列与按日索引缓存
 
-每次报告运行结束后需要同时写入完整的 `<runId>.json`（附带脱敏处理，如打码 `Authorization` 头）并向当日 `runs/YYYY/MM/DD/index.jsonl` 追加一行摘要。`RunStore` 采用后台单 `asyncio.Queue` 顺序消费者落盘，既不阻塞响应返回，又避免高并发协程同时 `open(..., "a")` 造成 JSONL 行交错损坏。应用优雅停机（`lifespan` 退出）时调用 `await runs.stop()` 排空队列。
+每次报告运行结束后需要同时写入完整的 `<runId>.json`（附带脱敏处理，如打码 `Authorization` 头）并向当日 `runs/YYYY/MM/DD/index.jsonl` 追加一行摘要：
+- **单写者队列与读己之写一致性**：采用后台单 `asyncio.Queue` 顺序消费者落盘，并在异步落盘完成前维护内存 `_pending` 映射保证即时查询可见，应用优雅停机（`lifespan` 退出）时调用 `await runs.stop()` 排空队列；
+- **启动孤儿恢复与增量分页缓存**：孤儿 `*.json` 扫描仅在 `RunStore.start()` 启动阶段执行一次并自愈补写索引；日常分页查询按单日 `index.jsonl` 的 `(mtime_ns, size)` 走有界 LRU `_day_cache`（上限 400 天），万条记录翻页维持毫秒级响应。
 
 ### 4.2 `RuntimeConfigStore` 在线热重载
 

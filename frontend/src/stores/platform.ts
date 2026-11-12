@@ -13,6 +13,7 @@ import type {
   ApiTestCallResult,
   CurrentUser,
   DocumentLine,
+  DraftMeta,
   EvidenceType,
   ModelInfo,
   NavKey,
@@ -146,7 +147,12 @@ export const usePlatformStore = defineStore('platform', () => {
     rev: '', operator: '', time: '', note: '',
   })
   /** 保存草稿冲突时后端返回的当前草稿信息 */
-  const conflictInfo = ref<{ updatedBy?: string; updatedAt?: string; revision?: number } | null>(null)
+  const conflictInfo = ref<{
+    updatedBy?: string
+    updatedAt?: string
+    revision?: number | null
+    status?: string
+  } | null>(null)
 
   // ======================================================================== 3. 页面交互状态
   const reportViewMode = ref<'rendered' | 'markdown'>('rendered')
@@ -1050,30 +1056,49 @@ export const usePlatformStore = defineStore('platform', () => {
     }
   }
 
+  /** 同步服务端返回的最新模板草稿修订号与元信息 */
+  function syncTemplateDraftMeta(res?: { revision?: number; draft?: DraftMeta | null } | null) {
+    if (!res) return
+    const nextRev = res.draft?.revision ?? res.revision
+    if (nextRev !== undefined) {
+      templateDraftRevision.value = nextRev
+    }
+    if (res.draft && templateDetail.value && templateDetail.value.id === currentTemplateId.value) {
+      templateDetail.value = { ...templateDetail.value, draft: res.draft }
+    }
+  }
+
+  /** 统一处理模板草稿保存/细粒度修改的 409 乐观锁冲突与常规错误 */
+  function handleTemplateDraftError(err: unknown, prefix: string): boolean {
+    if (err instanceof ApiError && (err.code === 'DRAFT_CONFLICT' || err.status === 409)) {
+      conflictInfo.value = (err.details.current as typeof conflictInfo.value) || {}
+      openModal('conflict')
+      return true
+    }
+    if (!(err instanceof ApiError && err.status === 401)) {
+      showError(err, prefix)
+    }
+    return false
+  }
+
   /** 保存草稿；成功返回 true */
   async function handleSaveDraft(): Promise<boolean> {
     const id = currentTemplateId.value
     if (!id) return false
     try {
       const res = await platformApi.saveTemplateDraft(id, { ...draftPayload(), revision: templateDraftRevision.value })
-      templateDraftRevision.value = res.draft.revision
+      syncTemplateDraftMeta(res)
       hasUnsavedChanges.value = false
       const errors = (res.issues || []).filter(i => i.level === 'error')
       templateValidation.value = {
         errors, warnings: (res.issues || []).filter(i => i.level === 'warning'), drift: null,
       }
       await Promise.all([refreshTemplates(), refreshSkills()])
-      if (templateDetail.value) templateDetail.value = { ...templateDetail.value, draft: res.draft }
       showToast(errors.length ? `草稿已保存，有 ${errors.length} 个错误需要处理后才能发布` : '草稿已保存',
         errors.length ? 'warning' : 'success')
       return true
     } catch (err) {
-      if (err instanceof ApiError && (err.code === 'DRAFT_CONFLICT' || err.status === 409)) {
-        conflictInfo.value = (err.details.current as typeof conflictInfo.value) || {}
-        openModal('conflict')
-      } else if (!(err instanceof ApiError && err.status === 401)) {
-        showError(err, '保存草稿失败')
-      }
+      handleTemplateDraftError(err, '保存草稿失败')
       return false
     }
   }
@@ -1132,9 +1157,41 @@ export const usePlatformStore = defineStore('platform', () => {
     closeModal()
     await Promise.all([refreshTemplates(), refreshSkills(), refreshReleases()])
     await loadTemplate(id)
-    showToast(mode === 'publish_now'
-      ? `已将模板 ${id} 回退至 ${target} 并发布上线（新版本 ${res.rev}）`
-      : `已将 ${target} 的内容恢复到草稿，核对无误后再发布`)
+    if (res.warning) {
+      showToast(res.warning, 'warning')
+    } else {
+      showToast(mode === 'publish_now'
+        ? `已将模板 ${id} 回退至 ${target} 并发布上线（新版本 ${res.rev}）`
+        : `已将 ${target} 的内容恢复到草稿，核对无误后再发布`)
+    }
+  }
+
+  /** 409 冲突弹窗点击“查看版本差异”：保留本地未保存修改，拉取服务端最新草稿（若已发布/丢弃则回退线上基线）对比 */
+  async function openConflictDraftDiff() {
+    const serverHasDraft = conflictInfo.value?.status !== 'NO_DRAFT'
+    const fallbackRev =
+      currentTemplate.value.onlineRev && currentTemplate.value.onlineRev !== '—'
+        ? 'online'
+        : templateRevisions.value[0]?.rev || 'online'
+    const targetBaseline = serverHasDraft ? 'draft' : fallbackRev
+
+    closeModal()
+    currentNav.value = 'workbench'
+    workbenchTab.value = 'history'
+    ideDebugMaximized.value = false
+    ideLeftSection.value = 'history'
+    ideLeftCollapsed.value = false
+    ideSelectedRev.value = 'working'
+    ideRightMode.value = 'inspector'
+    ideDiffTargetRev.value = targetBaseline
+    ideCenterMode.value = 'diff'
+    historyVerA.value = 'draft'
+    historyVerB.value = fallbackRev
+
+    await loadTemplateRevisions()
+    if (serverHasDraft && historyVerB.value) {
+      await loadTemplateDiff(historyVerA.value, historyVerB.value)
+    }
   }
 
   async function loadTemplateRevisions() {
@@ -1188,6 +1245,10 @@ export const usePlatformStore = defineStore('platform', () => {
     const name = field.name.trim()
     if (!name) {
       showToast('字段名不能为空', 'warning')
+      return false
+    }
+    if (field.type === '列表' && field.evidenceType === 'input') {
+      showToast('列表字段的证据来源不能设为入参（input），请使用原文引用或推导', 'warning')
       return false
     }
     const idx = originalName ? templateFields.value.findIndex(f => f.name === originalName) : -1
@@ -1259,11 +1320,125 @@ export const usePlatformStore = defineStore('platform', () => {
   }
 
   function batchUpdateEvidenceType(evType: EvidenceType) {
+    let updated = 0
+    let skippedList = 0
     checkedFieldIndices.value.forEach(i => {
-      if (templateFields.value[i]) templateFields.value[i].evidenceType = evType
+      const f = templateFields.value[i]
+      if (!f) return
+      if (evType === 'input' && f.type === '列表') {
+        skippedList += 1
+        return
+      }
+      f.evidenceType = evType
+      updated += 1
     })
+    if (updated === 0 && skippedList > 0) {
+      showToast('列表字段不支持设为入参（input），未执行修改', 'warning')
+      return
+    }
     markCurrentTemplateDirty()
-    showToast(`已将选中字段的证据类型设为：${evType === 'quote' ? '原文引用' : evType === 'input' ? '入参' : '推导'}`)
+    const label = evType === 'quote' ? '原文引用' : evType === 'input' ? '入参' : '推导'
+    if (skippedList > 0) {
+      showToast(`已将 ${updated} 个字段设为${label}（已跳过 ${skippedList} 个列表字段）`, 'warning')
+    } else {
+      showToast(`已将选中字段的证据类型设为：${label}`)
+    }
+  }
+
+  /** 细粒度接口保存单个字段（携带乐观锁 revision 并同步服务端返回的最新 revision） */
+  async function saveTemplateFieldRemote(field: TemplateField, originalName?: string): Promise<boolean> {
+    const id = currentTemplateId.value
+    if (!id) return false
+    if (field.type === '列表' && field.evidenceType === 'input') {
+      showToast('列表字段的证据来源不能设为入参（input）', 'warning')
+      return false
+    }
+    try {
+      const res = await platformApi.saveTemplateField(id, field, originalName, templateDraftRevision.value)
+      syncTemplateDraftMeta(res)
+      upsertTemplateField(field, originalName)
+      hasUnsavedChanges.value = false
+      return true
+    } catch (err) {
+      handleTemplateDraftError(err, '保存字段失败')
+      return false
+    }
+  }
+
+  /** 细粒度接口删除单个字段（携带乐观锁 revision 并同步服务端返回的最新 revision） */
+  async function deleteTemplateFieldRemote(name: string): Promise<boolean> {
+    const id = currentTemplateId.value
+    if (!id) return false
+    try {
+      const res = await platformApi.deleteTemplateField(id, name, templateDraftRevision.value)
+      syncTemplateDraftMeta(res)
+      const idx = templateFields.value.findIndex(f => f.name === name)
+      if (idx >= 0) templateFields.value.splice(idx, 1)
+      return true
+    } catch (err) {
+      handleTemplateDraftError(err, '删除字段失败')
+      return false
+    }
+  }
+
+  /** 细粒度接口批量更新证据类型（拦截/跳过列表字段设为 input，携带并同步 revision） */
+  async function batchUpdateEvidenceRemote(fieldNames: string[], evType: EvidenceType): Promise<boolean> {
+    const id = currentTemplateId.value
+    if (!id) return false
+    const allowedNames =
+      evType === 'input'
+        ? fieldNames.filter(n => templateFields.value.find(f => f.name === n)?.type !== '列表')
+        : fieldNames
+    if (evType === 'input' && allowedNames.length === 0) {
+      showToast('列表字段不支持设为入参（input），未执行修改', 'warning')
+      return false
+    }
+    try {
+      const res = await platformApi.batchUpdateEvidenceType(
+        id,
+        allowedNames,
+        evType,
+        templateDraftRevision.value,
+      )
+      syncTemplateDraftMeta(res)
+      const nameSet = new Set(allowedNames)
+      templateFields.value.forEach(f => {
+        if (nameSet.has(f.name)) f.evidenceType = evType
+      })
+      return true
+    } catch (err) {
+      handleTemplateDraftError(err, '批量更新证据类型失败')
+      return false
+    }
+  }
+
+  /** 细粒度接口重排字段顺序（携带并同步草稿 revision） */
+  async function reorderTemplateFieldsRemote(names: string[]): Promise<boolean> {
+    const id = currentTemplateId.value
+    if (!id) return false
+    try {
+      const res = await platformApi.reorderFields(id, names, templateDraftRevision.value)
+      syncTemplateDraftMeta(res)
+      return true
+    } catch (err) {
+      handleTemplateDraftError(err, '调整字段顺序失败')
+      return false
+    }
+  }
+
+  /** 细粒度接口更新模板关联 Skill（携带并同步草稿 revision） */
+  async function updateTemplateSkillsRemote(skillIds: string[]): Promise<boolean> {
+    const id = currentTemplateId.value
+    if (!id) return false
+    try {
+      const res = await platformApi.updateTemplateSkills(id, skillIds, templateDraftRevision.value)
+      syncTemplateDraftMeta(res)
+      templateSkills.value = [...res.skills]
+      return true
+    } catch (err) {
+      handleTemplateDraftError(err, '更新模板关联 Skill 失败')
+      return false
+    }
   }
 
   function insertFieldIntoBody(fieldName: string, isFromOther: boolean) {
@@ -1906,12 +2081,29 @@ export const usePlatformStore = defineStore('platform', () => {
   }
 
   async function publishSysPrompt(note = ''): Promise<boolean> {
-    const res = await guard(() => platformApi.publishSystemPrompt(sysPromptText.value, note), '发布系统提示词失败')
-    if (!res) return false
-    await Promise.all([loadSettings(), refreshReleases()])
-    onlineBaselineSeq.value += 1
-    showToast(`系统提示词已发布（${res.rev}），立即生效`)
-    return true
+    try {
+      const res = await platformApi.publishSystemPrompt(
+        sysPromptText.value,
+        note,
+        sysPromptState.value?.draft?.revision,
+      )
+      await Promise.all([loadSettings(), refreshReleases()])
+      onlineBaselineSeq.value += 1
+      showToast(`系统提示词已发布（${res.rev}），立即生效`)
+      return true
+    } catch (err) {
+      if (err instanceof ApiError && (err.status === 409 || err.code === 'DRAFT_CONFLICT')) {
+        if (await promptDraftConflictReload(err, '全局系统提示词')) {
+          await loadSettings()
+          showToast('已重新加载服务端最新系统提示词', 'info')
+        }
+        return false
+      }
+      if (!(err instanceof ApiError && err.status === 401)) {
+        showError(err, '发布系统提示词失败')
+      }
+      return false
+    }
   }
 
   async function discardSysPromptDraft(): Promise<boolean> {
@@ -2030,9 +2222,10 @@ export const usePlatformStore = defineStore('platform', () => {
     createNewTemplate, copyExistingTemplate, confirmOfflineTemplate, restoreOfflineTemplate,
     loadTemplate, openTemplateWorkbench, handleBackFromWorkbench, markCurrentTemplateDirty, recomputeFieldBodyUsage,
     handleSaveDraft, handleDiscardDraft, validateCurrentTemplate, publishCurrentTemplate,
-    openRollbackTemplateModal, rollbackTemplateToRev, loadTemplateRevisions, loadTemplateDiff, switchWorkbenchTab,
+    openRollbackTemplateModal, rollbackTemplateToRev, openConflictDraftDiff, loadTemplateRevisions, loadTemplateDiff, switchWorkbenchTab,
     openFieldDrawer, jumpToFieldDrawer, newFieldTemplate, upsertTemplateField, deleteTemplateField, moveTemplateField,
     toggleFieldCheck, toggleAllFieldChecks, batchUpdateEvidenceType, insertFieldIntoBody,
+    saveTemplateFieldRemote, deleteTemplateFieldRemote, batchUpdateEvidenceRemote, reorderTemplateFieldsRemote, updateTemplateSkillsRemote,
     requestInsertIntoBody, requestLocateFieldInBody, selectIdeFieldByName,
     refreshTemplateDebugRuns, selectTemplateDebugRun, clearSelectedDebugRun,
     addTemplateInput, removeTemplateInput, updateTemplateSkills, removeTemplateSkill,
