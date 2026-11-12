@@ -1,4 +1,4 @@
-"""Skill 库、接口库、系统提示词的管理接口。
+"""Skill 库、接口库、系统提示词与运行配置热重载管理接口。
 
 #Created By AiCoding(codex)
 """
@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import re
 import secrets
 from typing import Any, Literal
@@ -14,7 +15,7 @@ import yaml
 from fastapi import APIRouter, Body, Depends, Query, Request
 from pydantic import BaseModel, Field, ValidationError
 
-from ..domain.api_contract import parse_api_yaml
+from ..domain.api_contract import ApiContract, parse_api_yaml
 from ..domain.resources import SYSTEM_PROMPT_FILE, validate_api
 from ..domain.skill import build_skill_markdown
 from ..gateway import unified_xml
@@ -28,7 +29,18 @@ from ..store.runtime_config import (
 )
 from ..store.service import SP_REF, InvalidResource, api_ref, skill_ref
 from .auth import require_user
-from .common import bad_request, container, not_found, operator
+from .common import (
+    PublishBody,
+    RollbackBody,
+    bad_request,
+    check_rollback_reason,
+    container,
+    not_found,
+    operator,
+    parse_expected_revision,
+    resource_revisions,
+    validation_result_with_drift,
+)
 from .dto import api_item, skill_item
 
 router = APIRouter(prefix="/api/v1", tags=["Skill / 接口 / 系统提示词"], dependencies=[Depends(require_user)])
@@ -47,24 +59,6 @@ def _check_api_name(name: str) -> str:
     if not _API_NAME_RE.match(name):
         raise bad_request("接口编码只能使用字母、数字、下划线和短横线，且以字母开头", "INVALID_API_NAME")
     return name
-
-
-class PublishBody(BaseModel):
-    note: str = ""
-
-
-class RollbackBody(BaseModel):
-    targetRev: str
-    mode: Literal["draft_only", "publish_now"] = "draft_only"
-    reason: str = ""
-
-
-def _revisions(request: Request, ref) -> list[dict[str, Any]]:
-    c = container(request)
-    online = c.releases.online_change(ref)
-    return [{"rev": e["rev"], "type": e.get("type"), "operator": e.get("operator"), "time": fmt_time(e.get("time")),
-             "note": e.get("note") or e.get("summary"), "summary": e.get("summary"),
-             "online": bool(online and online["rev"] == e["rev"])} for e in c.releases.history(ref)]
 
 
 # ============================================================================ Skill
@@ -97,14 +91,14 @@ def list_skills(request: Request) -> list[dict[str, Any]]:
     c = container(request)
     _, live = c.service.live()
     overlay = _safe_overlay(c)
+    sorted_templates = sorted(overlay.templates.values(), key=lambda t: t.id)
     stats = c.runs.stats_7d()
     out = []
     for sid in c.service.keys("skill"):
         sk = overlay.skills.get(sid) or live.skills.get(sid)
         if sk is None:
             continue
-        refs = [f"{t.id} {t.name}" for t in sorted(overlay.templates.values(), key=lambda t: t.id)
-                if sid in t.definition.skills]
+        refs = [f"{t.id} {t.name}" for t in sorted_templates if sid in t.definition.skills]
         out.append(skill_item(sk, c.service.state(skill_ref(sid), live), refs, stats))
     return out
 
@@ -134,22 +128,22 @@ def get_skill(request: Request, sid: str, version: str = Query("working")) -> di
     md = c.service.skill_markdown(sid, version)
     if md is None:
         raise not_found(f"Skill {sid} 没有 {version} 版本")
-    return {"item": _skill_item(request, sid), "version": version, "markdown": md,
-            "draft": c.drafts.meta(skill_ref(sid))}
+    return {"item": _skill_item(request, sid), "version": version, "markdown": md, "draft": c.drafts.meta(skill_ref(sid))}
 
 
 class SkillDraftBody(BaseModel):
     markdown: str
-    revision: int | None = None
+    revision: Any = None
 
 
 @router.put("/skills/{sid}/draft")
 def save_skill_draft(request: Request, sid: str, body: SkillDraftBody) -> dict[str, Any]:
     _check_skill_id(sid)
+    expected_rev = parse_expected_revision(body.revision)
     c = container(request)
     if not c.drafts.exists(skill_ref(sid)) and c.service.skill_online(sid) is None:
         raise not_found(f"Skill {sid} 不存在")
-    meta = c.service.save_skill(sid, body.markdown, operator(request), expected_revision=body.revision)
+    meta = c.service.save_skill(sid, body.markdown, operator(request), expected_revision=expected_rev)
     issues = c.service.validate_skill_working(sid)
     return {"savedAt": fmt_time(meta["updatedAt"]), "draft": meta, "issues": [i.to_dict() for i in issues]}
 
@@ -171,10 +165,7 @@ def validate_skill(request: Request, sid: str) -> dict[str, Any]:
     c = container(request)
     issues = c.service.validate_skill_working(sid)
     state = c.service.state(skill_ref(sid))
-    drift = bool(state.draft and state.online_rev and state.base_rev and state.base_rev != state.online_rev)
-    return {"errors": [i.to_dict() for i in issues if i.level == "error"],
-            "warnings": [i.to_dict() for i in issues if i.level == "warning"],
-            "drift": {"baseRev": state.base_rev, "onlineRev": state.online_rev} if drift else None}
+    return validation_result_with_drift(issues, state)
 
 
 @router.post("/skills/{sid}/publish")
@@ -188,9 +179,14 @@ def publish_skill(request: Request, sid: str, body: PublishBody) -> dict[str, An
         raise bad_request("没有需要发布的草稿", "NO_DRAFT")
     result = c.service.publish_draft(ref, operator(request), body.note)
     item = _skill_item(request, sid)
-    return {"id": sid, "status": item["status"], "rev": result.entry["rev"],
-            "publishedAt": fmt_time(result.entry["time"]), "warnings": [i.to_dict() for i in result.warnings],
-            "item": item}
+    return {
+        "id": sid,
+        "status": item["status"],
+        "rev": result.entry["rev"],
+        "publishedAt": fmt_time(result.entry["time"]),
+        "warnings": [i.to_dict() for i in result.warnings],
+        "item": item,
+    }
 
 
 @router.get("/skills/{sid}/revisions")
@@ -198,7 +194,7 @@ def skill_revisions(request: Request, sid: str) -> list[dict[str, Any]]:
     _check_skill_id(sid)
     c = container(request)
     ref = skill_ref(sid)
-    revs = _revisions(request, ref)
+    revs = resource_revisions(c, ref)
     if not revs and not c.drafts.exists(ref) and c.service.skill_online(sid) is None:
         raise not_found(f"Skill {sid} 不存在")
     return revs
@@ -207,8 +203,7 @@ def skill_revisions(request: Request, sid: str) -> list[dict[str, Any]]:
 @router.post("/skills/{sid}/rollback")
 def rollback_skill(request: Request, sid: str, body: RollbackBody) -> dict[str, Any]:
     _check_skill_id(sid)
-    if body.mode == "publish_now" and not body.reason.strip():
-        raise bad_request("直接回退上线必须填写原因")
+    check_rollback_reason(body)
     c = container(request)
     result = c.service.rollback(skill_ref(sid), body.targetRev, body.mode, body.reason, operator(request))
     return {**result, "item": _skill_item(request, sid), "markdown": c.service.skill_markdown(sid)}
@@ -236,13 +231,14 @@ def list_apis(request: Request) -> list[dict[str, Any]]:
     c = container(request)
     _, live = c.service.live()
     overlay = _safe_overlay(c)
+    overlay_skills = list(overlay.skills.values())
     stats = c.runs.stats_7d()
     out = []
     for name in c.service.keys("api"):
         api = overlay.apis.get(name) or live.apis.get(name)
         if api is None:
             continue
-        refs = [s.title for s in overlay.skills.values() if name in s.meta.apis]
+        refs = [s.title for s in overlay_skills if name in s.meta.apis]
         out.append(api_item(api, c.service.state(api_ref(name), live), refs, stats))
     return out
 
@@ -265,14 +261,25 @@ def _resolve_connector(body: CreateApiBody) -> str:
 def _new_api_yaml(body: CreateApiBody) -> str:
     connector = _resolve_connector(body)
     data = {
-        "name": body.name, "title": body.title.strip() or body.name, "description": body.description,
-        "connector": connector, "processCode": body.processCode or body.name, "timeoutMs": 10000,
-        "retry": {"maxAttempts": 1}, "idempotent": True,
-        "input": {"type": "object", "required": ["手机号码"], "additionalProperties": False,
-                  "properties": {"手机号码": {"type": "string", "pattern": r"^1\d{10}$", "description": "11 位手机号"}}},
+        "name": body.name,
+        "title": body.title.strip() or body.name,
+        "description": body.description,
+        "connector": connector,
+        "processCode": body.processCode or body.name,
+        "timeoutMs": 10000,
+        "retry": {"maxAttempts": 1},
+        "idempotent": True,
+        "input": {
+            "type": "object",
+            "required": ["手机号码"],
+            "additionalProperties": False,
+            "properties": {"手机号码": {"type": "string", "pattern": r"^1\d{10}$", "description": "11 位手机号"}},
+        },
         "request": {"route_type": "2", "route_value": "${手机号码}", "content": {"userMobile": "${手机号码}"}},
-        "response": {"success": {"path": "operation_out.response.resp_code", "equals": "0000"},
-                     "records": {"path": "operation_out.content", "columns": {}}},
+        "response": {
+            "success": {"path": "operation_out.response.resp_code", "equals": "0000"},
+            "records": {"path": "operation_out.content", "columns": {}},
+        },
     }
     return yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=1000)
 
@@ -299,13 +306,17 @@ def get_api(request: Request, name: str, version: str = Query("working")) -> dic
 
 class ApiDraftBody(BaseModel):
     yamlText: str | None = None
-    api: dict[str, Any] | None = Field(default=None, description="只改 title/description/timeoutMs/retry 时可以不传 yamlText")
-    revision: int | None = None
+    api: dict[str, Any] | None = Field(
+        default=None,
+        description="只改 title/description/timeoutMs/retry 时可以不传 yamlText",
+    )
+    revision: Any = None
 
 
 @router.put("/apis/{name}/draft")
 def save_api_draft(request: Request, name: str, body: ApiDraftBody) -> dict[str, Any]:
     _check_api_name(name)
+    expected_rev = parse_expected_revision(body.revision)
     c = container(request)
     if not c.drafts.exists(api_ref(name)) and c.service.api_online(name) is None:
         raise not_found(f"接口 {name} 不存在")
@@ -333,6 +344,8 @@ def save_api_draft(request: Request, name: str, body: ApiDraftBody) -> dict[str,
         if "idempotent" in patch and patch["idempotent"] is not None:
             data["idempotent"] = bool(patch["idempotent"])
         if patch.get("timeoutMs") is not None:
+            if isinstance(patch["timeoutMs"], bool):
+                raise bad_request("超时时间 timeoutMs 必须为正整数")
             try:
                 timeout_ms = int(patch["timeoutMs"])
             except (TypeError, ValueError) as exc:
@@ -342,6 +355,8 @@ def save_api_draft(request: Request, name: str, body: ApiDraftBody) -> dict[str,
             data["timeoutMs"] = timeout_ms
         if patch.get("retry") is not None:
             raw_retry = patch["retry"].get("maxAttempts") if isinstance(patch["retry"], dict) else patch["retry"]
+            if isinstance(raw_retry, bool):
+                raise bad_request("重试次数 retry 必须为正整数")
             try:
                 max_attempts = int(raw_retry)
             except (TypeError, ValueError) as exc:
@@ -351,7 +366,7 @@ def save_api_draft(request: Request, name: str, body: ApiDraftBody) -> dict[str,
             data["retry"] = {"maxAttempts": max_attempts}
         text = yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=1000)
     try:
-        meta = c.service.save_api(name, text, operator(request), expected_revision=body.revision)
+        meta = c.service.save_api(name, text, operator(request), expected_revision=expected_rev)
     except ValueError as exc:
         raise bad_request(f"接口 YAML 无法解析：{exc}") from exc
     return {"savedAt": fmt_time(meta["updatedAt"]), "draft": meta}
@@ -382,8 +397,13 @@ def publish_api(request: Request, name: str, body: PublishBody | None = None) ->
     except ValueError as exc:
         raise bad_request(f"接口 YAML 无法解析：{exc}") from exc
     item = _api_item(request, name)
-    return {"name": name, "status": item["status"], "rev": result.entry["rev"],
-            "publishedAt": fmt_time(result.entry["time"]), "item": item}
+    return {
+        "name": name,
+        "status": item["status"],
+        "rev": result.entry["rev"],
+        "publishedAt": fmt_time(result.entry["time"]),
+        "item": item,
+    }
 
 
 @router.get("/apis/{name}/revisions")
@@ -391,7 +411,7 @@ def api_revisions(request: Request, name: str) -> list[dict[str, Any]]:
     _check_api_name(name)
     c = container(request)
     ref = api_ref(name)
-    revs = _revisions(request, ref)
+    revs = resource_revisions(c, ref)
     if not revs and not c.drafts.exists(ref) and c.service.api_online(name) is None:
         raise not_found(f"接口 {name} 不存在")
     return revs
@@ -400,8 +420,7 @@ def api_revisions(request: Request, name: str) -> list[dict[str, Any]]:
 @router.post("/apis/{name}/rollback")
 def rollback_api(request: Request, name: str, body: RollbackBody) -> dict[str, Any]:
     _check_api_name(name)
-    if body.mode == "publish_now" and not body.reason.strip():
-        raise bad_request("直接回退上线必须填写原因")
+    check_rollback_reason(body)
     c = container(request)
     result = c.service.rollback(api_ref(name), body.targetRev, body.mode, body.reason, operator(request))
     return {**result, "item": _api_item(request, name), "yamlText": c.service.api_yaml(name)}
@@ -440,12 +459,22 @@ def validate_api_contract(request: Request, name: str, body: ApiValidateBody | N
     except ValidationError as exc:
         conn = _guess_connector_from_text(yaml_text)
         errs = [f"{'.'.join(str(p) for p in e['loc']) or '契约'}：{e['msg']}" for e in exc.errors()]
-        return {"ok": False, "errors": errs, "connector": conn,
-                "format": "json" if conn == "unified-gateway-json" else "xml", "requestPreview": ""}
+        return {
+            "ok": False,
+            "errors": errs,
+            "connector": conn,
+            "format": "json" if conn == "unified-gateway-json" else "xml",
+            "requestPreview": "",
+        }
     except (yaml.YAMLError, ValueError) as exc:
         conn = _guess_connector_from_text(yaml_text)
-        return {"ok": False, "errors": [f"YAML 解析失败：{exc}"], "connector": conn,
-                "format": "json" if conn == "unified-gateway-json" else "xml", "requestPreview": ""}
+        return {
+            "ok": False,
+            "errors": [f"YAML 解析失败：{exc}"],
+            "connector": conn,
+            "format": "json" if conn == "unified-gateway-json" else "xml",
+            "requestPreview": "",
+        }
 
     errors: list[str] = []
     if api.name != name:
@@ -468,8 +497,13 @@ def validate_api_contract(request: Request, name: str, body: ApiValidateBody | N
         if not errors:
             errors.append(f"请求预览生成失败：{exc}")
 
-    return {"ok": len(errors) == 0, "errors": errors, "connector": api.connector,
-            "format": fmt, "requestPreview": preview}
+    return {
+        "ok": len(errors) == 0,
+        "errors": errors,
+        "connector": api.connector,
+        "format": fmt,
+        "requestPreview": preview,
+    }
 
 
 class TestCallBody(BaseModel):
@@ -477,11 +511,8 @@ class TestCallBody(BaseModel):
     yamlText: str | None = Field(default=None, description="用未保存的 YAML 试调用；不传使用工作副本")
 
 
-@router.post("/apis/{name}/test-call")
-async def test_call(request: Request, name: str, body: TestCallBody) -> dict[str, Any]:
-    """按契约校验参数并真实调用一次网关（mock 模式读样例文件）。调用会写审计日志。"""
-    _check_api_name(name)
-    c = container(request)
+def _prepare_test_call_api(c, name: str, body: TestCallBody) -> ApiContract:
+    """在工作线程解析接口契约并校验试调用入参，避免同步文件/Schema 校验阻塞事件循环。"""
     if body.yamlText is not None:
         try:
             api = parse_api_yaml(body.yamlText)
@@ -502,6 +533,15 @@ async def test_call(request: Request, name: str, body: TestCallBody) -> dict[str
     errors = api.validate_args(body.params)
     if errors:
         raise bad_request("参数不合法", "INVALID_PARAMS", errors=errors)
+    return api
+
+
+@router.post("/apis/{name}/test-call")
+async def test_call(request: Request, name: str, body: TestCallBody) -> dict[str, Any]:
+    """按契约校验参数并真实调用一次网关（mock 模式读样例文件）。调用会写审计日志。"""
+    _check_api_name(name)
+    c = container(request)
+    api = await asyncio.to_thread(_prepare_test_call_api, c, name, body)
     res = await c.gateway.invoke(api, body.params)
     is_json = bool(getattr(api, "is_json", api.connector == "unified-gateway-json"))
     fmt = "json" if is_json else "xml"
@@ -512,20 +552,35 @@ async def test_call(request: Request, name: str, body: TestCallBody) -> dict[str
         op,
         {"api": name, "connector": api.connector, "ok": res.ok, "costMs": res.cost_ms},
     )
-    return {"ok": res.ok, "error": res.error, "costMs": res.cost_ms, "httpStatus": res.http_status,
-            "noData": res.no_data, "format": fmt, "connector": api.connector,
-            "rawXml": res.raw, "requestXml": res.request_preview,
-            "rawBody": res.raw, "requestBody": res.request_preview,
-            "records": [{"row": i, **r} for i, r in enumerate(res.records)], "columns": api.response.records.columns}
+    return {
+        "ok": res.ok,
+        "error": res.error,
+        "costMs": res.cost_ms,
+        "httpStatus": res.http_status,
+        "noData": res.no_data,
+        "format": fmt,
+        "connector": api.connector,
+        "rawXml": res.raw,
+        "requestXml": res.request_preview,
+        "rawBody": res.raw,
+        "requestBody": res.request_preview,
+        "records": [{"row": i, **r} for i, r in enumerate(res.records)],
+        "columns": api.response.records.columns,
+    }
 
 
 # ============================================================================ 系统提示词
 def _sp_state(request: Request) -> dict[str, Any]:
     c = container(request)
     state = c.service.state(SP_REF)
-    return {"sysPromptText": c.service.system_prompt("working"), "sysPromptStatus": state.status,
-            "onlineText": c.service.system_prompt("online"), "onlineRev": state.online_rev,
-            "baseRev": state.base_rev, "draft": state.draft}
+    return {
+        "sysPromptText": c.service.system_prompt("working"),
+        "sysPromptStatus": state.status,
+        "onlineText": c.service.system_prompt("online"),
+        "onlineRev": state.online_rev,
+        "baseRev": state.base_rev,
+        "draft": state.draft,
+    }
 
 
 @router.get("/settings/system-prompt")
@@ -548,32 +603,36 @@ def get_system_prompt(request: Request, version: str = Query("working")) -> dict
 class SysPromptBody(BaseModel):
     sysPromptText: str | None = None
     note: str = ""
-    revision: int | None = None
+    revision: Any = None
 
 
 @router.put("/settings/system-prompt/draft")
 def save_system_prompt(request: Request, body: SysPromptBody) -> dict[str, Any]:
+    expected_rev = parse_expected_revision(body.revision)
     c = container(request)
     if body.sysPromptText is None:
         raise bad_request("sysPromptText 不能为空")
-    c.service.save_system_prompt(body.sysPromptText, operator(request), body.revision)
-    return {"status": c.service.state(SP_REF).status, **_sp_state(request)}
+    c.service.save_system_prompt(body.sysPromptText, operator(request), expected_rev)
+    sp = _sp_state(request)
+    return {"status": sp["sysPromptStatus"], **sp}
 
 
 @router.post("/settings/system-prompt/publish")
 def publish_system_prompt(request: Request, body: SysPromptBody) -> dict[str, Any]:
     """发布系统提示词。传入 sysPromptText 时先保存为草稿再发布。"""
+    expected_rev = parse_expected_revision(body.revision)
     c = container(request)
     if body.sysPromptText is not None:
-        c.service.save_system_prompt(body.sysPromptText, operator(request), body.revision)
+        c.service.save_system_prompt(body.sysPromptText, operator(request), expected_rev)
     if not c.drafts.exists(SP_REF):
         raise bad_request("没有需要发布的草稿", "NO_DRAFT")
     result = c.service.publish_draft(SP_REF, operator(request), body.note)
+    sp = _sp_state(request)
     return {
-        "status": c.service.state(SP_REF).status,
+        "status": sp["sysPromptStatus"],
         "rev": result.entry["rev"],
         "publishedAt": fmt_time(result.entry["time"]),
-        **_sp_state(request),
+        **sp,
     }
 
 
@@ -585,16 +644,16 @@ def discard_system_prompt(request: Request) -> dict[str, Any]:
 
 @router.post("/settings/system-prompt/rollback")
 def rollback_system_prompt(request: Request, body: RollbackBody) -> dict[str, Any]:
-    if body.mode == "publish_now" and not body.reason.strip():
-        raise bad_request("直接回退上线必须填写原因")
+    check_rollback_reason(body)
     c = container(request)
     result = c.service.rollback(SP_REF, body.targetRev, body.mode, body.reason, operator(request))
-    return {**result, "status": c.service.state(SP_REF).status, **_sp_state(request)}
+    sp = _sp_state(request)
+    return {**result, "status": sp["sysPromptStatus"], **sp}
 
 
 @router.get("/settings/system-prompt/revisions")
 def system_prompt_revisions(request: Request) -> list[dict[str, Any]]:
-    return _revisions(request, SP_REF)
+    return resource_revisions(container(request), SP_REF)
 
 
 # ============================================================================ 运行配置（统一网关 + 大模型热更新）
@@ -603,6 +662,31 @@ def _runtime_store(c) -> RuntimeConfigStore:
         c.runtime_config = RuntimeConfigStore(c.layout, c.lock)
         c.runtime_config.bootstrap_or_load(c.env_settings or c.settings)
     return c.runtime_config
+
+
+async def _apply_runtime_mutation(
+    request: Request,
+    mutate_fn: Callable[[Any, RuntimeConfigStore, str], tuple[dict[str, Any], bool]],
+) -> dict[str, Any]:
+    """在工作线程执行运行配置持久化与进程内热重载，并在变更后异步释放退役网关客户端。"""
+    c = container(request)
+    op = operator(request)
+
+    def _work() -> tuple[dict[str, Any], bool]:
+        store = _runtime_store(c)
+        out, changed = mutate_fn(c, store, op)
+        if changed:
+            c.apply_runtime_config()
+            request.app.state.report_keys = c.settings.report_api_key_set()
+        return out, changed
+
+    try:
+        payload, changed = await asyncio.to_thread(_work)
+    except RuntimeConfigValidationError as exc:
+        raise bad_request(str(exc), "INVALID_RUNTIME_CONFIG", errors=exc.errors) from exc
+    if changed and hasattr(c.gateway, "aclose_retired"):
+        await c.gateway.aclose_retired()
+    return payload
 
 
 @router.get("/settings/model")
@@ -666,11 +750,7 @@ async def update_runtime_settings(request: Request, body: Any = Body(default=Non
     clear_token = _flag_bool(patch.get("clearGatewayAccessToken"), "clearGatewayAccessToken")
     clear_report_keys = _flag_bool(patch.get("clearReportApiKeys"), "clearReportApiKeys")
 
-    c = container(request)
-    op = operator(request)
-
-    def _do_update() -> tuple[dict[str, Any], bool]:
-        store = _runtime_store(c)
+    def _mutate(_c: Any, store: RuntimeConfigStore, op: str) -> tuple[dict[str, Any], bool]:
         _, did_change = store.update(
             patch,
             op,
@@ -680,19 +760,9 @@ async def update_runtime_settings(request: Request, body: Any = Body(default=Non
             clear_report_api_keys=clear_report_keys,
             note=raw_note or "",
         )
-        if did_change:
-            c.apply_runtime_config()
-            request.app.state.report_keys = c.settings.report_api_key_set()
         return store.public_state(), did_change
 
-    try:
-        state, changed = await asyncio.to_thread(_do_update)
-    except RuntimeConfigValidationError as exc:
-        raise bad_request(str(exc), "INVALID_RUNTIME_CONFIG", errors=exc.errors) from exc
-
-    if changed and hasattr(c.gateway, "aclose_retired"):
-        await c.gateway.aclose_retired()
-    return state
+    return await _apply_runtime_mutation(request, _mutate)
 
 
 @router.get("/settings/runtime/revisions")
@@ -709,23 +779,12 @@ class RuntimeRollbackBody(BaseModel):
 @router.post("/settings/runtime/rollback")
 async def rollback_runtime_settings(request: Request, body: RuntimeRollbackBody) -> dict[str, Any]:
     """回退运行配置至指定历史版本 cN，生成新版本并立即热重载生效。"""
-    c = container(request)
-    op = operator(request)
 
-    def _do_rollback() -> dict[str, Any]:
-        store = _runtime_store(c)
+    def _mutate(_c: Any, store: RuntimeConfigStore, op: str) -> tuple[dict[str, Any], bool]:
         store.rollback(body.targetRev, body.reason, op)
-        c.apply_runtime_config()
-        request.app.state.report_keys = c.settings.report_api_key_set()
-        return {**store.public_state(), "targetRev": body.targetRev.strip()}
+        return {**store.public_state(), "targetRev": body.targetRev.strip()}, True
 
-    try:
-        out = await asyncio.to_thread(_do_rollback)
-    except RuntimeConfigValidationError as exc:
-        raise bad_request(str(exc), "INVALID_RUNTIME_CONFIG", errors=exc.errors) from exc
-    if hasattr(c.gateway, "aclose_retired"):
-        await c.gateway.aclose_retired()
-    return out
+    return await _apply_runtime_mutation(request, _mutate)
 
 
 class RuntimeSyncEnvBody(BaseModel):
@@ -735,29 +794,17 @@ class RuntimeSyncEnvBody(BaseModel):
 @router.post("/settings/runtime/sync-env")
 async def sync_runtime_settings_from_env(request: Request, body: RuntimeSyncEnvBody | None = None) -> dict[str, Any]:
     """从进程启动时的环境变量重新同步运行配置并立即热重载生效。"""
-    c = container(request)
-    op = operator(request)
     note_val = body.note if body else ""
 
-    def _do_sync() -> tuple[dict[str, Any], bool]:
-        store = _runtime_store(c)
+    def _mutate(c_local: Any, store: RuntimeConfigStore, op: str) -> tuple[dict[str, Any], bool]:
         _, did_change = store.sync_from_env(
-            c.env_settings or c.settings,
+            c_local.env_settings or c_local.settings,
             op,
             note=note_val,
         )
-        if did_change:
-            c.apply_runtime_config()
-            request.app.state.report_keys = c.settings.report_api_key_set()
         return store.public_state(), did_change
 
-    try:
-        state, changed = await asyncio.to_thread(_do_sync)
-    except RuntimeConfigValidationError as exc:
-        raise bad_request(str(exc), "INVALID_RUNTIME_CONFIG", errors=exc.errors) from exc
-    if changed and hasattr(c.gateway, "aclose_retired"):
-        await c.gateway.aclose_retired()
-    return state
+    return await _apply_runtime_mutation(request, _mutate)
 
 
 # ============================================================================ 上游与嵌入调用凭证（X-API-Key）
@@ -793,13 +840,10 @@ def get_api_key_settings(request: Request) -> dict[str, Any]:
 @router.put("/settings/api-key")
 async def update_api_key_settings(request: Request, body: ApiKeyUpdateBody) -> dict[str, Any]:
     """修改或清空调用 API Key，持久化至运行配置并免重启立即热生效。"""
-    c = container(request)
-    op = operator(request)
     raw = body.apiKeys or ""
     clean_note = (body.note or "").strip()
 
-    def _do_update_key() -> tuple[dict[str, Any], bool]:
-        store = _runtime_store(c)
+    def _mutate(_c: Any, store: RuntimeConfigStore, op: str) -> tuple[dict[str, Any], bool]:
         has_ctrl = bool(re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", raw))
         cleaned_items = split_api_keys(raw)
         if not cleaned_items and not has_ctrl:
@@ -815,18 +859,9 @@ async def update_api_key_settings(request: Request, body: ApiKeyUpdateBody) -> d
                 op,
                 note=clean_note or "更新调用 API Key",
             )
-        if did_change:
-            c.apply_runtime_config()
-            request.app.state.report_keys = c.settings.report_api_key_set()
         return {**_api_key_payload(snap), "runtimeState": store.public_state()}, did_change
 
-    try:
-        out, changed = await asyncio.to_thread(_do_update_key)
-    except RuntimeConfigValidationError as exc:
-        raise bad_request(str(exc), "INVALID_RUNTIME_CONFIG", errors=exc.errors) from exc
-    if changed and hasattr(c.gateway, "aclose_retired"):
-        await c.gateway.aclose_retired()
-    return out
+    return await _apply_runtime_mutation(request, _mutate)
 
 
 @router.post("/settings/api-key/regenerate")
@@ -835,27 +870,15 @@ async def regenerate_api_key_settings(
     body: ApiKeyRegenerateBody | None = Body(default=None),
 ) -> dict[str, Any]:
     """重新生成高强度调用 API Key，原密钥免重启立即失效。"""
-    c = container(request)
-    op = operator(request)
     clean_note = (body.note if body else "").strip()
     new_key = f"ra_{secrets.token_urlsafe(24)}"
 
-    def _do_regenerate() -> tuple[dict[str, Any], bool]:
-        store = _runtime_store(c)
+    def _mutate(_c: Any, store: RuntimeConfigStore, op: str) -> tuple[dict[str, Any], bool]:
         snap, did_change = store.update(
             {"reportApiKeys": new_key},
             op,
             note=clean_note or "重新生成调用 API Key",
         )
-        if did_change:
-            c.apply_runtime_config()
-            request.app.state.report_keys = c.settings.report_api_key_set()
         return {**_api_key_payload(snap), "runtimeState": store.public_state()}, did_change
 
-    try:
-        out, changed = await asyncio.to_thread(_do_regenerate)
-    except RuntimeConfigValidationError as exc:
-        raise bad_request(str(exc), "INVALID_RUNTIME_CONFIG", errors=exc.errors) from exc
-    if changed and hasattr(c.gateway, "aclose_retired"):
-        await c.gateway.aclose_retired()
-    return out
+    return await _apply_runtime_mutation(request, _mutate)

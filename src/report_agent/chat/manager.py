@@ -209,9 +209,11 @@ class ChatRunManager:
                 status = str(outcome.get("status") or "")
                 dur_ms = int(outcome.get("durationMs") or int((time.monotonic() - ch.started_mono) * 1000))
                 if status in ("SUCCESS", "PARTIAL"):
+                    found_cnt = int(outcome.get("foundCount") or 0)
+                    total_cnt = int(outcome.get("totalCount") or 0)
                     ch.mapper.append_custom(
                         "done",
-                        f"报告生成完成（找到 {outcome['foundCount']}/{outcome['totalCount']} 个字段）",
+                        f"报告生成完成（找到 {found_cnt}/{total_cnt} 个字段）",
                         ok=True,
                         at_ms=dur_ms,
                     )

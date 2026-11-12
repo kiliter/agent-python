@@ -28,7 +28,8 @@ _TOOL_LABELS: dict[str, str] = {
 }
 
 _SENSITIVE_DIGITS_RE = re.compile(r"\d{8,}")
-_QUOTED_LITERAL_RE = re.compile(r"'[^']{4,}'")
+_SINGLE_QUOTED_LITERAL_RE = re.compile(r"'[^']{4,}'")
+_DOUBLE_QUOTED_LITERAL_RE = re.compile(r'"[^"]{4,}"')
 _MAX_ERR_CHARS = 120
 
 
@@ -42,11 +43,12 @@ def _safe_nonneg_int(val: Any, default: int = 0) -> int:
 
 
 def _sanitize_error(raw: Any, fallback: str = "未知错误") -> str:
-    """清洗错误提示：折叠换行、掩码可能携带的入参字面量与长数字串，防止泄露客户隐私或原始报文。"""
+    """清洗错误提示：折叠换行、掩码可能携带的单双引号入参字面量与长数字串，防止泄露客户隐私或原始报文。"""
     text = " ".join(str(raw or "").split()).strip()
     if not text:
         return fallback
-    text = _QUOTED_LITERAL_RE.sub("'***'", text)
+    text = _SINGLE_QUOTED_LITERAL_RE.sub("'***'", text)
+    text = _DOUBLE_QUOTED_LITERAL_RE.sub('"***"', text)
     text = _SENSITIVE_DIGITS_RE.sub("***", text)
     if len(text) > _MAX_ERR_CHARS:
         text = text[:_MAX_ERR_CHARS].rstrip() + "…"

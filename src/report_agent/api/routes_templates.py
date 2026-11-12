@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any, Literal
@@ -21,10 +22,22 @@ from ..runtime.runner import RunRequest
 from ..store.cases import CaseStore
 from ..store.fsutil import fmt_time
 from ..store.layout import CASE_ID_RE, SAFE_ID_RE
-from ..store.service import InvalidResource, ResourceNotFound, template_from_payload, tpl_ref
+from ..store.service import InvalidResource, ResourceNotFound, ResourceState, template_from_payload, tpl_ref
 from .auth import require_user
-from .common import bad_request, container, not_found, operator, sse_run
-from .dto import (body_usage, dto_to_field, dto_to_input, field_to_dto, input_to_dto, ref_by_fields, template_item)
+from .common import (
+    PublishBody,
+    RollbackBody,
+    bad_request,
+    check_rollback_reason,
+    container,
+    not_found,
+    operator,
+    parse_expected_revision,
+    resource_revisions,
+    sse_run,
+    validation_result_with_drift,
+)
+from .dto import body_usage, dto_to_field, dto_to_input, field_to_dto, input_to_dto, ref_by_fields, template_item
 from .run_views import detail_view
 
 router = APIRouter(prefix="/api/v1", tags=["模板"], dependencies=[Depends(require_user)])
@@ -53,7 +66,7 @@ def _working(request: Request, tid: int) -> Template:
     return tpl
 
 
-def _item(request: Request, tid: int) -> dict[str, Any]:
+def _item(request: Request, tid: int, *, state: ResourceState | None = None) -> dict[str, Any]:
     _check_tid(tid)
     c = container(request)
     try:
@@ -62,22 +75,38 @@ def _item(request: Request, tid: int) -> dict[str, Any]:
         tpl = c.service.template_online(tid)
     if tpl is None:
         raise not_found(f"模板 {tid} 不存在")
-    _, live = c.service.live()
-    return template_item(tpl, c.service.state(tpl_ref(tid), live), c.service.overlay(), c.runs.stats_7d(),
-                         c.cases.count(tid))
+    resolved_state = state
+    if resolved_state is None:
+        _, live = c.service.live()
+        resolved_state = c.service.state(tpl_ref(tid), live)
+    return template_item(tpl, resolved_state, c.service.overlay(), c.runs.stats_7d(), c.cases.count(tid))
 
 
-def _detail(request: Request, tid: int, tpl: Template, version: str) -> dict[str, Any]:
+def _detail(
+    request: Request,
+    tid: int,
+    tpl: Template,
+    version: str,
+    *,
+    item: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     c = container(request)
     usage = body_usage(tpl.body)
     refs = ref_by_fields(tpl)
     state = c.service.state(tpl_ref(tid))
+    resolved_item = item if item is not None else _item(request, tid, state=state)
     return {
-        "item": _item(request, tid), "version": version, "id": tpl.id, "name": tpl.name,
-        "description": tpl.definition.description, "bodyText": tpl.body,
+        "item": resolved_item,
+        "version": version,
+        "id": tpl.id,
+        "name": tpl.name,
+        "description": tpl.definition.description,
+        "bodyText": tpl.body,
         "fields": [field_to_dto(f, usage, refs.get(f.name)) for f in tpl.definition.fields],
-        "inputs": [input_to_dto(i) for i in tpl.definition.inputs], "skills": list(tpl.definition.skills),
-        "offline": tpl.offline, "draft": state.draft,
+        "inputs": [input_to_dto(i) for i in tpl.definition.inputs],
+        "skills": list(tpl.definition.skills),
+        "offline": tpl.offline,
+        "draft": state.draft,
     }
 
 
@@ -92,15 +121,6 @@ def _resolve_skills(request: Request, refs: list[str]) -> list[str]:
         if sk.id not in out:
             out.append(sk.id)
     return out
-
-
-def _parse_expected_revision(raw: Any) -> int | None:
-    """校验可选草稿乐观锁版本号（允许 None 或非负整数）。"""
-    if raw is None:
-        return None
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
-        raise bad_request("草稿乐观锁版本号 revision 必须是非负整数", "INVALID_REVISION")
-    return raw
 
 
 def _mutate(request: Request, tid: int, fn, revision: int | None = None) -> dict[str, Any]:
@@ -142,9 +162,15 @@ def create_template(request: Request, body: CreateTemplateBody) -> dict[str, Any
     if c.drafts.exists(tpl_ref(body.id)) or c.service.template_online(body.id) is not None:
         raise bad_request(f"模板编号 {body.id} 已存在", "TEMPLATE_EXISTS")
     skills = _resolve_skills(request, body.skills)
-    tpl = Template(definition=TemplateDef(id=body.id, name=body.name.strip() or f"模板{body.id}",
-                                          description=body.description, skills=skills),
-                   body=f"服务争议点1:{body.name.strip()}\n")
+    tpl = Template(
+        definition=TemplateDef(
+            id=body.id,
+            name=body.name.strip() or f"模板{body.id}",
+            description=body.description,
+            skills=skills,
+        ),
+        body=f"服务争议点1:{body.name.strip()}\n",
+    )
     c.service.save_template(tpl, operator(request), action="create")
     return _item(request, body.id)
 
@@ -232,12 +258,24 @@ class DraftBody(BaseModel):
     fields: list[dict[str, Any]] | None = None
     inputs: list[dict[str, Any]] | None = None
     skills: list[str] | None = None
-    revision: int | None = Field(default=None, description="乐观锁：上次读取到的草稿版本号")
+    revision: Any = Field(default=None, description="乐观锁：上次读取到的草稿版本号")
+
+
+def _apply_draft_body_patch(request: Request, tid: int, base: Template | None, body: DraftBody) -> Template:
+    data: dict[str, Any] = {"name": body.name, "description": body.description}
+    if body.fields is not None:
+        data["fields"] = [dto_to_field(f) for f in body.fields]
+    if body.inputs is not None:
+        data["inputs"] = [dto_to_input(i) for i in body.inputs]
+    if body.skills is not None:
+        data["skills"] = _resolve_skills(request, body.skills)
+    return template_from_payload(tid, base, data, body.bodyText)
 
 
 @router.put("/templates/{tid}/draft")
 def save_draft(request: Request, tid: int, body: DraftBody) -> dict[str, Any]:
     _check_tid(tid)
+    expected_rev = parse_expected_revision(body.revision)
     c = container(request)
     ref = tpl_ref(tid)
     try:
@@ -246,15 +284,8 @@ def save_draft(request: Request, tid: int, body: DraftBody) -> dict[str, Any]:
         base = c.service.template_online(tid)
     if base is None and not c.drafts.exists(ref):
         raise not_found(f"模板 {tid} 不存在")
-    data: dict[str, Any] = {"name": body.name, "description": body.description}
-    if body.fields is not None:
-        data["fields"] = [dto_to_field(f) for f in body.fields]
-    if body.inputs is not None:
-        data["inputs"] = [dto_to_input(i) for i in body.inputs]
-    if body.skills is not None:
-        data["skills"] = _resolve_skills(request, body.skills)
-    tpl = template_from_payload(tid, base, data, body.bodyText)
-    meta = c.service.save_template(tpl, operator(request), expected_revision=body.revision)
+    tpl = _apply_draft_body_patch(request, tid, base, body)
+    meta = c.service.save_template(tpl, operator(request), expected_revision=expected_rev)
     issues = c.service.validate_template_working(tid, tpl)
     return {"savedAt": fmt_time(meta["updatedAt"]), "draft": meta, "issues": [i.to_dict() for i in issues]}
 
@@ -270,7 +301,8 @@ def discard_draft(request: Request, tid: int) -> dict[str, Any]:
             raise not_found(f"模板 {tid} 不存在")
         return {"bodyText": "", "rev": "—", "deleted": True}
     state = c.service.state(tpl_ref(tid))
-    return {"bodyText": tpl.body, "rev": state.online_rev or "—", "detail": _detail(request, tid, tpl, "online")}
+    item = _item(request, tid, state=state)
+    return {"bodyText": tpl.body, "rev": state.online_rev or "—", "detail": _detail(request, tid, tpl, "online", item=item)}
 
 
 @router.post("/templates/{tid}/validate")
@@ -279,25 +311,10 @@ def validate(request: Request, tid: int, body: DraftBody | None = None) -> dict[
     c = container(request)
     tpl = _working(request, tid)
     if body is not None and any(v is not None for v in body.model_dump(exclude={"revision"}).values()):
-        data: dict[str, Any] = {"name": body.name, "description": body.description}
-        if body.fields is not None:
-            data["fields"] = [dto_to_field(f) for f in body.fields]
-        if body.inputs is not None:
-            data["inputs"] = [dto_to_input(i) for i in body.inputs]
-        if body.skills is not None:
-            data["skills"] = _resolve_skills(request, body.skills)
-        tpl = template_from_payload(tid, tpl, data, body.bodyText)
+        tpl = _apply_draft_body_patch(request, tid, tpl, body)
     issues = c.service.validate_template_working(tid, tpl)
     state = c.service.state(tpl_ref(tid))
-    drift = bool(state.draft and state.online_rev and state.base_rev and state.base_rev != state.online_rev)
-    return {"errors": [i.to_dict() for i in issues if i.level == "error"],
-            "warnings": [i.to_dict() for i in issues if i.level == "warning"],
-            "drift": {"baseRev": state.base_rev, "onlineRev": state.online_rev} if drift else None,
-            "casesCount": c.cases.count(tid)}
-
-
-class PublishBody(BaseModel):
-    note: str = ""
+    return validation_result_with_drift(issues, state, casesCount=c.cases.count(tid))
 
 
 @router.post("/templates/{tid}/publish")
@@ -312,25 +329,25 @@ def publish(request: Request, tid: int, body: PublishBody) -> dict[str, Any]:
     result = c.service.publish_draft(ref, operator(request), body.note)
     e = result.entry
     item = _item(request, tid)
-    return {"rev": e["rev"], "status": item["status"], "publishedAt": fmt_time(e["time"]), "summary": e["summary"],
-            "warnings": [i.to_dict() for i in result.warnings], "item": item}
-
-
-class RollbackBody(BaseModel):
-    targetRev: str
-    mode: Literal["draft_only", "publish_now"] = "draft_only"
-    reason: str = ""
+    return {
+        "rev": e["rev"],
+        "status": item["status"],
+        "publishedAt": fmt_time(e["time"]),
+        "summary": e["summary"],
+        "warnings": [i.to_dict() for i in result.warnings],
+        "item": item,
+    }
 
 
 @router.post("/templates/{tid}/rollback")
 def rollback(request: Request, tid: int, body: RollbackBody) -> dict[str, Any]:
     _check_tid(tid)
+    check_rollback_reason(body)
     c = container(request)
-    if body.mode == "publish_now" and not body.reason.strip():
-        raise bad_request("直接回退上线必须填写原因")
     result = c.service.rollback(tpl_ref(tid), body.targetRev, body.mode, body.reason, operator(request))
     tpl = _working(request, tid)
-    return {**result, "item": _item(request, tid), "detail": _detail(request, tid, tpl, "working")}
+    item = _item(request, tid)
+    return {**result, "item": item, "detail": _detail(request, tid, tpl, "working", item=item)}
 
 
 @router.get("/templates/{tid}/revisions")
@@ -339,13 +356,10 @@ def revisions(request: Request, tid: int) -> list[dict[str, Any]]:
     _check_tid(tid)
     c = container(request)
     ref = tpl_ref(tid)
-    hist = c.releases.history(ref)
-    if not hist and not c.drafts.exists(ref) and c.service.template_online(tid) is None:
+    revs = resource_revisions(c, ref)
+    if not revs and not c.drafts.exists(ref) and c.service.template_online(tid) is None:
         raise not_found(f"模板 {tid} 不存在")
-    online = c.releases.online_change(ref)
-    return [{"rev": e["rev"], "type": e.get("type"), "operator": e.get("operator"), "time": fmt_time(e.get("time")),
-             "note": e.get("note") or e.get("summary"), "summary": e.get("summary"),
-             "online": bool(online and online["rev"] == e["rev"])} for e in hist]
+    return revs
 
 
 def _diff_fields(a: Template | None, b: Template | None) -> list[dict[str, Any]]:
@@ -359,7 +373,8 @@ def _diff_fields(a: Template | None, b: Template | None) -> list[dict[str, Any]]
         elif y and not x:
             out.append({"change": "added", "name": name, "a": None, "b": field_to_dto(y), "props": []})
         elif x and y and x != y:
-            props = [k for k in x.model_dump() if x.model_dump()[k] != y.model_dump()[k]]
+            dx, dy = x.model_dump(), y.model_dump()
+            props = [k for k, vx in dx.items() if vx != dy.get(k)]
             out.append({"change": "modified", "name": name, "a": field_to_dto(x), "b": field_to_dto(y), "props": props})
     return out
 
@@ -371,8 +386,12 @@ def _diff_inputs(a: Template | None, b: Template | None) -> list[dict[str, Any]]
     for key in list(dict.fromkeys([*ia, *ib])):
         x, y = ia.get(key), ib.get(key)
         if x != y:
-            out.append({"change": "removed" if not y else "added" if not x else "modified", "key": key,
-                        "a": input_to_dto(x) if x else None, "b": input_to_dto(y) if y else None})
+            out.append({
+                "change": "removed" if not y else "added" if not x else "modified",
+                "key": key,
+                "a": input_to_dto(x) if x else None,
+                "b": input_to_dto(y) if y else None,
+            })
     return out
 
 
@@ -384,16 +403,25 @@ def diff(request: Request, tid: int, a: str = "draft", b: str = "online") -> dic
     ta, tb = c.service.template_version(tid, a), c.service.template_version(tid, b)
     if ta is None and tb is None:
         raise not_found(f"模板 {tid} 没有 {a} 和 {b} 版本")
-    return {"a": a, "b": b, "fields": _diff_fields(ta, tb), "inputs": _diff_inputs(ta, tb),
-            "bodyA": ta.body if ta else "", "bodyB": tb.body if tb else "",
-            "bodyIdentical": (ta.body if ta else "") == (tb.body if tb else ""),
-            "skillsA": ta.definition.skills if ta else [], "skillsB": tb.definition.skills if tb else []}
+    return {
+        "a": a,
+        "b": b,
+        "fields": _diff_fields(ta, tb),
+        "inputs": _diff_inputs(ta, tb),
+        "bodyA": ta.body if ta else "",
+        "bodyB": tb.body if tb else "",
+        "bodyIdentical": (ta.body if ta else "") == (tb.body if tb else ""),
+        "skillsA": ta.definition.skills if ta else [],
+        "skillsB": tb.definition.skills if tb else [],
+    }
 
 
 class PreviewBody(BaseModel):
     bodyText: str | None = None
-    values: dict[str, Any] = Field(default_factory=dict,
-                                   description="字段名 → 值；不传或为 null 视为找不到。列表字段传行对象数组或其 JSON 字符串")
+    values: dict[str, Any] = Field(
+        default_factory=dict,
+        description="字段名 → 值；不传或为 null 视为找不到。列表字段传行对象数组或其 JSON 字符串",
+    )
     fields: list[dict[str, Any]] | None = Field(
         default=None,
         description="可选内存态字段定义列表（兼容后端 FieldDef 与前端 TemplateField DTO），传入时优先用于构造预览上下文",
@@ -446,7 +474,13 @@ def render_preview(request: Request, tid: int, body: PreviewBody) -> dict[str, A
         if val not in (None, ""):
             ctx[f.name] = TrackedValue(str(val), f.name)
         else:
-            missing = "" if f.whenMissing == "empty" else f.defaultValue if f.whenMissing == "value" else "{{" + f.name + "}}"
+            missing = (
+                ""
+                if f.whenMissing == "empty"
+                else f.defaultValue
+                if f.whenMissing == "value"
+                else "{{" + f.name + "}}"
+            )
             ctx[f.name] = TrackedValue(missing, f.name, missing=True)
     try:
         undefined = sorted(body_variables(text) - set(ctx))
@@ -484,7 +518,7 @@ def _rename_body_variable(text: str, old_name: str, new_name: str) -> str:
             break
         nxt = text[brace + 1]
         if nxt not in ("#", "{", "%"):
-            out.append(text[i:brace + 1])
+            out.append(text[i : brace + 1])
             i = brace + 1
             continue
         out.append(text[i:brace])
@@ -493,7 +527,7 @@ def _rename_body_variable(text: str, old_name: str, new_name: str) -> str:
             if end_comment == -1:
                 out.append(text[brace:])
                 break
-            out.append(text[brace:end_comment + 2])
+            out.append(text[brace : end_comment + 2])
             i = end_comment + 2
             continue
 
@@ -571,7 +605,7 @@ def save_field(request: Request, tid: int, name: str, body: dict[str, Any]) -> d
             "INVALID_FIELD_EVIDENCE",
         )
     original = str(body.get("originalName") or name).strip()
-    revision = _parse_expected_revision(body.get("revision"))
+    revision = parse_expected_revision(body.get("revision"))
 
     def fn(data: dict[str, Any], text: str) -> str:
         fields = data["fields"]
@@ -624,7 +658,7 @@ def delete_field(
         data["fields"] = [f for f in data["fields"] if f["name"] != name]
         return text
 
-    meta = _mutate(request, tid, fn, _parse_expected_revision(eff_rev))
+    meta = _mutate(request, tid, fn, parse_expected_revision(eff_rev))
     return {"deletedName": name, "revision": meta["revision"], "draft": meta}
 
 
@@ -654,7 +688,7 @@ def batch_evidence(request: Request, tid: int, body: BatchEvidenceBody) -> dict[
                 count += 1
         return text
 
-    meta = _mutate(request, tid, fn, _parse_expected_revision(body.revision))
+    meta = _mutate(request, tid, fn, parse_expected_revision(body.revision))
     return {"updatedCount": count, "revision": meta["revision"], "draft": meta}
 
 
@@ -674,7 +708,7 @@ def reorder_fields(request: Request, tid: int, body: OrderBody) -> dict[str, Any
         data["fields"] = [by_name[n] for n in body.names]
         return text
 
-    meta = _mutate(request, tid, fn, _parse_expected_revision(body.revision))
+    meta = _mutate(request, tid, fn, parse_expected_revision(body.revision))
     return {"names": body.names, "revision": meta["revision"], "draft": meta}
 
 
@@ -692,17 +726,22 @@ def update_skills(request: Request, tid: int, body: SkillsBody) -> dict[str, Any
         data["skills"] = skills
         return text
 
-    meta = _mutate(request, tid, fn, _parse_expected_revision(body.revision))
+    meta = _mutate(request, tid, fn, parse_expected_revision(body.revision))
     return {"skills": skills, "revision": meta["revision"], "draft": meta}
 
 
 # ============================================================================ 用例
 def _case_dto(case) -> dict[str, Any]:
     total = len(case.expectedValues)
-    return {**case.model_dump(), "mobile": case.inputs.get("手机号码", ""), "busiName": case.inputs.get("业务名称", ""),
-            "createTime": case.inputs.get("创建时间", ""), "busiMonth": case.inputs.get("业务月份", ""),
-            "expectedCount": f"{sum(1 for v in case.expectedValues.values() if v)} / {total}" if total else "—",
-            "updatedAt": fmt_time(case.updatedAt)}
+    return {
+        **case.model_dump(),
+        "mobile": case.inputs.get("手机号码", ""),
+        "busiName": case.inputs.get("业务名称", ""),
+        "createTime": case.inputs.get("创建时间", ""),
+        "busiMonth": case.inputs.get("业务月份", ""),
+        "expectedCount": f"{sum(1 for v in case.expectedValues.values() if v)} / {total}" if total else "—",
+        "updatedAt": fmt_time(case.updatedAt),
+    }
 
 
 @router.get("/templates/{tid}/cases")
@@ -731,13 +770,21 @@ def create_case(request: Request, tid: int, body: dict[str, Any]) -> dict[str, A
             raise not_found(f"运行记录 {from_run_id} 不存在")
         data.setdefault("inputs", run.get("inputs") or {})
         data.setdefault("documentText", run.get("document") or "")
-        data.setdefault("expectedValues", {
-            # #Created By AiCoding(codex) 列表字段的值转为 JSON 文本保存
-            str(f["name"]): ("" if f.get("value") is None else json.dumps(f["value"], ensure_ascii=False)
-                             if isinstance(f.get("value"), (list, dict)) else str(f.get("value")))
-            for f in (run.get("fields") or [])
-            if isinstance(f, dict) and f.get("name") and (f.get("status") or f.get("runStatus")) == "found"
-        })
+        data.setdefault(
+            "expectedValues",
+            {
+                # #Created By AiCoding(codex) 列表字段的值转为 JSON 文本保存
+                str(f["name"]): (
+                    ""
+                    if f.get("value") is None
+                    else json.dumps(f["value"], ensure_ascii=False)
+                    if isinstance(f.get("value"), (list, dict))
+                    else str(f.get("value"))
+                )
+                for f in (run.get("fields") or [])
+                if isinstance(f, dict) and f.get("name") and (f.get("status") or f.get("runStatus")) == "found"
+            },
+        )
         data.setdefault("source", "由运行记录转入")
     try:
         case = c.cases.save(tid, CaseStore.from_payload(data))
@@ -775,9 +822,8 @@ class DryRunBody(BaseModel):
     caseId: str | None = None
 
 
-def _dry_request(request: Request, tid: int, body: DryRunBody) -> RunRequest:
+def _build_dry_request(c, op: str, tid: int, body: DryRunBody) -> RunRequest:
     _check_tid(tid)
-    c = container(request)
     inputs, doc = dict(body.inputs), body.documentText
     if body.caseId:
         _check_case_id(body.caseId)
@@ -786,21 +832,31 @@ def _dry_request(request: Request, tid: int, body: DryRunBody) -> RunRequest:
             raise not_found(f"用例 {body.caseId} 不存在")
         inputs = {**case.inputs, **inputs}
         doc = doc or case.documentText
-    return RunRequest(template_id=tid, inputs={k: "" if v is None else str(v) for k, v in inputs.items()},
-                      document=doc, entry="试运行", target=body.targetVersion, operator=operator(request),
-                      extra={"caseId": body.caseId} if body.caseId else {})
+    return RunRequest(
+        template_id=tid,
+        inputs={k: "" if v is None else str(v) for k, v in inputs.items()},
+        document=doc,
+        entry="试运行",
+        target=body.targetVersion,
+        operator=op,
+        extra={"caseId": body.caseId} if body.caseId else {},
+    )
 
 
 @router.post("/templates/{tid}/dryrun")
 async def dry_run(request: Request, tid: int, body: DryRunBody) -> dict[str, Any]:
-    out = await container(request).runner.run(_dry_request(request, tid, body))
+    c = container(request)
+    req = await asyncio.to_thread(_build_dry_request, c, operator(request), tid, body)
+    out = await c.runner.run(req)
     return detail_view(out)
 
 
 @router.post("/templates/{tid}/dryrun/stream")
 async def dry_run_stream(request: Request, tid: int, body: DryRunBody):
     """SSE：event=event 为过程事件，event=final 为完整结果，event=error 为启动失败。"""
-    return sse_run(container(request).runner, _dry_request(request, tid, body), detail_view)
+    c = container(request)
+    req = await asyncio.to_thread(_build_dry_request, c, operator(request), tid, body)
+    return sse_run(c.runner, req, detail_view)
 
 
 __all__ = ["router", "ResourceNotFound"]

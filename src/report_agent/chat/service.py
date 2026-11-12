@@ -15,7 +15,6 @@ from datetime import datetime
 import logging
 import os
 from pathlib import Path
-import re
 from typing import Any, Literal
 
 from ..domain.jinja_env import render_body
@@ -28,7 +27,7 @@ from ..store.publisher import Publisher
 from ..store.releases import ReleaseNotFound, ReleaseStore
 from ..store.runs import RunStore, new_run_id
 from ..store.service import ResourceService
-from .agent import ChatAgent, ChatDeps
+from .agent import ChatAgent, ChatDeps, strip_java_rule_note
 from .manager import ChatRunManager, RunCompletion
 from .store import SESSION_ID_RE, ChatStore, inputs_fingerprint, session_id_for
 
@@ -37,7 +36,6 @@ log = logging.getLogger(__name__)
 _LEVEL_RANK = {"高": 0, "中": 1, "低": 2}
 _MAX_SESSION_KEY_LEN = 128
 _MAX_RUN_INDEX = 4096
-_JAVA_RULE_NOTE_RE = re.compile(r"\n*原规则（Java）：")
 
 
 class ChatError(Exception):
@@ -324,8 +322,8 @@ class ChatService:
         rs: ResourceSet,
         session_inputs: dict[str, str],
     ) -> dict[str, Any]:
-        """动态补算单条消息中的模板在线状态、缺参提示与在途实时步骤。"""
-        out = copy.deepcopy(msg)
+        """动态补算单条消息中的模板在线状态、缺参提示与在途实时步骤（按消息类型定向浅拷贝避免全量深拷贝大正文）。"""
+        out = dict(msg)
         kind = out.get("kind")
         if kind == "recommend":
             items_out: list[dict[str, Any]] = []
@@ -340,8 +338,13 @@ class ChatService:
                 if tpl is not None and not offline:
                     it_copy["templateName"] = tpl.name
                     it_copy["missingRequired"] = _missing_required_keys(tpl, session_inputs)
+                elif isinstance(it_copy.get("missingRequired"), list):
+                    it_copy["missingRequired"] = list(it_copy["missingRequired"])
                 items_out.append(it_copy)
             out["items"] = items_out
+        elif kind == "ask_params":
+            if isinstance(out.get("params"), list):
+                out["params"] = [dict(p) for p in out["params"] if isinstance(p, dict)]
         elif kind == "run":
             tid = int(out.get("templateId", 0))
             tpl = rs.templates.get(tid)
@@ -349,6 +352,8 @@ class ChatService:
             rid = str(out.get("runId") or "")
             live_steps = self.manager.get_steps(rid) if rid else None
             out["steps"] = _merge_steps(out.get("steps") or [], live_steps)
+            out["missingShown"] = list(out.get("missingShown") or [])
+            out["versions"] = [dict(v) for v in (out.get("versions") or []) if isinstance(v, dict)]
         return out
 
     def _build_view(
@@ -374,6 +379,7 @@ class ChatService:
         ]
         _backfill_legacy_rewrite_links(out_messages)
         active_run_id = self.manager.has_active_run(sid)
+        raw_confirmed = session.get("confirmed")
         view: dict[str, Any] = {
             "sessionId": sid,
             "userId": str(session["userId"]),
@@ -386,7 +392,7 @@ class ChatService:
             "inputsVersion": int(session.get("inputsVersion", 1)),
             "documentChars": len(session.get("document") or ""),
             "activeRunId": active_run_id,
-            "confirmed": copy.deepcopy(session.get("confirmed")),
+            "confirmed": dict(raw_confirmed) if isinstance(raw_confirmed, dict) else None,
             "messages": out_messages,
         }
         if created is not None:
@@ -439,7 +445,7 @@ class ChatService:
         _, rs = await self._capture_snapshot(tgt, allow_empty=True)
 
         async with self.store.lock_for(sid):
-            session = self.store.get(sid)
+            session = await self.store.aget(sid)
             if session is None:
                 now = now_iso()
                 init_inputs = {k: v for k, v in clean_inputs.items() if v}
@@ -462,8 +468,11 @@ class ChatService:
                     "confirmRecords": [],
                     "messages": [],
                 }
-                saved = self.store.save(session)
+                saved = await self.store.asave(session)
                 return self._build_view(saved, rs, created=True, inputs_changed=False)
+
+            # 严禁仅持 API Key 的调用方通过传入 target="online" 篡改或读取已有草稿态会话
+            self._ensure_caller_allowed(str(session.get("target") or "online"), caller)
 
             created = False
             inputs_changed = False
@@ -516,19 +525,19 @@ class ChatService:
             if self._heal_interrupted_in_place(session):
                 dirty = True
 
-            saved = self.store.save(session) if dirty else session
+            saved = await self.store.asave(session) if dirty else session
             return self._build_view(saved, rs, created=created, inputs_changed=inputs_changed)
 
     async def get_session_view(self, sid: str, *, caller: ChatCaller | None = None) -> dict[str, Any]:
         """读取会话对外视图，自动修复遗留 RUNNING 状态并计算模板在线状态。"""
         sid = self._check_sid_format(sid)
         async with self.store.lock_for(sid):
-            session = self.store.get(sid)
+            session = await self.store.aget(sid)
             if session is None:
                 raise ChatError(404, "SESSION_NOT_FOUND", f"会话 {sid} 不存在")
             self._ensure_caller_allowed(str(session.get("target") or "online"), caller)
             if self._heal_interrupted_in_place(session):
-                session = self.store.save(session)
+                session = await self.store.asave(session)
         _, rs = await self._capture_snapshot(str(session.get("target") or "online"), allow_empty=True)
         return self._build_view(session, rs)
 
@@ -536,12 +545,12 @@ class ChatService:
         """返回换模板弹窗的模板列表：推荐过的模板排前面（高>中>低），附带最近一次运行状态。"""
         sid = self._check_sid_format(sid)
         async with self.store.lock_for(sid):
-            session = self.store.get(sid)
+            session = await self.store.aget(sid)
             if session is None:
                 raise ChatError(404, "SESSION_NOT_FOUND", f"会话 {sid} 不存在")
             self._ensure_caller_allowed(str(session.get("target") or "online"), caller)
             if self._heal_interrupted_in_place(session):
-                session = self.store.save(session)
+                session = await self.store.asave(session)
 
         _, rs = await self._capture_snapshot(str(session.get("target") or "online"), allow_empty=True)
 
@@ -605,13 +614,13 @@ class ChatService:
         """返回指定模板的结构详情、入参当前值、可见字段说明与预填充样例正文（已下线模板亦允许预览）。#Created By AiCoding(codex)"""
         sid = self._check_sid_format(sid)
         async with self.store.lock_for(sid):
-            session = self.store.get(sid)
+            session = await self.store.aget(sid)
             if session is None:
                 raise ChatError(404, "SESSION_NOT_FOUND", f"会话 {sid} 不存在")
             target = str(session.get("target") or "online")
             self._ensure_caller_allowed(target, caller)
             if self._heal_interrupted_in_place(session):
-                session = self.store.save(session)
+                session = await self.store.asave(session)
             session_inputs = dict(session.get("inputs") or {})
 
         rev, rs = await self._capture_snapshot(target, allow_empty=True)
@@ -670,12 +679,24 @@ class ChatService:
                         {"name": c.name, "type": c.type, "values": list(c.values)}
                         for c in f.columns
                     ],
-                    "description": _JAVA_RULE_NOTE_RE.split(f.description or "", maxsplit=1)[0].strip(),
+                    "description": strip_java_rule_note(f.description),
                 }
                 for f in tpl.definition.fields
                 if f.visible
             ],
         }
+
+    @staticmethod
+    def _apply_extracted_inputs(cur: dict[str, Any], extracted: dict[str, str]) -> bool:
+        """将聊天智能体从本轮自然语言中提取的非空入参合并入当前会话，减少重复落盘次数。"""
+        if not extracted:
+            return False
+        cur_inp = cur.setdefault("inputs", {})
+        cur_src = cur.setdefault("inputSources", {})
+        for k, v in extracted.items():
+            cur_inp[k] = v
+            cur_src[k] = "用户补充"
+        return True
 
     # ------------------------------------------------------------------ 模板运行与事件流
     async def start_run(
@@ -690,12 +711,13 @@ class ChatService:
         """校验并发互斥、模板在线与入参完整性；缺参返回 ask_params，齐全则启动后台填报并返回 RUNNING 卡片。"""
         sid = self._check_sid_format(sid)
         async with self.store.lock_for(sid):
-            session = self.store.get(sid)
+            session = await self.store.aget(sid)
             if session is None:
                 raise ChatError(404, "SESSION_NOT_FOUND", f"会话 {sid} 不存在")
             target = str(session.get("target") or "online")
             self._ensure_caller_allowed(target, caller)
-            self._heal_interrupted_in_place(session)
+            if self._heal_interrupted_in_place(session):
+                session = await self.store.asave(session)
 
             if self.manager.has_active_run(sid) is not None:
                 raise ChatError(409, "RUN_IN_PROGRESS", "当前会话已有正在运行的任务，请等待完成或先停止")
@@ -716,6 +738,10 @@ class ChatService:
                     if val:
                         cur_inputs[key] = val
                         cur_sources[key] = "用户补充"
+                    elif cur_sources.get(key) == "用户补充":
+                        # 允许用户在补参卡片中清空此前误填的可选补充入参，同时不影响上层传入字段
+                        cur_inputs.pop(key, None)
+                        cur_sources.pop(key, None)
 
             ok, specs = _check_params(tpl, session.get("inputs") or {})
             if not ok:
@@ -730,7 +756,7 @@ class ChatService:
                     "params": specs,
                 }
                 session.setdefault("messages", []).append(ask_msg)
-                saved = self.store.save(session)
+                saved = await self.store.asave(session)
                 return copy.deepcopy(ask_msg), self._build_view(saved, rs)
 
             run_id = new_run_id()
@@ -758,7 +784,7 @@ class ChatService:
             }
             session.setdefault("messages", []).append(run_msg)
             self._remember_run(run_id, sid)
-            saved = self.store.save(session)
+            saved = await self.store.asave(session)
 
             req = RunRequest(
                 template_id=tpl.id,
@@ -779,7 +805,7 @@ class ChatService:
             except BaseException:
                 # 防御性回滚：若启动同步抛异常则移除刚追加的卡片
                 saved["messages"] = [m for m in saved.get("messages", []) if m.get("id") != run_msg["id"]]
-                self.store.save(saved)
+                await self.store.asave(saved)
                 raise
 
             return copy.deepcopy(run_msg), self._build_view(saved, rs)
@@ -789,7 +815,7 @@ class ChatService:
         sid = comp.session_id
         self._remember_run(comp.run_id, sid)
         async with self.store.lock_for(sid):
-            session = self.store.get(sid)
+            session = await self.store.aget(sid)
             if session is None:
                 return {
                     "id": f"m_run_{comp.run_id}",
@@ -873,7 +899,7 @@ class ChatService:
 
             card["steps"] = list(comp.steps or [])
             card["durationMs"] = int(comp.duration_ms or 0)
-            saved = self.store.save(session)
+            saved = await self.store.asave(session)
             cur_inputs = dict(saved.get("inputs") or {})
 
         _, rs = await self._capture_snapshot(target, allow_empty=True)
@@ -893,7 +919,7 @@ class ChatService:
         if not auto and not (text or "").strip():
             raise ChatError(400, "EMPTY_MESSAGE", "发送的消息内容不能为空")
         async with self.store.lock_for(sid):
-            session = self.store.get(sid)
+            session = await self.store.aget(sid)
             if session is None:
                 raise ChatError(404, "SESSION_NOT_FOUND", f"会话 {sid} 不存在")
             self._ensure_caller_allowed(str(session.get("target") or "online"), caller)
@@ -912,11 +938,12 @@ class ChatService:
         clean_text = (text or "").strip()
 
         async with self.store.lock_for(sid):
-            session = self.store.get(sid)
+            session = await self.store.aget(sid)
             if session is None:
                 raise ChatError(404, "SESSION_NOT_FOUND", f"会话 {sid} 不存在")
             dirty = self._heal_interrupted_in_place(session)
-            history_before = [copy.deepcopy(m) for m in (session.get("messages") or []) if isinstance(m, dict)]
+            # aget/asave 已保证返回独立会话深拷贝，此处只需截取追加前的消息切片，免去二次全量深拷贝
+            history_before = [m for m in (session.get("messages") or []) if isinstance(m, dict)]
             user_msg: dict[str, Any] | None = None
             if not auto:
                 user_msg = {
@@ -929,12 +956,12 @@ class ChatService:
                 session.setdefault("messages", []).append(user_msg)
                 dirty = True
             if dirty:
-                session = self.store.save(session)
+                session = await self.store.asave(session)
             target = str(session.get("target") or "online")
-            session_snapshot = copy.deepcopy(session)
+            session_snapshot = session
 
         if user_msg is not None:
-            yield ("message", user_msg)
+            yield ("message", dict(user_msg))
 
         yield ("status", {"text": "正在分析单据并匹配模板…" if auto else "正在思考…"})
 
@@ -957,28 +984,18 @@ class ChatService:
             yield ("done", {"session": view})
             return
 
-        # 合并本轮对话中智能体提取出的用户补充入参
         extracted_inputs = {
             str(k).strip(): str(v).strip()
             for k, v in (action.inputs or {}).items()
             if str(k).strip() and v is not None and str(v).strip()
         }
-        if extracted_inputs:
-            async with self.store.lock_for(sid):
-                cur = self.store.get(sid)
-                if cur is not None:
-                    cur_inp = cur.setdefault("inputs", {})
-                    cur_src = cur.setdefault("inputSources", {})
-                    for k, v in extracted_inputs.items():
-                        cur_inp[k] = v
-                        cur_src[k] = "用户补充"
-                    self.store.save(cur)
 
-        # 按动作分发
+        # 按动作分发（在同一会话锁临界区内合并本轮提取的补充入参与助手消息，避免双次 fsync）
         if action.action == "reply":
             async with self.store.lock_for(sid):
-                cur = self.store.get(sid)
+                cur = await self.store.aget(sid)
                 if cur is not None:
+                    self._apply_extracted_inputs(cur, extracted_inputs)
                     reply_msg = {
                         "id": self._next_msg_id(cur, "m"),
                         "role": "assistant",
@@ -987,13 +1004,14 @@ class ChatService:
                         "text": action.text.strip() or "已收到。",
                     }
                     cur.setdefault("messages", []).append(reply_msg)
-                    self.store.save(cur)
+                    await self.store.asave(cur)
                     yield ("message", reply_msg)
 
         elif action.action == "recommend":
             async with self.store.lock_for(sid):
-                cur = self.store.get(sid)
+                cur = await self.store.aget(sid)
                 if cur is not None:
+                    self._apply_extracted_inputs(cur, extracted_inputs)
                     cur_inputs = cur.get("inputs") or {}
                     rec_store = cur.setdefault("recommended", {})
                     items: list[dict[str, Any]] = []
@@ -1029,13 +1047,14 @@ class ChatService:
                             "text": action.text.strip() or "当前未找到匹配的在线模板，您可以点击右上角「选模板」浏览全部模板。",
                         }
                     cur.setdefault("messages", []).append(out_msg)
-                    self.store.save(cur)
+                    await self.store.asave(cur)
                     yield ("message", out_msg)
 
         elif action.action == "ask_params":
             async with self.store.lock_for(sid):
-                cur = self.store.get(sid)
+                cur = await self.store.aget(sid)
                 if cur is not None:
+                    self._apply_extracted_inputs(cur, extracted_inputs)
                     tpl = rs.templates.get(action.templateId or 0)
                     if tpl is not None and not tpl.offline and tpl.definition.inputs:
                         _, specs = _check_params(tpl, cur.get("inputs") or {})
@@ -1058,14 +1077,15 @@ class ChatService:
                             "text": action.text.strip() or "请告知需要补充的参数内容。",
                         }
                     cur.setdefault("messages", []).append(out_msg)
-                    self.store.save(cur)
+                    await self.store.asave(cur)
                     yield ("message", out_msg)
 
         elif action.action == "start_run":
             if self.manager.has_active_run(sid) is not None:
                 async with self.store.lock_for(sid):
-                    cur = self.store.get(sid)
+                    cur = await self.store.aget(sid)
                     if cur is not None:
+                        self._apply_extracted_inputs(cur, extracted_inputs)
                         busy_msg = {
                             "id": self._next_msg_id(cur, "m"),
                             "role": "assistant",
@@ -1074,21 +1094,21 @@ class ChatService:
                             "text": "当前已有正在运行的任务，请等待其完成或先点击「停止」后再启动新模板。",
                         }
                         cur.setdefault("messages", []).append(busy_msg)
-                        self.store.save(cur)
+                        await self.store.asave(cur)
                         yield ("message", busy_msg)
             else:
                 try:
                     msg, _ = await self.start_run(
                         sid,
                         int(action.templateId or 0),
-                        None,
+                        extracted_inputs or None,
                         caller=caller,
                         prompt_text=action.text.strip() or None,
                     )
                     if msg.get("kind") == "run" and action.text.strip():
                         # 既有自然语言说明又成功启动了运行：在运行卡片前附带简短助手回复（按顺序追加不破坏卡片 ID）
                         async with self.store.lock_for(sid):
-                            cur = self.store.get(sid)
+                            cur = await self.store.aget(sid)
                             if cur is not None:
                                 note_msg = {
                                     "id": self._next_msg_id(cur, "m"),
@@ -1103,13 +1123,14 @@ class ChatService:
                                     len(msgs),
                                 )
                                 msgs.insert(run_idx, note_msg)
-                                self.store.save(cur)
+                                await self.store.asave(cur)
                                 yield ("message", note_msg)
                     yield ("message", msg)
                 except ChatError as exc:
                     async with self.store.lock_for(sid):
-                        cur = self.store.get(sid)
+                        cur = await self.store.aget(sid)
                         if cur is not None:
+                            self._apply_extracted_inputs(cur, extracted_inputs)
                             err_msg = {
                                 "id": self._next_msg_id(cur, "m"),
                                 "role": "assistant",
@@ -1118,15 +1139,16 @@ class ChatService:
                                 "text": f"暂时无法启动该模板：{exc.message}",
                             }
                             cur.setdefault("messages", []).append(err_msg)
-                            self.store.save(cur)
+                            await self.store.asave(cur)
                             yield ("message", err_msg)
 
         elif action.action == "rewrite":
             updated_card_view: dict[str, Any] | None = None
             reply_msg_out: dict[str, Any] | None = None
             async with self.store.lock_for(sid):
-                cur = self.store.get(sid)
+                cur = await self.store.aget(sid)
                 if cur is not None:
+                    self._apply_extracted_inputs(cur, extracted_inputs)
                     card = next(
                         (
                             m for m in (cur.get("messages") or [])
@@ -1145,7 +1167,7 @@ class ChatService:
                             "text": "目标运行记录当前状态不可改写，请先完成一次模板运行。",
                         }
                         cur.setdefault("messages", []).append(reply_msg_out)
-                        self.store.save(cur)
+                        await self.store.asave(cur)
                     else:
                         versions = [dict(v) for v in (card.get("versions") or []) if isinstance(v, dict)]
                         new_ver_no = len(versions) + 1
@@ -1172,7 +1194,7 @@ class ChatService:
                             "rewriteVersionNo": new_ver_no,
                         }
                         cur.setdefault("messages", []).append(reply_msg_out)
-                        saved_cur = self.store.save(cur)
+                        saved_cur = await self.store.asave(cur)
                         updated_card_view = self._format_message_view(
                             card,
                             rs,
@@ -1181,14 +1203,14 @@ class ChatService:
             if updated_card_view is not None:
                 yield ("message", updated_card_view)
             if reply_msg_out is not None:
-                yield ("message", copy.deepcopy(reply_msg_out))
+                yield ("message", dict(reply_msg_out))
 
         final_view = await self.get_session_view(sid, caller=caller)
         yield ("done", {"session": final_view})
 
     # ------------------------------------------------------------------ 按 runId 反查、事件订阅、取消与确认
     def _scan_sessions_for_run(self, run_id: str) -> str | None:
-        """兜底遍历 chats 分片目录查找包含指定 runId 的会话编号（例如进程重启后且尚未进 RunStore 的中断卡片）。"""
+        """兜底遍历 chats 分片目录查找包含指定 runId 的会话编号（只读快速预筛，不污染 LRU 缓存）。"""
         root: Path = self.store.root
         if not root.is_dir():
             return None
@@ -1208,14 +1230,8 @@ class ChatService:
             except OSError:
                 continue
             for sid in sids:
-                if not SESSION_ID_RE.match(sid):
-                    continue
-                sess = self.store.get(sid)
-                if not isinstance(sess, dict):
-                    continue
-                for m in sess.get("messages") or []:
-                    if isinstance(m, dict) and m.get("kind") == "run" and m.get("runId") == run_id:
-                        return sid
+                if SESSION_ID_RE.match(sid) and self.store.has_run_id(sid, run_id):
+                    return sid
         return None
 
     async def resolve_session_for_run(
@@ -1248,7 +1264,7 @@ class ChatService:
         if not sid or (clean_expected and sid != clean_expected):
             raise ChatError(404, "RUN_NOT_FOUND", f"运行记录 {rid} 不存在")
 
-        sess = self.store.get(sid)
+        sess = await self.store.aget(sid)
         if sess is None:
             raise ChatError(404, "RUN_NOT_FOUND", f"运行记录 {rid} 所属会话不存在")
         self._ensure_caller_allowed(str(sess.get("target") or "online"), caller)
@@ -1273,11 +1289,11 @@ class ChatService:
         rid = run_id.strip()
 
         async with self.store.lock_for(sid):
-            session = self.store.get(sid)
+            session = await self.store.aget(sid)
             if session is None:
                 raise ChatError(404, "RUN_NOT_FOUND", f"运行记录 {rid} 所属会话不存在")
             if self._heal_interrupted_in_place(session):
-                session = self.store.save(session)
+                session = await self.store.asave(session)
             card = next(
                 (
                     m for m in (session.get("messages") or [])
@@ -1293,7 +1309,7 @@ class ChatService:
         if events is None:
             detail = await asyncio.to_thread(self.runs.get, rid)
             raw_list = detail.get("events") if isinstance(detail, dict) else None
-            events = [copy.deepcopy(e) for e in raw_list if isinstance(e, dict)] if isinstance(raw_list, list) else []
+            events = [dict(e) for e in raw_list if isinstance(e, dict)] if isinstance(raw_list, list) else []
 
         return {
             "runId": rid,
@@ -1332,11 +1348,11 @@ class ChatService:
 
         # 不在 manager 内存通道中：从会话卡片恢复（若遗留 RUNNING 则转为 INTERRUPTED）并重放 raw/steps 与 final
         async with self.store.lock_for(sid):
-            session = self.store.get(sid)
+            session = await self.store.aget(sid)
             if session is None:
                 raise ChatError(404, "RUN_NOT_FOUND", f"运行记录 {rid} 所属会话不存在")
             if self._heal_interrupted_in_place(session):
-                session = self.store.save(session)
+                session = await self.store.asave(session)
             card = next(
                 (
                     m for m in (session.get("messages") or [])
@@ -1348,7 +1364,7 @@ class ChatService:
                 raise ChatError(404, "RUN_NOT_FOUND", f"运行记录 {rid} 不存在")
             target = str(session.get("target") or "online")
             cur_inputs = dict(session.get("inputs") or {})
-            card_copy = copy.deepcopy(card)
+            card_copy = dict(card)
 
         if include_raw:
             detail = await asyncio.to_thread(self.runs.get, rid)
@@ -1392,13 +1408,12 @@ class ChatService:
         md_text = "" if markdown is None else str(markdown)
 
         async with self.store.lock_for(sid):
-            session = self.store.get(sid)
+            session = await self.store.aget(sid)
             if session is None:
                 raise ChatError(404, "SESSION_NOT_FOUND", f"会话 {sid} 不存在")
             target = str(session.get("target") or "online")
             self._ensure_caller_allowed(target, caller)
-            if self._heal_interrupted_in_place(session):
-                session = self.store.save(session)
+            dirty = self._heal_interrupted_in_place(session)
 
             card = next(
                 (
@@ -1452,19 +1467,29 @@ class ChatService:
             records: list[dict[str, Any]] = session.setdefault("confirmRecords", [])
             last_rec = records[-1] if records else None
             cur_confirmed = session.get("confirmed")
+            # 只有当前卡片本身已处于 confirmed（即未被后续 AI 改写复位）且 edited/rewritten/markdown 完全一致时才视为幂等重放
             same_as_last = bool(
-                isinstance(last_rec, dict)
+                card.get("confirmed")
+                and isinstance(last_rec, dict)
                 and isinstance(cur_confirmed, dict)
                 and cur_confirmed.get("runId") == rid
+                and cur_confirmed.get("edited") == edited
+                and cur_confirmed.get("rewritten") == rewritten
                 and last_rec.get("runId") == rid
                 and last_rec.get("markdown") == md_text
+                and last_rec.get("edited") == edited
+                and last_rec.get("rewritten") == rewritten
             )
 
             for m in session.get("messages") or []:
                 if isinstance(m, dict) and m.get("kind") == "run":
-                    m["confirmed"] = m.get("runId") == rid
+                    want = m.get("runId") == rid
+                    if m.get("confirmed") is not want:
+                        m["confirmed"] = want
+                        dirty = True
 
             if not same_as_last:
+                dirty = True
                 confirmed_at = now_iso()
                 session["confirmed"] = {
                     "runId": rid,
@@ -1501,23 +1526,20 @@ class ChatService:
                     "latestVersionMarkdown": latest_md,
                     "markdown": md_text,
                 })
-                self.publisher.audit(
-                    "chat-confirm",
-                    caller.name,
-                    {
-                        "sessionId": sid,
-                        "userId": str(session["userId"]),
-                        "orderId": str(session["orderId"]),
-                        "runId": rid,
-                        "templateId": int(card["templateId"]),
-                        "templateName": str(card["templateName"]),
-                        "status": status,
-                        "edited": edited,
-                        "rewritten": rewritten,
-                    },
-                )
+                audit_payload = {
+                    "sessionId": sid,
+                    "userId": str(session["userId"]),
+                    "orderId": str(session["orderId"]),
+                    "runId": rid,
+                    "templateId": int(card["templateId"]),
+                    "templateName": str(card["templateName"]),
+                    "status": status,
+                    "edited": edited,
+                    "rewritten": rewritten,
+                }
+                await asyncio.to_thread(self.publisher.audit, "chat-confirm", caller.name, audit_payload)
 
-            saved = self.store.save(session)
+            saved = await self.store.asave(session) if dirty else session
 
         _, rs = await self._capture_snapshot(target, allow_empty=True)
         return {
