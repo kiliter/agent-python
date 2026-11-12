@@ -1,14 +1,9 @@
 // #Created By AiCoding(codex)
-// 嵌入式聊天窗口 · Markdown 安全渲染（marked 解析后经白名单净化，阻断 XSS）
+// 嵌入式聊天窗口 · Markdown 安全渲染（复用带缓存与白名单净化的共享渲染器）与剪贴板辅助
 
-import { marked } from 'marked'
-import { sanitizeHtml } from '@/utils/sanitizeHtml'
+import { renderSafeMarkdown } from '@/utils/markdown'
 
-/** 安全渲染 Markdown 为经白名单净化的 HTML（严禁绕过 sanitizeHtml） */
-export function renderSafeMarkdown(md: string): string {
-  const html = marked.parse(String(md ?? ''), { async: false, gfm: true, breaks: true }) as string
-  return sanitizeHtml(html)
-}
+export { renderSafeMarkdown }
 
 /** 兼容外部引用的同义导出（如管理端 ChatSimView） */
 export const renderMarkdown = renderSafeMarkdown

@@ -19,8 +19,7 @@ function detectCurrentTheme(): 'light' | 'dark' {
     if (domAttr === 'dark') return 'dark'
     if (domAttr === 'light') return 'light'
   }
-  const rawStore = store as unknown as Record<string, unknown>
-  if (rawStore.theme === 'dark') return 'dark'
+  if (store.theme === 'dark') return 'dark'
   try {
     const saved = localStorage.getItem('report-agent-theme') || localStorage.getItem('theme')
     if (saved === 'dark') return 'dark'
@@ -46,25 +45,7 @@ const loginErrorMessage = computed(() => store.loginErrorText || '用户名或�
 function handleToggleTheme() {
   const prev = detectCurrentTheme()
   const next: 'light' | 'dark' = prev === 'dark' ? 'light' : 'dark'
-  const rawStore = store as unknown as Record<string, unknown>
-
-  if (typeof rawStore.setTheme === 'function') {
-    ;(rawStore.setTheme as (t: 'light' | 'dark') => void)(next)
-  } else if (typeof rawStore.toggleTheme === 'function') {
-    ;(rawStore.toggleTheme as () => void)()
-  }
-
-  document.documentElement.setAttribute('data-theme', next)
-  document.documentElement.classList.toggle('dark', next === 'dark')
-  if ('theme' in rawStore && typeof rawStore.theme === 'string') {
-    rawStore.theme = next
-  }
-  try {
-    localStorage.setItem('report-agent-theme', next)
-    localStorage.setItem('theme', next)
-  } catch {
-    // 忽略存储写入限制
-  }
+  store.setTheme(next)
   currentTheme.value = next
 }
 

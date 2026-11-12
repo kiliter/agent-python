@@ -440,17 +440,8 @@ function syncSortable() {
       const refNode = from.children[oldIndex] ?? from.lastElementChild?.nextSibling ?? null
       from.insertBefore(item, refNode)
 
-      const prevSel = store.ideSelectedFieldIdx
       const movedName = store.templateFields[oldIndex]?.name
       store.moveTemplateField(oldIndex, newIndex)
-
-      if (prevSel === oldIndex) {
-        store.ideSelectedFieldIdx = newIndex
-      } else if (oldIndex < prevSel && prevSel <= newIndex) {
-        store.ideSelectedFieldIdx = prevSel - 1
-      } else if (newIndex <= prevSel && prevSel < oldIndex) {
-        store.ideSelectedFieldIdx = prevSel + 1
-      }
 
       if (movedName) {
         store.showToast(`已调整字段「${movedName}」排序，保存草稿后生效`)

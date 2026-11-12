@@ -434,24 +434,17 @@ function onUse() {
       <footer class="ts-footer">
         <button type="button" class="btn-cancel" @click="emit('close')">关闭</button>
 
-        <el-tooltip
-          :teleported="false"
-          :disabled="!disableReason"
-          :content="disableReason"
-          placement="top-end"
-        >
-          <span class="inline-wrap">
-            <button
-              type="button"
-              class="btn-use-primary"
-              :disabled="useDisabled"
-              @click="onUse"
-            >
-              <Play :size="13" />
-              <span>使用此模板开始核查</span>
-            </button>
-          </span>
-        </el-tooltip>
+        <span class="inline-wrap" :title="disableReason || undefined">
+          <button
+            type="button"
+            class="btn-use-primary"
+            :disabled="useDisabled"
+            @click="onUse"
+          >
+            <Play :size="13" />
+            <span>使用此模板开始核查</span>
+          </button>
+        </span>
       </footer>
     </div>
   </div>

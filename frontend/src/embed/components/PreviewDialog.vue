@@ -25,6 +25,7 @@ import type { ReportViewMode, RunMessage } from '../types'
 import { CONFIRMABLE_STATUS, STATUS_LABEL } from '../types'
 import { copyText, renderSafeMarkdown } from '../markdown'
 import { stageToast } from '../stageToast'
+import VersionSelect from './VersionSelect.vue'
 
 const props = defineProps<{
   visible: boolean
@@ -101,6 +102,10 @@ function versionLabel(no: number): string {
   return v.kind === 'original' ? '原始报告（经证据校验）' : `AI 改写 v${v.no}（未经证据校验）`
 }
 
+const versionOptions = computed(() =>
+  versions.value.map(v => ({ value: v.no, label: versionLabel(v.no) })),
+)
+
 function onInput(e: Event) {
   if (!props.run) return
   const target = e.target as HTMLTextAreaElement
@@ -160,17 +165,12 @@ async function onCopy() {
       <div class="pm-toolbar">
         <div class="pm-toolbar-left">
           <span class="toolbar-label">报告版本</span>
-          <el-select
+          <VersionSelect
             :model-value="selectedVersion?.no ?? 1"
-            :teleported="false"
-            size="small"
+            :options="versionOptions"
             class="ver-select"
-            @update:model-value="(no: number) => emit('selectVersion', run!, no)"
-          >
-            <el-option v-for="v in versions" :key="v.no" :value="v.no" :label="versionLabel(v.no)">
-              <span>{{ versionLabel(v.no) }}</span>
-            </el-option>
-          </el-select>
+            @update:model-value="no => emit('selectVersion', run!, no)"
+          />
 
           <button
             v-if="edited"
@@ -304,25 +304,21 @@ async function onCopy() {
 
           <button type="button" class="btn-cancel" @click="emit('close')">关闭</button>
 
-          <el-tooltip
+          <span
             v-if="run.status !== 'FAILED'"
-            :teleported="false"
-            :disabled="canConfirm"
-            :content="confirmDisabledTip"
-            placement="top-end"
+            class="inline-wrap"
+            :title="!canConfirm ? confirmDisabledTip : undefined"
           >
-            <span class="inline-wrap">
-              <button
-                type="button"
-                class="btn-confirm-primary"
-                :disabled="!canConfirm"
-                @click="emit('confirm', run)"
-              >
-                <Check :size="14" :stroke-width="2.5" />
-                <span>{{ isConfirmedDisplay ? '再次确认回传' : '确认使用此报告' }}</span>
-              </button>
-            </span>
-          </el-tooltip>
+            <button
+              type="button"
+              class="btn-confirm-primary"
+              :disabled="!canConfirm"
+              @click="emit('confirm', run)"
+            >
+              <Check :size="14" :stroke-width="2.5" />
+              <span>{{ isConfirmedDisplay ? '再次确认回传' : '确认使用此报告' }}</span>
+            </button>
+          </span>
         </div>
       </footer>
     </div>

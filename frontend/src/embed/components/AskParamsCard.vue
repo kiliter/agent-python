@@ -6,7 +6,7 @@
 -->
 <script setup lang="ts">
 import { reactive, ref, watch } from 'vue'
-import { Eye, Play, SlidersHorizontal } from 'lucide-vue-next'
+import { Eye, Play, SlidersHorizontal, X } from 'lucide-vue-next'
 import type { AskParamsMessage, ParamSpec } from '../types'
 import { renderSafeMarkdown } from '../markdown'
 
@@ -18,19 +18,37 @@ const emit = defineEmits<{
 
 const values = reactive<Record<string, string>>({})
 const localErrors = reactive<Record<string, string>>({})
+const editedSinceProps = reactive<Record<string, boolean>>({})
+const dirtyKeys = new Set<string>()
 const submitted = ref(false)
 
-// 卡片被 upsert 更新时同步初始值与后端错误
+// 卡片被 upsert 更新时：未手工编辑的字段同步后端最新值，重置上轮 props 错误抑制标记
 watch(
   () => props.message.params,
   params => {
+    for (const k of Object.keys(editedSinceProps)) delete editedSinceProps[k]
     for (const p of params) {
-      if (!(p.key in values)) values[p.key] = p.value || ''
+      if (!dirtyKeys.has(p.key) || !(p.key in values)) {
+        values[p.key] = p.value || ''
+      }
     }
     submitted.value = false
   },
   { immediate: true },
 )
+
+function onParamInput(key: string, nextVal: string) {
+  values[key] = nextVal
+  dirtyKeys.add(key)
+  editedSinceProps[key] = true
+  localErrors[key] = ''
+}
+
+function getFieldError(p: ParamSpec): string {
+  if (localErrors[p.key]) return localErrors[p.key]!
+  if (!editedSinceProps[p.key] && p.error) return p.error
+  return ''
+}
 
 /** 单项或超长字段说明自动跨满双列，保持 PC 双列网格视觉均衡 */
 function shouldSpanFull(p: ParamSpec, idx: number): boolean {
@@ -101,31 +119,50 @@ function onSubmit() {
         </button>
       </div>
 
-      <el-form label-position="top" size="default" class="ask-form" @submit.prevent="onSubmit">
+      <form class="ask-form" novalidate @submit.prevent="onSubmit">
         <div class="params-grid">
-          <el-form-item
+          <div
             v-for="(p, idx) in message.params"
             :key="p.key"
             class="param-cell"
-            :class="{ 'span-full': shouldSpanFull(p, idx) }"
-            :required="p.required"
-            :error="localErrors[p.key] || p.error || ''"
+            :class="{ 'span-full': shouldSpanFull(p, idx), 'has-error': Boolean(getFieldError(p)) }"
           >
-            <template #label>
+            <label class="param-label-row" :for="`ask-param-${message.id}-${p.key}`">
+              <span v-if="p.required" class="req-star" aria-hidden="true">*</span>
               <span class="param-label mono">{{ p.key }}</span>
               <span v-if="p.description" class="param-desc">{{ p.description }}</span>
               <span v-else-if="p.pattern" class="param-desc mono">格式：{{ p.pattern }}</span>
-            </template>
-            <el-input
-              v-model="values[p.key]"
-              :placeholder="p.sample ? `例如：${p.sample}` : '请输入参数值'"
-              :disabled="disabled"
-              clearable
-              @keydown.enter.prevent="onSubmit"
-            />
-          </el-form-item>
+            </label>
+
+            <div class="param-input-wrap" :class="{ 'is-disabled': disabled }">
+              <input
+                :id="`ask-param-${message.id}-${p.key}`"
+                :value="values[p.key] || ''"
+                type="text"
+                class="gpt-param-input"
+                :placeholder="p.sample ? `例如：${p.sample}` : '请输入参数值'"
+                :disabled="disabled"
+                @input="onParamInput(p.key, ($event.target as HTMLInputElement).value)"
+                @keydown.enter.prevent="onSubmit"
+              />
+              <button
+                v-if="!disabled && values[p.key]"
+                type="button"
+                class="param-clear-btn"
+                title="清空输入"
+                aria-label="清空输入"
+                @click="onParamInput(p.key, '')"
+              >
+                <X :size="12" />
+              </button>
+            </div>
+
+            <div v-if="getFieldError(p)" class="param-err" role="alert">
+              {{ getFieldError(p) }}
+            </div>
+          </div>
         </div>
-      </el-form>
+      </form>
 
       <div class="ask-actions">
         <button type="button" class="btn-submit" :disabled="disabled" @click="onSubmit">
@@ -229,8 +266,10 @@ function onSubmit() {
   gap: 12px 16px;
 }
 .param-cell {
-  margin-bottom: 6px !important;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
 }
 .param-cell.span-full {
   grid-column: 1 / -1;
@@ -241,14 +280,18 @@ function onSubmit() {
   }
 }
 
-.ask-form :deep(.el-form-item__label) {
+.param-label-row {
   line-height: 1.4;
-  margin-bottom: 5px;
-  height: auto;
   display: inline-flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 5px;
   align-items: baseline;
+}
+
+.req-star {
+  color: var(--gpt-coral);
+  font-weight: 600;
+  font-size: 13px;
 }
 
 .param-label {
@@ -260,6 +303,74 @@ function onSubmit() {
   font-weight: normal;
   color: var(--gpt-ink-muted);
   font-size: 12px;
+}
+
+.param-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  border-radius: 10px;
+  border: 1px solid var(--gpt-border);
+  background: #ffffff;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.param-input-wrap:focus-within {
+  border-color: var(--gpt-accent);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
+}
+.param-cell.has-error .param-input-wrap {
+  border-color: var(--gpt-coral);
+}
+.param-cell.has-error .param-input-wrap:focus-within {
+  box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.12);
+}
+.param-input-wrap.is-disabled {
+  background: var(--gpt-bg-subtle);
+  opacity: 0.65;
+}
+
+.gpt-param-input {
+  width: 100%;
+  height: 34px;
+  padding: 0 30px 0 11px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--gpt-ink);
+  font: inherit;
+  font-size: 13px;
+}
+.gpt-param-input::placeholder {
+  color: var(--gpt-ink-subtle);
+}
+.gpt-param-input:disabled {
+  cursor: not-allowed;
+}
+
+.param-clear-btn {
+  position: absolute;
+  right: 7px;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 999px;
+  background: var(--gpt-bg-muted);
+  color: var(--gpt-ink-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+}
+.param-clear-btn:hover {
+  background: var(--gpt-border);
+  color: var(--gpt-ink);
+}
+
+.param-err {
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--gpt-coral);
 }
 
 .ask-actions {

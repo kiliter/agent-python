@@ -4,6 +4,17 @@ import { computed } from 'vue'
 import { BookOpen } from 'lucide-vue-next'
 import { usePlatformStore } from '@/stores/platform'
 import type { ApiResult, ProcessEvent } from '@/types/platform'
+import {
+  asRecord,
+  asText,
+  describeToolEvent,
+  formatElapsedAt,
+  formatRoundBadge,
+  groupEventsByRound,
+  isEventFailed,
+  shouldShowRoundMainCard,
+  type ToolDisplayMeta,
+} from '@/utils/timelineFormat'
 import SvgIcon from './SvgIcon.vue'
 
 const store = usePlatformStore()
@@ -26,156 +37,36 @@ const runKey = computed(
   () => events.value.find(e => e.type === 'run_started')?.runId || store.activeRun?.runId || 'live',
 )
 
-interface RoundGroup {
-  round: number
-  atMs: number
-  /** 普通内容：开始运行、模型说明、工具调用 */
-  items: ProcessEvent[]
-  /** 交卷结果与运行失败，单独渲染为带状态色的步骤 */
-  outcomes: ProcessEvent[]
-}
-
-const OUTCOME_TYPES = ['report_rejected', 'report_accepted', 'report_degraded', 'run_failed']
-
 /** 按 round 分组（保持首次出现的顺序） */
-const groups = computed<RoundGroup[]>(() => {
-  const map = new Map<number, RoundGroup>()
-  events.value.forEach(e => {
-    const round = e.round ?? 0
-    let g = map.get(round)
-    if (!g) {
-      g = { round, atMs: e.atMs ?? 0, items: [], outcomes: [] }
-      map.set(round, g)
+const groups = computed(() => groupEventsByRound(events.value))
+
+/** 预计算所有工具调用事件的格式化元数据，避免模板渲染重复解析 */
+const toolMetaMap = computed<Map<number, ToolDisplayMeta>>(() => {
+  const map = new Map<number, ToolDisplayMeta>()
+  for (const e of events.value) {
+    if (e.type === 'tool') {
+      map.set(e.seq, describeToolEvent(e))
     }
-    if (OUTCOME_TYPES.includes(e.type)) g.outcomes.push(e)
-    else if (e.type !== 'model_request') g.items.push(e)
-  })
-  return [...map.values()]
+  }
+  return map
 })
 
-/** 是否渲染该轮的普通步骤：有内容，或者没有任何结果事件（仅请求了模型） */
-function showMainStep(g: RoundGroup): boolean {
-  return g.items.length > 0 || g.outcomes.length === 0
+function toolMeta(e: ProcessEvent): ToolDisplayMeta {
+  return toolMetaMap.value.get(e.seq) ?? describeToolEvent(e)
 }
 
-/** 毫秒转 +X.Xs */
-function formatAt(ms: number | undefined): string {
-  return `+${((ms ?? 0) / 1000).toFixed(1)}s`
-}
-
-/** 轮次徽章文字：根据本轮做的事情归纳 */
-function roundLabel(g: RoundGroup): string {
-  if (g.round === 0 && g.items.some(e => e.type === 'run_started')) return '初始化 · 启动核查运行'
-  const labels: string[] = []
-  const push = (s: string) => !labels.includes(s) && labels.push(s)
-  g.items.forEach(e => {
-    if (e.type === 'model_text') push('推理说明')
-    else if (e.type === 'tool') {
-      if (e.tool === 'load_skill') push('加载 Skill 规程')
-      else if (e.tool === 'call_api') push('调用 API 接口')
-      else if (e.tool === 'query_result') push('记录条件筛选')
-      else push('确定性工具计算')
-    }
-  })
-  if (!labels.length) labels.push('请求大模型')
-  return `第 ${g.round} 轮 · ${labels.join('、')}`
-}
-
-/** 把 unknown 转成对象 */
-function rec(v: unknown): Record<string, unknown> {
-  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
-}
-
-/** 把任意值转成展示文本 */
-function str(v: unknown): string {
-  if (v === undefined || v === null) return ''
-  if (typeof v === 'string') return v
-  try {
-    return JSON.stringify(v)
-  } catch {
-    return String(v)
+/** 根据 resultId 建立当前运行接口结果索引表（O(1) 查找） */
+const apiResultMap = computed<Map<string, ApiResult>>(() => {
+  const map = new Map<string, ApiResult>()
+  for (const r of store.activeRun?.apiResults ?? []) {
+    if (r.resultId) map.set(r.resultId, r)
   }
-}
+  return map
+})
 
-/** 工具调用是否失败（事件 ok=false 或结果里 ok=false / 带 error） */
-function isFailed(e: ProcessEvent): boolean {
-  const r = rec(e.result)
-  return e.ok === false || r.ok === false || !!r.error
-}
-
-/** query_result 的筛选操作符中文 */
-const OP_LABELS: Record<string, string> = {
-  equals: '等于',
-  contains: '包含',
-  notContains: '不包含',
-  normalizedContains: '清洗后包含',
-  normalizedNotContains: '清洗后不包含',
-}
-
-/** query_result 的条件描述 */
-function queryConditions(e: ProcessEvent): string {
-  const where = Array.isArray(e.args?.where) ? (e.args?.where as unknown[]) : []
-  const parts = where.map(w => {
-    const c = rec(w)
-    const before = c.before ? `（“${str(c.before)}”之前）` : ''
-    return `${str(c.column)}${before} ${OP_LABELS[str(c.op)] || str(c.op)} “${str(c.value)}”`
-  })
-  const order = rec(e.args?.orderBy)
-  const orderText = order.column
-    ? `，按 ${str(order.column)} ${order.desc === false ? '升序' : '倒序'}`
-    : ''
-  return (parts.length ? parts.join(' 并且 ') : '无条件') + orderText
-}
-
-/** query_result 命中结果描述 */
-function queryHits(e: ProcessEvent): string {
-  const r = rec(e.result)
-  const rows = Array.isArray(r.rows) ? (r.rows as unknown[]).map(str) : []
-  return `命中 ${str(r.total) || '0'} 条` + (rows.length ? `（行 ${rows.join('、')}）` : '')
-}
-
-/** 其它平台工具（日期 / 文本）的参数描述 */
-function toolArgs(e: ProcessEvent): string {
-  const a = e.args ?? {}
-  switch (e.tool) {
-    case 'date_range':
-      return `${str(a.time)}, ${str(a.unit)}`
-    case 'format_date':
-      return `“${str(a.value)}”, ${str(a.fromPattern)} → ${str(a.toPattern)}`
-    case 'normalize_text':
-      return `“${str(a.text)}”` + (a.extraChars ? `, 额外删除 “${str(a.extraChars)}”` : '')
-    case 'text_contains':
-      return (
-        `${a.text ? str(a.text) : '<单据全文>'} 中查找 “${str(a.target)}”` +
-        (a.normalize === false ? '（原样比较）' : '（清洗后比较）')
-      )
-    default:
-      return str(a)
-  }
-}
-
-/** 其它平台工具（日期 / 文本）的结果描述 */
-function toolResult(e: ProcessEvent): string {
-  const r = rec(e.result)
-  if (r.error) return `失败：${str(r.error)}`
-  switch (e.tool) {
-    case 'date_range':
-      return `${str(r.start)} ~ ${str(r.end)}`
-    case 'format_date':
-    case 'normalize_text':
-      return `“${str(r.value)}”`
-    case 'text_contains':
-      return r.contains ? 'true（包含）' : 'false（不包含）'
-    default:
-      return str(e.result)
-  }
-}
-
-/** 根据 resultId 找到运行结果中的接口完整记录（运行中尚无结果时为 undefined） */
 function findApiResult(resultId: unknown): ApiResult | undefined {
-  const id = str(resultId)
-  if (!id) return undefined
-  return store.activeRun?.apiResults?.find(r => r.resultId === id)
+  const id = asText(resultId)
+  return id ? apiResultMap.value.get(id) : undefined
 }
 
 /** 接口结果表的列：优先接口定义列，否则取记录键并集（不含 row） */
@@ -204,10 +95,10 @@ function foldKey(...parts: Array<string | number | undefined>): string {
   <div v-else class="timeline-list tl-container">
     <template v-for="g in groups" :key="g.round">
       <!-- 本轮普通内容 -->
-      <div v-if="showMainStep(g)" class="timeline-step tl-node-card">
+      <div v-if="shouldShowRoundMainCard(g)" class="timeline-step tl-node-card">
         <div class="timeline-step-header tl-node-head">
-          <span class="step-round-badge tl-round-pill">{{ roundLabel(g) }}</span>
-          <span class="mono tl-time-stamp">{{ formatAt(g.atMs) }}</span>
+          <span class="step-round-badge tl-round-pill">{{ formatRoundBadge(g) }}</span>
+          <span class="mono tl-time-stamp">{{ formatElapsedAt(g.atMs) }}</span>
         </div>
 
         <div class="timeline-step-body tl-node-body">
@@ -264,49 +155,58 @@ function foldKey(...parts: Array<string | number | undefined>): string {
             <div
               v-else-if="e.type === 'tool'"
               class="tool-call-box tl-tool-box"
-              :class="{ 'is-failed': isFailed(e) }"
+              :class="{ 'is-failed': isEventFailed(e) }"
             >
               <div style="display: flex; align-items: flex-start; gap: 6px; flex-wrap: wrap">
-                <span class="tl-tool-tag mono" :class="{ err: isFailed(e) }">
+                <span class="tl-tool-tag mono" :class="{ err: isEventFailed(e) }">
                   {{ e.tool }}
                 </span>
 
-                <!-- load_skill -->
+                <!-- load_skill（兼容单个 name 与批量 names） -->
                 <template v-if="e.tool === 'load_skill'">
                   <span>加载规程</span>
-                  <span
-                    class="chip-tag clickable tl-skill-chip"
-                    @click="store.openSkillDetail(str(e.args?.name))"
-                  >
-                    <BookOpen :size="11" />
-                    <span>「{{ str(e.args?.name) }}」<template v-if="rec(e.result).title"> {{ str(rec(e.result).title) }}</template></span>
-                  </span>
+                  <template v-if="toolMeta(e).skillNames.length">
+                    <span
+                      v-for="sk in toolMeta(e).skillNames"
+                      :key="sk"
+                      class="chip-tag clickable tl-skill-chip"
+                      @click="store.openSkillDetail(sk)"
+                    >
+                      <BookOpen :size="11" />
+                      <span>「{{ sk }}」</span>
+                    </span>
+                    <span
+                      v-if="toolMeta(e).skillTitleSummary"
+                      style="color: var(--text-secondary)"
+                    >{{ toolMeta(e).skillTitleSummary }}</span>
+                  </template>
+                  <span v-else style="color: var(--danger)">{{ toolMeta(e).resultText }}</span>
                 </template>
 
                 <!-- call_api -->
                 <template v-else-if="e.tool === 'call_api'">
                   <span class="mono" style="flex: 1; min-width: 0; word-break: break-all">
-                    调用 API 接口 <strong style="color: var(--primary)">{{ str(e.args?.name) }}</strong>({{ str(e.args?.args) }})
+                    调用 API 接口 <strong style="color: var(--primary)">{{ asText(e.args?.name) }}</strong>({{ asText(e.args?.args) }})
                   </span>
                 </template>
 
-                <!-- query_result -->
+                <!-- query_result（支持单结果集与多结果集 resultIds + anyOf） -->
                 <template v-else-if="e.tool === 'query_result'">
                   <span style="flex: 1; min-width: 0; word-break: break-all">
-                    筛选 <span class="mono">{{ str(e.args?.resultId) }}</span>：{{ queryConditions(e) }}
+                    筛选 <span class="mono">{{ toolMeta(e).queryTarget }}</span>：{{ toolMeta(e).queryConditionText }}
                     →
-                    <span :style="{ color: isFailed(e) ? 'var(--danger)' : 'var(--success)' }">{{
-                      queryHits(e)
+                    <span :style="{ color: isEventFailed(e) ? 'var(--danger)' : 'var(--success)' }">{{
+                      toolMeta(e).queryHitsText
                     }}</span>
                   </span>
                 </template>
 
-                <!-- 日期 / 文本类工具及其它 -->
+                <!-- 其余全部确定性平台工具（共 9 个） -->
                 <template v-else>
                   <span class="mono" style="flex: 1; min-width: 0; word-break: break-all">
-                    {{ toolArgs(e) }} →
-                    <span :style="{ color: isFailed(e) ? 'var(--danger)' : 'var(--success)' }">{{
-                      toolResult(e)
+                    {{ toolMeta(e).argsText }} →
+                    <span :style="{ color: isEventFailed(e) ? 'var(--danger)' : 'var(--success)' }">{{
+                      toolMeta(e).resultText
                     }}</span>
                   </span>
                 </template>
@@ -327,20 +227,20 @@ function foldKey(...parts: Array<string | number | undefined>): string {
                     margin-top: 5px;
                   "
                 >
-                  <span v-if="isFailed(e)" class="mono" style="color: var(--danger)">
-                    {{ str(rec(e.result).resultId) }} · 调用失败：{{ str(rec(e.result).error) || '未知错误' }}
-                    <template v-if="rec(e.result).costMs !== undefined"> · {{ str(rec(e.result).costMs) }} ms</template>
+                  <span v-if="isEventFailed(e)" class="mono" style="color: var(--danger)">
+                    {{ asText(asRecord(e.result).resultId) }} · 调用失败：{{ asText(asRecord(e.result).error) || '未知错误' }}
+                    <template v-if="asRecord(e.result).costMs !== undefined"> · {{ asText(asRecord(e.result).costMs) }} ms</template>
                   </span>
                   <span v-else class="mono" style="color: var(--success)">
-                    返回 {{ str(rec(e.result).resultId) }} · {{ str(rec(e.result).count) || '0' }} 条 · {{ str(rec(e.result).costMs) }} ms
+                    返回 {{ asText(asRecord(e.result).resultId) }} · {{ asText(asRecord(e.result).count) || '0' }} 条 · {{ asText(asRecord(e.result).costMs) }} ms
                   </span>
                   <button
-                    v-if="findApiResult(rec(e.result).resultId)?.records.length"
+                    v-if="findApiResult(asRecord(e.result).resultId)?.records.length"
                     class="btn-link"
-                    @click="store.toggleFold(foldKey('api', str(rec(e.result).resultId)))"
+                    @click="store.toggleFold(foldKey('api', asText(asRecord(e.result).resultId)))"
                   >
                     {{
-                      store.expandedTexts[foldKey('api', str(rec(e.result).resultId))]
+                      store.expandedTexts[foldKey('api', asText(asRecord(e.result).resultId))]
                         ? '收起结果 ▴'
                         : '展开结果 ▾'
                     }}
@@ -348,8 +248,8 @@ function foldKey(...parts: Array<string | number | undefined>): string {
                 </div>
                 <div
                   v-if="
-                    store.expandedTexts[foldKey('api', str(rec(e.result).resultId))] &&
-                    findApiResult(rec(e.result).resultId)
+                    store.expandedTexts[foldKey('api', asText(asRecord(e.result).resultId))] &&
+                    findApiResult(asRecord(e.result).resultId)
                   "
                   class="table-wrap"
                   style="border: 1px solid var(--border-color); border-radius: 4px; margin-top: 6px"
@@ -359,7 +259,7 @@ function foldKey(...parts: Array<string | number | undefined>): string {
                       <tr>
                         <th>#</th>
                         <th
-                          v-for="col in resultColumns(findApiResult(rec(e.result).resultId)!)"
+                          v-for="col in resultColumns(findApiResult(asRecord(e.result).resultId)!)"
                           :key="col"
                         >
                           {{ col }}
@@ -367,14 +267,14 @@ function foldKey(...parts: Array<string | number | undefined>): string {
                       </tr>
                     </thead>
                     <tbody>
-                      <tr v-for="r in findApiResult(rec(e.result).resultId)!.records" :key="r.row">
+                      <tr v-for="r in findApiResult(asRecord(e.result).resultId)!.records" :key="r.row">
                         <td class="mono">{{ r.row }}</td>
                         <td
-                          v-for="col in resultColumns(findApiResult(rec(e.result).resultId)!)"
+                          v-for="col in resultColumns(findApiResult(asRecord(e.result).resultId)!)"
                           :key="col"
                           class="mono"
                         >
-                          {{ str(r[col]) }}
+                          {{ asText(r[col]) }}
                         </td>
                       </tr>
                     </tbody>
@@ -410,7 +310,7 @@ function foldKey(...parts: Array<string | number | undefined>): string {
           <span v-else class="tl-round-pill err">
             <SvgIcon name="error" /> 第 {{ g.round }} 轮 · 运行终止失败
           </span>
-          <span class="mono tl-time-stamp">{{ formatAt(o.atMs) }}</span>
+          <span class="mono tl-time-stamp">{{ formatElapsedAt(o.atMs) }}</span>
         </div>
 
         <div class="timeline-step-body tl-node-body">

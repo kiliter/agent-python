@@ -36,6 +36,7 @@ import type {
   ValidationIssue,
   ValidationResult,
 } from '@/types/platform'
+import { parseSseJson, readSseStream } from '@/utils/sse'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api/v1'
 const TOKEN_KEY = 'agent-python-token'
@@ -82,8 +83,16 @@ async function parseError(resp: Response): Promise<ApiError> {
   } catch {
     /* 非 JSON 错误体 */
   }
+  // 兼容 FastAPI HTTPException 默认包装格式 { detail: "..." } 或 { detail: { code, message, ... } }
+  const detail = body.detail
+  if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+    body = { ...(detail as Record<string, unknown>), ...body }
+    delete body.detail
+  }
   const { code, message, ...rest } = body as { code?: string; message?: string }
-  return new ApiError(resp.status, code || `HTTP_${resp.status}`, message || `请求失败（HTTP ${resp.status}）`, rest)
+  const msg =
+    message || (typeof detail === 'string' && detail ? detail : `请求失败（HTTP ${resp.status}）`)
+  return new ApiError(resp.status, code || `HTTP_${resp.status}`, msg, rest)
 }
 
 function query(params?: Record<string, string | number | boolean | null | undefined>): string {
@@ -150,68 +159,37 @@ async function streamRun<T>(
     throw err
   }
 
-  const processBlock = (block: string): { finished: true; result: T } | { finished: false } => {
-    let kind = 'message'
-    const dataLines: string[] = []
-    block.split(/\r?\n/).forEach(line => {
-      if (line.startsWith('event:')) kind = line.slice(6).trim()
-      else if (line.startsWith('data:')) {
-        const raw = line.slice(5)
-        dataLines.push(raw.startsWith(' ') ? raw.slice(1) : raw)
-      }
-    })
-    if (!dataLines.length) return { finished: false }
-    const data = JSON.parse(dataLines.join('\n'))
-    if (kind === 'event') {
-      onEvent(data as ProcessEvent)
-      return { finished: false }
-    }
-    if (kind === 'final') {
-      return { finished: true, result: data as T }
-    }
-    if (kind === 'error') {
-      throw new ApiError(400, data.code || 'RUN_ERROR', data.message || '运行失败', data)
-    }
-    return { finished: false }
-  }
+  let finalResult: T | undefined
+  let hasFinal = false
 
-  const reader = resp.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  const sepRe = /\r?\n\r?\n/
-
-  try {
-    for (;;) {
-      const { value, done } = await reader.read()
-      if (done) {
-        buffer += decoder.decode()
-        break
+  await readSseStream(
+    resp,
+    frame => {
+      const data = parseSseJson<Record<string, unknown>>(frame.data)
+      if (!data) return false
+      if (frame.event === 'event') {
+        onEvent(data as unknown as ProcessEvent)
+        return false
       }
-      buffer += decoder.decode(value, { stream: true })
-      let match: RegExpExecArray | null
-      while ((match = sepRe.exec(buffer)) !== null) {
-        const block = buffer.slice(0, match.index)
-        buffer = buffer.slice(match.index + match[0].length)
-        const outcome = processBlock(block)
-        if (outcome.finished) return outcome.result
+      if (frame.event === 'final') {
+        finalResult = data as unknown as T
+        hasFinal = true
+        return true
       }
-    }
-
-    if (buffer.trim()) {
-      for (const trailing of buffer.split(sepRe)) {
-        if (!trailing.trim()) continue
-        const outcome = processBlock(trailing)
-        if (outcome.finished) return outcome.result
+      if (frame.event === 'error') {
+        throw new ApiError(
+          400,
+          String(data.code || 'RUN_ERROR'),
+          String(data.message || '运行失败'),
+          data,
+        )
       }
-    }
-  } finally {
-    try {
-      reader.releaseLock()
-    } catch {
-      /* 忽略流锁释放异常 */
-    }
-  }
+      return false
+    },
+    signal,
+  )
 
+  if (hasFinal) return finalResult as T
   throw new ApiError(0, 'STREAM_CLOSED', '运行过程推送意外中断，请到运行记录查看结果')
 }
 

@@ -83,25 +83,6 @@
   --eb-border-strong: var(--gpt-border-strong);
   --eb-font-sans: var(--gpt-font-sans);
   --eb-font-mono: var(--gpt-font-mono);
-
-  /* Element Plus 亮色主题对齐 */
-  --el-color-primary: #2563eb;
-  --el-color-primary-light-3: #60a5fa;
-  --el-color-primary-light-5: #93c5fd;
-  --el-color-primary-light-7: #bfdbfe;
-  --el-color-primary-light-8: #dbeafe;
-  --el-color-primary-light-9: #eff6ff;
-  --el-color-primary-dark-2: #1d4ed8;
-  --el-color-success: #059669;
-  --el-color-success-light-9: #ecfdf5;
-  --el-color-warning: #d97706;
-  --el-color-warning-light-9: #fffbeb;
-  --el-color-danger: #dc2626;
-  --el-color-danger-light-9: #fef2f2;
-  --el-border-radius-base: 10px;
-  --el-text-color-primary: #18181b;
-  --el-text-color-regular: #52525b;
-  --el-text-color-secondary: #71717a;
 }
 
 html,
@@ -147,40 +128,77 @@ body {
   background: rgba(113, 113, 122, 0.4);
 }
 
-/* ==================== 舞台内 Element Plus 浮层与弹窗约束（绝不脱离 .embed-stage） ==================== */
-.embed-stage .el-overlay {
+/* ==================== 舞台内零依赖轻提示栈（挂载于 .embed-stage） ==================== */
+.gpt-toast-stack {
   position: absolute;
-  inset: 0;
-  background-color: rgba(24, 24, 27, 0.28);
-  backdrop-filter: blur(3px);
-  -webkit-backdrop-filter: blur(3px);
-  z-index: 2200 !important;
+  top: 62px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2400;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+  max-width: calc(100% - 32px);
 }
 
-.embed-stage .el-overlay-message-box {
-  position: absolute;
-  inset: 0;
-}
-
-.embed-stage .el-message-box {
-  max-width: min(460px, calc(100% - 32px));
-  border-radius: 16px;
-  border: 1px solid var(--gpt-border);
-  box-shadow: var(--gpt-shadow-modal);
-  background: #ffffff;
-}
-
-.embed-stage .el-message {
-  position: absolute !important;
-  z-index: 2400 !important;
-  border-radius: 999px;
+.gpt-toast {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   padding: 8px 16px;
+  border-radius: 999px;
+  border: 1px solid var(--gpt-border);
+  background: #ffffff;
+  color: var(--gpt-ink);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
   box-shadow: var(--gpt-shadow-popover);
+  pointer-events: auto;
+  animation: gpt-toast-in 0.18s ease-out;
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+.gpt-toast.is-leaving {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+.gpt-toast-icon {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.gpt-toast.is-success {
+  border-color: var(--gpt-emerald-border);
+  background: var(--gpt-emerald-bg);
+  color: var(--gpt-emerald);
+}
+.gpt-toast.is-warning {
+  border-color: var(--gpt-amber-border);
+  background: var(--gpt-amber-bg);
+  color: var(--gpt-amber);
+}
+.gpt-toast.is-error {
+  border-color: var(--gpt-coral-border);
+  background: var(--gpt-coral-bg);
+  color: var(--gpt-coral);
+}
+.gpt-toast.is-info {
+  border-color: var(--gpt-accent-border);
+  background: var(--gpt-accent-soft);
+  color: var(--gpt-accent);
 }
 
-.embed-stage .el-popper {
-  border-radius: 12px;
-  border-color: var(--gpt-border);
+@keyframes gpt-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 /* ==================== 大尺寸舞台内居中弹窗公共骨架（支持页内全屏无缝切换） ==================== */

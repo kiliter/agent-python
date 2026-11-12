@@ -7,7 +7,7 @@
 import { ref, computed, reactive, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import YAML from 'yaml'
-import { diffLines } from 'diff'
+import { buildDiffRows, type DiffRow } from '@/utils/textDiff'
 import {
   FileCode2,
   Send,
@@ -502,43 +502,6 @@ function handleSyncColumnsToContract() {
 }
 
 // ---------------------------------------------------------------- 历史对比
-interface DiffRow {
-  kind: 'add' | 'del' | 'same' | 'fold'
-  oldNo: number | null
-  newNo: number | null
-  text: string
-}
-
-/** 把两段文本的行级差异转换为统一视图的行，未变化的长段落只保留首尾 3 行上下文 */
-function buildDiffRows(oldText: string, newText: string): DiffRow[] {
-  const rows: DiffRow[] = []
-  let oldNo = 1
-  let newNo = 1
-  const CONTEXT = 3
-  for (const part of diffLines(oldText || '', newText || '')) {
-    const lines = part.value.replace(/\n$/, '').split('\n')
-    if (part.added) {
-      lines.forEach(t => rows.push({ kind: 'add', oldNo: null, newNo: newNo++, text: t }))
-    } else if (part.removed) {
-      lines.forEach(t => rows.push({ kind: 'del', oldNo: oldNo++, newNo: null, text: t }))
-    } else if (lines.length > CONTEXT * 2 + 1) {
-      lines
-        .slice(0, CONTEXT)
-        .forEach(t => rows.push({ kind: 'same', oldNo: oldNo++, newNo: newNo++, text: t }))
-      const hidden = lines.length - CONTEXT * 2
-      rows.push({ kind: 'fold', oldNo: null, newNo: null, text: `… 省略 ${hidden} 行未变化内容 …` })
-      oldNo += hidden
-      newNo += hidden
-      lines
-        .slice(-CONTEXT)
-        .forEach(t => rows.push({ kind: 'same', oldNo: oldNo++, newNo: newNo++, text: t }))
-    } else {
-      lines.forEach(t => rows.push({ kind: 'same', oldNo: oldNo++, newNo: newNo++, text: t }))
-    }
-  }
-  return rows
-}
-
 /** 线上 YAML 与当前编辑内容是否一致 */
 const yamlIdentical = computed(() => store.apiOnlineYaml === store.apiYamlText)
 

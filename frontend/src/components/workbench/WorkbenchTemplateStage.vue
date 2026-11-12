@@ -6,7 +6,7 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessageBox } from 'element-plus'
-import { diffLines } from 'diff'
+import { buildFullDiffRows } from '@/utils/textDiff'
 import { Annotation, Compartment, EditorState, type Range } from '@codemirror/state'
 import {
   EditorView,
@@ -854,7 +854,8 @@ watch(
   () => scheduleStaticPreview(),
 )
 
-// 当快照为线上版本运行或线上基线变更时，按需拉取最新线上 bodyText 用于精确映射
+// 当快照为线上版本运行或线上基线变更时，按需拉取最新线上 bodyText 用于精确映射（带请求序号防竞态覆盖）
+let onlineBodyReqSeq = 0
 watch(
   () =>
     [
@@ -865,6 +866,7 @@ watch(
       store.onlineBaselineSeq,
     ] as const,
   async ([id, target]) => {
+    const seq = ++onlineBodyReqSeq
     if (!id) {
       onlineBodyText.value = ''
       return
@@ -872,8 +874,10 @@ watch(
     if (target === 'online' || hasOnline.value) {
       try {
         const onlineTpl = await platformApi.getTemplate(id, 'online')
+        if (seq !== onlineBodyReqSeq) return
         onlineBodyText.value = onlineTpl.bodyText || ''
       } catch {
+        if (seq !== onlineBodyReqSeq) return
         onlineBodyText.value = ''
       }
     } else {
@@ -1040,25 +1044,12 @@ const bodyDiffRows = computed<DiffLineRow[]>(() => {
   if (!baselineDetail.value) return []
   const oldText = baselineDetail.value.bodyText || ''
   const newText = store.bodyText || ''
-  const parts = diffLines(oldText, newText)
-  const rows: DiffLineRow[] = []
-  let oldLn = 1
-  let newLn = 1
-
-  parts.forEach(part => {
-    const rawLines = part.value.split('\n')
-    if (rawLines[rawLines.length - 1] === '') rawLines.pop()
-    rawLines.forEach(lineText => {
-      if (part.added) {
-        rows.push({ type: 'add', oldNo: null, newNo: newLn++, text: lineText })
-      } else if (part.removed) {
-        rows.push({ type: 'del', oldNo: oldLn++, newNo: null, text: lineText })
-      } else {
-        rows.push({ type: 'ctx', oldNo: oldLn++, newNo: newLn++, text: lineText })
-      }
-    })
-  })
-  return rows
+  return buildFullDiffRows(oldText, newText).map(r => ({
+    type: r.kind === 'same' ? 'ctx' : (r.kind as 'add' | 'del'),
+    oldNo: r.oldNo,
+    newNo: r.newNo,
+    text: r.text,
+  }))
 })
 
 const diffAddedCount = computed(() => bodyDiffRows.value.filter(r => r.type === 'add').length)

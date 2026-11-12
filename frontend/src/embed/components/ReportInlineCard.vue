@@ -26,6 +26,7 @@ import type { ReportViewMode, RunMessage } from '../types'
 import { CONFIRMABLE_STATUS } from '../types'
 import { copyText, renderSafeMarkdown } from '../markdown'
 import { stageToast } from '../stageToast'
+import VersionSelect from './VersionSelect.vue'
 
 const props = defineProps<{
   run: RunMessage
@@ -72,6 +73,10 @@ function versionOptionLabel(no: number): string {
   return v.kind === 'original' ? '原始报告（经证据校验）' : `AI 改写 v${v.no}（未经证据校验）`
 }
 
+const versionOptions = computed(() =>
+  versions.value.map(v => ({ value: v.no, label: versionOptionLabel(v.no) })),
+)
+
 async function onCopyReport() {
   const ok = await copyText(effectiveDraft.value)
   if (ok) stageToast.success('已复制报告 Markdown')
@@ -103,22 +108,12 @@ async function onCopyReport() {
       </div>
 
       <div class="ric-top-tools">
-        <el-select
+        <VersionSelect
           :model-value="selectedVersion?.no ?? 1"
-          :teleported="false"
-          size="small"
+          :options="versionOptions"
           class="ver-select"
-          @update:model-value="(no: number) => emit('selectVersion', no)"
-        >
-          <el-option
-            v-for="v in versions"
-            :key="v.no"
-            :value="v.no"
-            :label="versionOptionLabel(v.no)"
-          >
-            <span>{{ versionOptionLabel(v.no) }}</span>
-          </el-option>
-        </el-select>
+          @update:model-value="no => emit('selectVersion', no)"
+        />
 
         <button type="button" class="btn-tool" title="复制当前报告 Markdown" @click="onCopyReport">
           <Copy :size="13" />
@@ -171,24 +166,17 @@ async function onCopyReport() {
           <span>换模板</span>
         </button>
 
-        <el-tooltip
-          :teleported="false"
-          :disabled="!run.templateOffline"
-          content="该模板已下线，不可重新核查"
-          placement="top"
-        >
-          <span class="inline-wrap">
-            <button
-              type="button"
-              class="btn-ghost"
-              :disabled="rerunDisabled"
-              @click="emit('rerun')"
-            >
-              <RefreshCw :size="13" />
-              <span>重新核查</span>
-            </button>
-          </span>
-        </el-tooltip>
+        <span class="inline-wrap" :title="run.templateOffline ? '该模板已下线，不可重新核查' : undefined">
+          <button
+            type="button"
+            class="btn-ghost"
+            :disabled="rerunDisabled"
+            @click="emit('rerun')"
+          >
+            <RefreshCw :size="13" />
+            <span>重新核查</span>
+          </button>
+        </span>
 
         <button
           v-if="edited"

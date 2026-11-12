@@ -11,7 +11,6 @@
 <script setup lang="ts">
 import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { marked } from 'marked'
 import {
   ArrowUpRight,
   CheckCircle2,
@@ -43,7 +42,7 @@ import {
   type SimPostMessageLog,
 } from '@/stores/workspaceTabs'
 import type { TemplateInput } from '@/types/platform'
-import { sanitizeHtml } from '@/utils/sanitizeHtml'
+import { renderSafeMarkdown } from '@/utils/markdown'
 import ChatSimTemplatePicker, {
   type TemplatePrefillPayload,
 } from '@/components/ChatSimTemplatePicker.vue'
@@ -104,10 +103,14 @@ async function writeClipboard(text: string): Promise<boolean> {
   }
 }
 
-function renderSafeMarkdown(md: string): string {
-  const html = marked.parse(md || '', { async: false, breaks: true, gfm: true }) as string
-  return sanitizeHtml(html)
-}
+watch(
+  () => tabsStore.simLogs.length,
+  len => {
+    if (len === 0 && collapsedLogIds.value.size > 0) {
+      collapsedLogIds.value = new Set()
+    }
+  },
+)
 
 // ==================== 系统 API Key 自动带出与同步（仅存内存 tabsStore.simApiKey） ====================
 const systemKeyConfigured = ref<boolean | null>(null)

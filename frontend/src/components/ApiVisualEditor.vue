@@ -1723,11 +1723,24 @@ function extractColumnsFromSample() {
 }
 
 // ==================== 深度后端契约校验 ====================
+let validateReqSeq = 0
+
+watch(
+  () => props.apiName,
+  () => {
+    validateReqSeq += 1
+    remoteValidating.value = false
+    remoteValidation.value = null
+  },
+)
+
 async function handleRunValidate() {
   validationPopoverOpen.value = !validationPopoverOpen.value
   const apiWithVal = platformApi as PlatformApiWithValidate
-  if (!props.apiName || typeof apiWithVal.validateApi !== 'function') return
+  const targetName = props.apiName
+  if (!targetName || typeof apiWithVal.validateApi !== 'function') return
 
+  const seq = ++validateReqSeq
   remoteValidating.value = true
   try {
     const sampleArgs: Record<string, string> = {}
@@ -1739,7 +1752,8 @@ async function handleRunValidate() {
       else if (p.pattern === '^\\d{8}$') sampleArgs[k] = '20261111'
       else sampleArgs[k] = wrapPlaceholder(k)
     }
-    const res = await apiWithVal.validateApi(props.apiName, props.yamlText, sampleArgs)
+    const res = await apiWithVal.validateApi(targetName, props.yamlText, sampleArgs)
+    if (seq !== validateReqSeq || props.apiName !== targetName) return
     remoteValidation.value = res
     if (res.ok && localErrors.value.length === 0) {
       store.showToast('契约 Schema 与网关组装预览校验通过', 'success')
@@ -1747,7 +1761,9 @@ async function handleRunValidate() {
   } catch {
     // 后端尚未热载新路由时静默回退至前端本地即时校验
   } finally {
-    remoteValidating.value = false
+    if (seq === validateReqSeq) {
+      remoteValidating.value = false
+    }
   }
 }
 
