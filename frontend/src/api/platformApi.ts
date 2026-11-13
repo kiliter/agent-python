@@ -38,7 +38,7 @@ import type {
 } from '@/types/platform'
 import { parseSseJson, readSseStream } from '@/utils/sse'
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api/v1'
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'api/v1'
 const TOKEN_KEY = 'agent-python-token'
 
 /** 后端错误：status 为 HTTP 状态码，code / message 来自后端统一错误格式 */

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api.auth import LoginGuard, TokenService, UserStore
@@ -126,6 +126,35 @@ def install_error_handlers(app: FastAPI) -> None:
         return _error(500, "GIT_ERROR", "版本库操作失败，请联系管理员")
 
 
+class _SubpathPrefixMiddleware:
+    """兼容子路径反代（如 /agent）：自动剥离未由 Nginx 剥离的 prefix，并将 /agent 重定向至 /agent/。"""
+
+    def __init__(self, app, prefix: str) -> None:
+        self.app = app
+        self.prefix = prefix
+        self._prefix_slash = f"{prefix}/"
+        self._prefix_bytes = prefix.encode("ascii")
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] in ("http", "websocket"):
+            path: str = scope.get("path", "")
+            if path == self.prefix and scope["type"] == "http":
+                qs = scope.get("query_string", b"")
+                location = self._prefix_slash + (f"?{qs.decode('latin-1')}" if qs else "")
+                resp = RedirectResponse(url=location, status_code=307)
+                await resp(scope, receive, send)
+                return
+            if path.startswith(self._prefix_slash):
+                new_scope = dict(scope)
+                new_scope["path"] = path[len(self.prefix):] or "/"
+                raw_path = scope.get("raw_path")
+                if isinstance(raw_path, (bytes, bytearray)) and raw_path.startswith(self._prefix_bytes):
+                    new_scope["raw_path"] = bytes(raw_path[len(self._prefix_bytes):]) or b"/"
+                await self.app(new_scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 def create_app(settings: Settings | None = None, container: Container | None = None) -> FastAPI:
     """创建应用。测试时可传入已组装好的 container。"""
     settings = settings or (container.settings if container else get_settings())
@@ -163,7 +192,10 @@ def create_app(settings: Settings | None = None, container: Container | None = N
             await c.runs.stop()
             await c.gateway.aclose()
 
+    root_path = settings.normalized_root_path()
     app = FastAPI(title="智能申告报告填写平台", version="0.1.0", lifespan=lifespan)
+    if root_path:
+        app.add_middleware(_SubpathPrefixMiddleware, prefix=root_path)
     install_error_handlers(app)
     app.include_router(auth_router)
     app.include_router(templates_router)

@@ -144,8 +144,16 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_dir: Path | None = Field(default=None, description="日志文件目录，不配置时只输出到控制台")
 
-    # ---------------- 前端 ----------------
+    # ---------------- 前端与反向代理 ----------------
     frontend_dist: Path | None = Field(default=None, description="前端构建产物目录（frontend/dist），配置后由本服务托管")
+    app_root_path: str = Field(
+        default="",
+        description="反向代理子路径前缀（如 /agent），为空表示根路径；配置后同时兼容保留前缀或剥离前缀的 Nginx 转发",
+    )
+    forwarded_allow_ips: str = Field(
+        default="127.0.0.1",
+        description="uvicorn 信任的代理 IP（如 * 或 Nginx 网段），用于解析 X-Forwarded-For / X-Forwarded-Proto",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -164,6 +172,13 @@ class Settings(BaseSettings):
     def report_api_key_set(self) -> set[str]:
         """解析上游 API Key 列表。"""
         return {k.strip() for k in self.report_api_keys.split(",") if k.strip()}
+
+    def normalized_root_path(self) -> str:
+        """规范化子路径前缀：空串或以 / 开头且不以 / 结尾（如 /agent）。"""
+        raw = self.app_root_path.strip()
+        if not raw or raw == "/":
+            return ""
+        return "/" + raw.strip("/")
 
 
 @lru_cache

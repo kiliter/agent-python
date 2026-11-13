@@ -39,8 +39,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "serve":
         import uvicorn
 
-        uvicorn.run("report_agent.main:create_app", factory=True, host=args.host, port=args.port, workers=1,
-                    log_level=settings.log_level.lower())
+        uvicorn.run(
+            "report_agent.main:create_app",
+            factory=True,
+            host=args.host,
+            port=args.port,
+            workers=1,
+            log_level=settings.log_level.lower(),
+            proxy_headers=True,
+            forwarded_allow_ips=settings.forwarded_allow_ips,
+        )
         return 0
     if args.cmd == "init":
         from .container import build_container

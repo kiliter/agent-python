@@ -567,3 +567,45 @@ def test_7_logging_spa_testcall_name_auth_hardening_and_zero_deprecation(tmp_pat
     dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
     assert dep_warnings == [], [str(w.message) for w in dep_warnings]
     assert m.profile["supports_forced_tool_choice"] is True
+
+
+def test_subpath_reverse_proxy_support(tmp_path: Path):
+    """APP_ROOT_PATH=/agent 同时兼容保留前缀与剥离前缀两种 Nginx 反代方式，并重定向 /agent -> /agent/。"""
+    dist_dir = tmp_path / "dist"
+    (dist_dir / "assets").mkdir(parents=True)
+    (dist_dir / "index.html").write_text("<html><body>INDEX</body></html>", encoding="utf-8")
+    (dist_dir / "embed.html").write_text("<html><body>EMBED</body></html>", encoding="utf-8")
+    (dist_dir / "assets" / "app.js").write_text("console.log('ok');", encoding="utf-8")
+
+    s = Settings(
+        _env_file=None,
+        data_dir=tmp_path / "d_subpath",
+        frontend_dist=dist_dir,
+        app_root_path="/agent/",
+        gateway_mode="mock",
+        llm_api_key="k",
+        admin_token_secret="sec-subpath",
+    )
+    assert s.normalized_root_path() == "/agent"
+    c = build_container(s, model=scripted_model())
+    app = create_app(settings=s, container=c)
+
+    with TestClient(app) as cl:
+        # 1) /agent 重定向至 /agent/（保留查询参数）
+        r_redir = cl.get("/agent?foo=1", follow_redirects=False)
+        assert r_redir.status_code == 307
+        assert r_redir.headers["location"] == "/agent/?foo=1"
+
+        # 2) Nginx 未剥离 /agent 前缀时的转发
+        assert cl.get("/agent/").status_code == 200
+        assert "INDEX" in cl.get("/agent/").text
+        assert "EMBED" in cl.get("/agent/embed.html?userId=u1&orderId=o1").text
+        assert cl.get("/agent/assets/app.js").status_code == 200
+        assert cl.get("/agent/healthz").json()["status"] == "UP"
+        assert cl.get("/agent/api/v1/health").json()["status"] == "UP"
+
+        # 3) Nginx 已剥离 /agent/ 前缀时的转发
+        assert "INDEX" in cl.get("/").text
+        assert "EMBED" in cl.get("/embed.html").text
+        assert cl.get("/healthz").json()["status"] == "UP"
+        assert cl.get("/api/v1/health").json()["status"] == "UP"

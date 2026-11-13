@@ -4,6 +4,8 @@ import vue from '@vitejs/plugin-vue'
 import { fileURLToPath, URL } from 'node:url'
 
 export default defineConfig({
+  // 默认使用相对路径，使同一份构建产物可直接部署在根路径 / 或任意 Nginx 反代子路径（如 /agent/）下
+  base: process.env.VITE_BASE_PATH || './',
   plugins: [vue()],
   resolve: {
     alias: {

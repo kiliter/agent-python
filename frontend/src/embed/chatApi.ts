@@ -15,7 +15,7 @@ import type {
 } from './types'
 import { readSseStream } from '@/utils/sse'
 
-const API_BASE = `${import.meta.env.VITE_API_BASE_URL || '/api/v1'}/chat`
+const API_BASE = `${import.meta.env.VITE_API_BASE_URL || 'api/v1'}/chat`
 /** 管理端登录 token 的 sessionStorage 键（同源模拟页兜底鉴权） */
 const ADMIN_TOKEN_KEY = 'agent-python-token'
 
