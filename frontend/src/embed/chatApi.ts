@@ -5,6 +5,7 @@ import type {
   ChatMessage,
   ChatSession,
   ChatTarget,
+  CompactSessionResponse,
   RawProcessEvent,
   ReportConfirmedPayload,
   RunRawEventsResponse,
@@ -333,4 +334,9 @@ export function confirmRun(
   body: { markdown: string; acknowledgePartial?: boolean },
 ): Promise<{ payload: ReportConfirmedPayload; session: ChatSession }> {
   return requestJson('POST', `/runs/${encodeURIComponent(runId)}/confirm`, body)
+}
+
+/** 手动触发对话上下文滚动压缩（保留最近原文消息，归档更早对话为记忆摘要） */
+export function compactSession(sid: string, signal?: AbortSignal): Promise<CompactSessionResponse> {
+  return requestJson<CompactSessionResponse>('POST', `/sessions/${encodeURIComponent(sid)}/compact`, {}, signal)
 }

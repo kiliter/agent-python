@@ -14,6 +14,7 @@ import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref,
 import {
   AlertCircle,
   AlertTriangle,
+  Archive,
   ChevronDown,
   ChevronUp,
   CircleCheck,
@@ -101,7 +102,8 @@ const scaleFactor = computed(() => {
   const vh = Math.max(1, viewportH.value || MIN_STAGE_HEIGHT)
   const raw = Math.min(vw / BASE_WIDTH, vh / MIN_STAGE_HEIGHT)
   if (!Number.isFinite(raw) || raw <= 0) return 1
-  return Math.min(Math.max(raw, 0.25), 2.5)
+  // 宽屏保持 1:1 锐利 IDE 像素渲染，仅在窄小嵌入口时等比缩小防止裁切
+  return Math.min(Math.max(raw, 0.25), 1)
 })
 
 const scalePercent = computed(() => Math.round(scaleFactor.value * 100))
@@ -151,9 +153,11 @@ const reinitLoading = ref(false)
 
 const chatInputRef = ref<InstanceType<typeof ChatInput> | null>(null)
 
-// 顶栏「工单入参」页内浮层状态
+// 顶栏「工单入参」与「记忆摘要」页内浮层状态
 const inputsPanelOpen = ref(false)
 const docExpanded = ref(false)
+const compacting = ref(false)
+const memoryPanelOpen = ref(false)
 
 // 三大居中弹窗状态（全部挂载在 .embed-stage 内）
 const switchTplVisible = ref(false)
@@ -206,6 +210,47 @@ const hasMemoryDoc = computed(() => upstreamDocument.value.length > 0)
 const effectiveDocChars = computed(() =>
   hasMemoryDoc.value ? upstreamDocument.value.length : session.value?.documentChars || 0,
 )
+
+const summarizedUpTo = computed(() => Math.max(0, Number(session.value?.summarizedUpTo || 0)))
+const memorySummary = computed(() => String(session.value?.memorySummary || '').trim())
+const unsummarizedCount = computed(() => Math.max(0, messages.value.length - summarizedUpTo.value))
+const manualCompactKeep = computed(() => {
+  const v = Number(session.value?.manualCompactKeepRecent)
+  return Number.isFinite(v) && v >= 1 ? Math.floor(v) : 6
+})
+const manualCompactMin = computed(() => {
+  const v = Number(session.value?.manualCompactMinMessages)
+  return Number.isFinite(v) && v >= 1 ? Math.floor(v) : 8
+})
+const canManualCompact = computed(
+  () =>
+    !!session.value &&
+    unsummarizedCount.value >= manualCompactMin.value &&
+    !sending.value &&
+    !compacting.value &&
+    !actionPending.value,
+)
+
+function toggleInputsPanel() {
+  const next = !inputsPanelOpen.value
+  if (next) memoryPanelOpen.value = false
+  inputsPanelOpen.value = next
+}
+
+function toggleMemoryPanel() {
+  const next = !memoryPanelOpen.value
+  if (next) inputsPanelOpen.value = false
+  memoryPanelOpen.value = next
+}
+
+function openMemoryPanel() {
+  inputsPanelOpen.value = false
+  memoryPanelOpen.value = true
+}
+
+watch(summarizedUpTo, val => {
+  if (val <= 0) memoryPanelOpen.value = false
+})
 
 const previewModalRun = computed<RunMessage | null>(() => {
   if (!previewModalRunId.value) return null
@@ -682,6 +727,7 @@ async function handleInit(data: ChatInitMessage) {
     if (sessionChanged) {
       messages.value = []
       inputsPanelOpen.value = false
+      memoryPanelOpen.value = false
       switchTplVisible.value = false
       tplStructureId.value = null
       previewModalRunId.value = null
@@ -853,6 +899,9 @@ function applySession(s: ChatSession) {
   const merged = (s.messages || []).map(m => mergeMessage(oldById.get(m.id), m))
   messages.value = merged
   session.value = { ...s, messages: [] }
+  if (!s.summarizedUpTo || s.summarizedUpTo <= 0) {
+    memoryPanelOpen.value = false
+  }
 
   const active = s.activeRunId ? findRun(s.activeRunId) : null
   if (active && TERMINAL.includes(active.status)) session.value.activeRunId = null
@@ -886,6 +935,7 @@ function abortAllStreams() {
   msgAbort = null
   sending.value = false
   statusText.value = ''
+  memoryPanelOpen.value = false
   runStreams.forEach(c => c.abort())
   runStreams.clear()
   for (const k of Object.keys(reconnectingMap)) delete reconnectingMap[k]
@@ -1062,6 +1112,43 @@ async function runTemplate(templateId: number, inputs?: Record<string, string>) 
   } finally {
     actionPending.value = false
   }
+}
+
+async function handleManualCompact() {
+  if (
+    !session.value ||
+    compacting.value ||
+    sending.value ||
+    actionPending.value ||
+    unsummarizedCount.value < manualCompactMin.value
+  ) {
+    return
+  }
+  const sid = session.value.sessionId
+  compacting.value = true
+  try {
+    const res = await api.compactSession(sid)
+    if (session.value?.sessionId !== sid) return
+    if (res.session) applySession(res.session)
+    if (res.compacted) {
+      stageToast.success(`已归档 ${res.summarizedCount} 条早期对话至记忆摘要`)
+    } else {
+      stageToast.info('当前未归档消息较少，暂无需压缩')
+    }
+  } catch (err) {
+    if (session.value?.sessionId === sid) {
+      stageToast.error(`上下文压缩失败：${chatErrorText(err)}`)
+    }
+  } finally {
+    compacting.value = false
+  }
+}
+
+async function copyMemorySummary() {
+  if (!memorySummary.value) return
+  const ok = await copyText(memorySummary.value)
+  if (ok) stageToast.success('已复制早期对话记忆摘要')
+  else stageToast.warning('复制失败，请手动复制')
 }
 
 async function stopRun(run: RunMessage) {
@@ -1246,6 +1333,10 @@ function onGlobalKeydown(e: KeyboardEvent) {
     inputsPanelOpen.value = false
     return
   }
+  if (memoryPanelOpen.value) {
+    memoryPanelOpen.value = false
+    return
+  }
   if (tplStructureId.value !== null) {
     tplStructureId.value = null
     return
@@ -1356,48 +1447,75 @@ onBeforeUnmount(() => {
             <div v-if="phase === 'ready' && session" class="inputs-anchor">
               <button
                 type="button"
-                class="topbar-pill-btn"
+                class="topbar-pill-btn eb-tip eb-tip-right"
                 :class="{ active: inputsPanelOpen }"
-                @click="inputsPanelOpen = !inputsPanelOpen"
+                data-tip="查看工单入参与申告单据原文"
+                @click="toggleInputsPanel"
               >
-                <SlidersHorizontal :size="13" />
-                <span>工单入参 ({{ inputCount }})</span>
+                <SlidersHorizontal :size="12" />
+                <span>入参 ({{ inputCount }})</span>
               </button>
             </div>
 
-            <!-- 2) 等比缩放 / 自适应布局一键切换按钮 -->
+            <!-- 1.5) 增量上下文压缩：记忆摘要胶囊 / 手动归档图标按钮（短对话无摘要时零空间占用） -->
+            <button
+              v-if="phase === 'ready' && session && summarizedUpTo > 0"
+              type="button"
+              class="topbar-pill-btn eb-tip eb-tip-right"
+              :class="{ active: memoryPanelOpen }"
+              data-tip="查看已压缩归档的早期对话记忆摘要"
+              @click="toggleMemoryPanel"
+            >
+              <Archive :size="12" />
+              <span>记忆 ({{ summarizedUpTo }})</span>
+            </button>
+            <button
+              v-else-if="phase === 'ready' && session && unsummarizedCount >= manualCompactMin"
+              type="button"
+              class="eb-icon-btn is-bordered eb-tip eb-tip-right"
+              :disabled="!canManualCompact"
+              :data-tip="`压缩早期对话上下文（保留最近 ${manualCompactKeep} 条原文）`"
+              aria-label="压缩早期对话上下文"
+              @click="handleManualCompact"
+            >
+              <Loader2 v-if="compacting" :size="13" class="spin" />
+              <Archive v-else :size="13" />
+            </button>
+
+            <!-- 2) 等比缩放 / 自适应布局一键切换图标按钮 -->
             <button
               type="button"
-              class="topbar-pill-btn"
-              :class="{ 'is-scale-active': scaleMode === 'scaled' }"
-              title="切换 PC 基准等比例缩放 / 流式自适应布局"
+              class="eb-icon-btn is-bordered eb-tip eb-tip-right"
+              :class="{ 'is-accent': scaleMode === 'scaled' }"
+              :data-tip="scaleMode === 'scaled' ? `当前：等比缩放 (${scalePercent}%) · 点击切换自适应` : '当前：自适应布局 · 点击切换等比缩放'"
+              aria-label="切换等比缩放或自适应布局"
               @click="toggleScaleMode"
             >
               <Maximize2 v-if="scaleMode === 'scaled'" :size="13" />
               <Columns2 v-else :size="13" />
-              <span>{{ scaleMode === 'scaled' ? `等比缩放 (${scalePercent}%)` : '自适应布局' }}</span>
             </button>
 
-            <!-- 3) 浏览全部模板按钮 -->
+            <!-- 3) 全部模板库按钮 -->
             <button
               v-if="phase === 'ready' && session"
               type="button"
-              class="topbar-pill-btn"
+              class="topbar-pill-btn eb-tip eb-tip-right"
+              data-tip="浏览并切换全部在线核查模板"
               @click="switchTplVisible = true"
             >
-              <LayoutGrid :size="13" />
-              <span>浏览全部模板</span>
+              <LayoutGrid :size="12" />
+              <span>模板库</span>
             </button>
 
             <!-- 4) 右上角关闭按钮 ×（发送 chat-close-request） -->
             <button
               type="button"
-              class="topbar-close-btn"
-              title="关闭聊天窗口"
+              class="topbar-close-btn eb-tip eb-tip-right"
+              data-tip="关闭聊天窗口"
               aria-label="关闭聊天窗口"
               @click="requestCloseWindow"
             >
-              <X :size="17" />
+              <X :size="16" />
             </button>
           </div>
         </header>
@@ -1494,6 +1612,53 @@ onBeforeUnmount(() => {
                   </div>
                   <div v-else class="ip-empty">上层工单未传入单据正文。</div>
                 </div>
+              </div>
+            </div>
+          </aside>
+        </template>
+
+        <!-- ==================== 早期对话记忆摘要轻量浮层（挂载在 .embed-stage 内） ==================== -->
+        <template v-if="memoryPanelOpen && session && summarizedUpTo > 0">
+          <div class="popover-click-mask" @click="memoryPanelOpen = false"></div>
+          <aside class="inputs-popover-card memory-popover-card" role="dialog" aria-label="早期对话记忆摘要">
+            <div class="ip-head">
+              <div class="ip-head-title">
+                <span class="ip-title">早期对话记忆摘要</span>
+                <span class="ip-ver mono">已归档 {{ summarizedUpTo }} 条 · 未归档 {{ unsummarizedCount }} 条</span>
+              </div>
+              <div class="ip-head-tools">
+                <button
+                  v-if="memorySummary"
+                  type="button"
+                  class="ip-mini-btn"
+                  title="复制记忆摘要全文"
+                  @click="copyMemorySummary"
+                >
+                  <Copy :size="11" />
+                  <span>复制全文</span>
+                </button>
+                <button
+                  v-if="unsummarizedCount >= manualCompactMin"
+                  type="button"
+                  class="ip-mini-btn is-accent"
+                  :disabled="!canManualCompact"
+                  :title="`压缩早期对话上下文（保留最近 ${manualCompactKeep} 条原文）`"
+                  @click="handleManualCompact"
+                >
+                  <Loader2 v-if="compacting" :size="11" class="spin" />
+                  <Archive v-else :size="11" />
+                  <span>{{ compacting ? '压缩中…' : '继续压缩' }}</span>
+                </button>
+                <button type="button" class="ip-close" aria-label="关闭记忆摘要浮层" @click="memoryPanelOpen = false">
+                  <X :size="15" />
+                </button>
+              </div>
+            </div>
+
+            <div class="ip-body">
+              <pre class="memory-summary-pre">{{ memorySummary || '暂无摘要内容' }}</pre>
+              <div class="memory-summary-note">
+                仅供对话辅助理解与改写偏好记忆，核查字段仍严格以单据与接口证据为准。
               </div>
             </div>
           </aside>
@@ -1600,7 +1765,7 @@ onBeforeUnmount(() => {
               </div>
 
               <!-- 对话消息流 -->
-              <template v-for="m in messages" :key="m.id">
+              <template v-for="(m, idx) in messages" :key="m.id">
                 <!-- 入参变更等分隔提示 -->
                 <div v-if="m.kind === 'divider'" class="stream-divider">
                   <span>{{ m.text }}</span>
@@ -1713,6 +1878,20 @@ onBeforeUnmount(() => {
                     <span>{{ m.text }}</span>
                     <span class="mono event-time">{{ formatTime(m.createdAt) }}</span>
                   </div>
+                </div>
+
+                <!-- 增量上下文压缩归档水位线 -->
+                <div
+                  v-if="summarizedUpTo > 0 && idx === summarizedUpTo - 1 && idx < messages.length - 1"
+                  class="stream-divider memory-watermark-divider"
+                >
+                  <span class="memory-watermark-inner">
+                    <Archive :size="12" />
+                    <span>以上 {{ summarizedUpTo }} 条早期对话已归档为记忆摘要</span>
+                    <button type="button" class="memory-watermark-link" @click="openMemoryPanel">
+                      查看摘要
+                    </button>
+                  </span>
                 </div>
               </template>
 
@@ -1867,18 +2046,18 @@ onBeforeUnmount(() => {
   position: relative;
 }
 
-/* ==================== 1. 52px 极简毛玻璃顶栏 ==================== */
+/* ==================== 1. 40px IDE 紧凑顶栏 ==================== */
 .gpt-topbar {
-  height: 52px;
-  padding: 0 20px;
-  border-bottom: 1px solid #f1f1f4;
-  background: rgba(255, 255, 255, 0.88);
+  height: 40px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--gpt-border);
+  background: rgba(255, 255, 255, 0.94);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
   flex-shrink: 0;
   z-index: 30;
 }
@@ -1887,20 +2066,21 @@ onBeforeUnmount(() => {
 .topbar-right {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
+  flex-wrap: nowrap;
 }
 
 .assistant-brand {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .brand-dot-badge {
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
   background: var(--gpt-btn-dark);
   color: #ffffff;
   display: inline-flex;
@@ -1910,33 +2090,33 @@ onBeforeUnmount(() => {
 }
 
 .brand-name {
-  font-size: 15px;
+  font-size: 13.5px;
   font-weight: 650;
   color: var(--gpt-ink);
-  letter-spacing: -0.015em;
+  letter-spacing: -0.01em;
   white-space: nowrap;
 }
 
 .version-pill {
-  padding: 1px 7px;
-  border-radius: 6px;
+  padding: 1px 6px;
+  border-radius: 5px;
   background: var(--gpt-bg-muted);
   color: var(--gpt-ink-secondary);
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 500;
 }
 
 .meta-pill {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 26px;
-  padding: 0 9px;
-  border-radius: 7px;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
   border: 1px solid var(--gpt-border);
   background: var(--gpt-bg-subtle);
   color: var(--gpt-ink-secondary);
-  font-size: 12px;
+  font-size: 11.5px;
 }
 .meta-pill.is-clickable {
   cursor: pointer;
@@ -1952,9 +2132,9 @@ onBeforeUnmount(() => {
 }
 
 .snapshot-pill {
-  padding: 2px 9px;
+  padding: 1px 8px;
   border-radius: 999px;
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 600;
   white-space: nowrap;
 }
@@ -1972,32 +2152,32 @@ onBeforeUnmount(() => {
 .reconnect-pill {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 2px 9px;
+  gap: 4px;
+  padding: 1px 8px;
   border-radius: 999px;
   background: var(--gpt-amber-bg);
   border: 1px solid var(--gpt-amber-border);
   color: var(--gpt-amber);
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 500;
 }
 
 .topbar-pill-btn {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 32px;
-  padding: 0 13px;
-  border-radius: 999px;
+  gap: 4px;
+  height: 26px;
+  padding: 0 9px;
+  border-radius: 6px;
   border: 1px solid var(--gpt-border);
   background: #ffffff;
   color: var(--gpt-ink-secondary);
   font: inherit;
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
-  transition: all 0.15s ease;
+  transition: all 0.14s ease;
 }
 .topbar-pill-btn:hover,
 .topbar-pill-btn.active {
@@ -2005,20 +2185,11 @@ onBeforeUnmount(() => {
   background: var(--gpt-bg-muted);
   color: var(--gpt-ink);
 }
-.topbar-pill-btn.is-scale-active {
-  border-color: var(--gpt-accent-border);
-  background: var(--gpt-accent-soft);
-  color: var(--gpt-accent);
-  font-weight: 600;
-}
-.topbar-pill-btn.is-scale-active:hover {
-  background: #dbeafe;
-}
 
 .topbar-close-btn {
-  width: 32px;
-  height: 32px;
-  border-radius: 999px;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
   border: 1px solid transparent;
   background: transparent;
   color: var(--gpt-ink-muted);
@@ -2026,7 +2197,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all 0.14s;
 }
 .topbar-close-btn:hover {
   background: var(--gpt-bg-muted);
@@ -2043,14 +2214,14 @@ onBeforeUnmount(() => {
 
 .inputs-popover-card {
   position: absolute;
-  top: 58px;
-  right: 20px;
-  width: min(520px, calc(100% - 32px));
-  max-height: calc(100% - 80px);
+  top: 44px;
+  right: 14px;
+  width: min(500px, calc(100% - 28px));
+  max-height: calc(100% - 64px);
   z-index: 90;
   background: #ffffff;
   border: 1px solid var(--gpt-border);
-  border-radius: 16px;
+  border-radius: 10px;
   box-shadow: var(--gpt-shadow-popover);
   display: flex;
   flex-direction: column;
@@ -2109,9 +2280,51 @@ onBeforeUnmount(() => {
   font-size: 11.5px;
   cursor: pointer;
 }
-.ip-mini-btn:hover {
+.ip-mini-btn:hover:not(:disabled) {
   background: var(--gpt-bg-muted);
   color: var(--gpt-ink);
+}
+.ip-mini-btn.is-accent {
+  border-color: var(--gpt-accent-border);
+  background: var(--gpt-accent-soft);
+  color: var(--gpt-accent);
+}
+.ip-mini-btn.is-accent:hover:not(:disabled) {
+  background: #dbeafe;
+  border-color: #93c5fd;
+  color: var(--gpt-accent-hover);
+}
+.ip-mini-btn:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.memory-popover-card {
+  width: min(540px, calc(100% - 28px));
+}
+.memory-summary-pre {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--gpt-border);
+  background: var(--gpt-bg-subtle);
+  font-family: var(--gpt-font-mono);
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--gpt-ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.memory-summary-note {
+  padding: 7px 10px;
+  border-radius: 7px;
+  background: var(--gpt-amber-bg);
+  border: 1px solid var(--gpt-amber-border);
+  color: var(--gpt-amber);
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 .ip-close {
   width: 26px;
@@ -2327,20 +2540,20 @@ onBeforeUnmount(() => {
   color: var(--gpt-ink-muted);
 }
 
-/* ==================== 3. 单栏居中对话流（max-width: 840px） ==================== */
+/* ==================== 3. IDE 紧凑单栏对话流（max-width: 920px） ==================== */
 .chat-scroll-area {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 26px 24px 18px;
+  padding: 14px 18px 10px;
 }
 
 .chat-stream-container {
-  max-width: 840px;
+  max-width: 920px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 14px;
 }
 
 .confirmed-top-strip {
@@ -2460,50 +2673,82 @@ onBeforeUnmount(() => {
   background: var(--gpt-border);
 }
 
+.memory-watermark-divider {
+  margin: 2px 0;
+  font-size: 11.5px;
+}
+.memory-watermark-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--gpt-border);
+  background: var(--gpt-bg-subtle);
+  color: var(--gpt-ink-muted);
+  white-space: nowrap;
+}
+.memory-watermark-link {
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 0 2px;
+  margin-left: 2px;
+  font: inherit;
+  font-weight: 600;
+  color: var(--gpt-accent);
+  cursor: pointer;
+}
+.memory-watermark-link:hover {
+  color: var(--gpt-accent-hover);
+  text-decoration: underline;
+}
+
 .system-note {
   text-align: center;
   font-size: 12.5px;
   color: var(--gpt-ink-muted);
 }
 
-/* 用户消息：右对齐克制浅灰圆角胶囊 */
+/* 用户消息：右对齐常规标准蓝色气泡 */
 .turn-user {
   display: flex;
   justify-content: flex-end;
 }
 .user-capsule {
   max-width: 72%;
-  padding: 10px 16px;
-  border-radius: 18px;
-  background: #f4f4f5;
-  color: #18181b;
-  font-size: 14.5px;
-  line-height: 1.62;
+  padding: 7px 13px;
+  border-radius: 12px 12px 3px 12px;
+  background: #2563eb;
+  color: #ffffff;
+  font-size: 13px;
+  line-height: 1.55;
+  box-shadow: 0 1px 2px rgba(37, 99, 235, 0.22);
   white-space: pre-wrap;
   word-break: break-word;
 }
 
-/* AI 助手回复：左侧 30px 精致圆形图标徽标 + 右侧无外框舒展正文/结构化卡片 */
+/* AI 助手回复：左侧 24px 紧凑图标徽标 + 右侧结构化正文/卡片 */
 .turn-assistant {
   display: flex;
   align-items: flex-start;
-  gap: 14px;
+  gap: 10px;
   min-width: 0;
 }
 
 .ai-circle-badge {
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
   border: 1px solid var(--gpt-border);
   background: #ffffff;
-  color: var(--gpt-ink);
+  color: var(--gpt-ink-secondary);
   box-shadow: var(--gpt-shadow-xs);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  margin-top: 1px;
+  margin-top: 2px;
 }
 
 .ai-prose {
@@ -2604,22 +2849,22 @@ onBeforeUnmount(() => {
   background: var(--gpt-bg-muted);
 }
 
-/* ==================== 4. 底部悬浮大圆角输入舱 ==================== */
+/* ==================== 4. 底部紧凑悬浮输入舱 ==================== */
 .gpt-composer-footer {
   flex-shrink: 0;
-  padding: 8px 24px 14px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.85) 0%, #ffffff 28%);
+  padding: 6px 18px 8px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.88) 0%, #ffffff 30%);
 }
 
 .composer-container {
-  max-width: 840px;
+  max-width: 920px;
   margin: 0 auto;
 }
 
 .composer-footnote {
-  margin-top: 8px;
+  margin-top: 4px;
   text-align: center;
-  font-size: 11.5px;
+  font-size: 11px;
   color: var(--gpt-ink-muted);
 }
 </style>

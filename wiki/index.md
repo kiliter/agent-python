@@ -5,7 +5,7 @@ tags: [index, catalog, navigation]
 sources:
   - wiki/SCHEMA.md
   - AGENTS.md
-updated: 2026-11-12
+updated: 2026-11-13
 ---
 
 # 项目知识库总目录（`report-agent`）
@@ -70,7 +70,7 @@ updated: 2026-11-12
 
 ## 参考速查（`reference/`）
 
-- [reference/configuration.md](reference/configuration.md) — `Settings` 环境变量全集与运行期热更新配置项速查表。
+- [reference/configuration.md](reference/configuration.md) — `Settings` 环境变量全集、48 项运行期配置在线热更新与全链路默认值兜底速查表。
 - [reference/templates-catalog.md](reference/templates-catalog.md) — 33 个生产模板（`100`～`132`）完整目录（模板名称、字段数、列表/中间字段、关联 Skill 与入参）。
 - [reference/apis-catalog.md](reference/apis-catalog.md) — 3 个内置网关接口契约（`querySMSSendInfo`、`BOSS_QryBalanceFlowLog`、`cc_pretty_num_info_query`）参数与响应速查。
 - [reference/glossary.md](reference/glossary.md) — 业务领域与平台工程核心术语对照表。

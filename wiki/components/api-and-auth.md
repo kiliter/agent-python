@@ -68,7 +68,7 @@ Web 接口层位于 `src/report_agent/main.py`、`container.py` 与 `src/report_
 
 ### 3.4 `routes_chat.py`：嵌入式聊天窗口与模板路由接口
 
-挂载于 `/api/v1/chat`，提供契约 `docs/chat-embed-api.md` 定义的 10 个端点：会话创建/恢复与入参更新（`POST /sessions`、`GET /sessions/{sid}`）、SSE 对话与自动模板推荐（`POST /sessions/{sid}/messages`）、候选模板检索（`GET /sessions/{sid}/templates`）、模板结构与预渲染样例预览（`GET /sessions/{sid}/templates/{template_id}`）、参数校验与后台运行启动（`POST /sessions/{sid}/runs`）、支持 `?after=N`、`Last-Event-ID` 断点续接及 `includeRaw` / `rawAfter` 原样过程事件推送的运行事件流（`GET /runs/{run_id}/events`）、原样过程事件按需拉取（`GET /runs/{run_id}/raw`）、手动取消（`POST /runs/{run_id}/cancel`）以及幂等审计确认（`POST /runs/{run_id}/confirm`）。其中 `/runs/{run_id}/*` 四个端点均支持可选请求头 `X-Chat-Session-Id` 或查询参数 `sessionId` 做跨会话归属防越权校验。内部机制详见 [嵌入式聊天选模板窗口组件剖析](chat-embed.md)。
+挂载于 `/api/v1/chat`，提供契约 `docs/chat-embed-api.md` 定义的 11 个端点：会话创建/恢复与入参更新（`POST /sessions`、`GET /sessions/{sid}`）、SSE 对话与自动模板推荐（`POST /sessions/{sid}/messages`）、手动上下文滚动压缩归档（`POST /sessions/{sid}/compact`）、候选模板检索（`GET /sessions/{sid}/templates`）、模板结构与预渲染样例预览（`GET /sessions/{sid}/templates/{template_id}`）、参数校验与后台运行启动（`POST /sessions/{sid}/runs`）、支持 `?after=N`、`Last-Event-ID` 断点续接及 `includeRaw` / `rawAfter` 原样过程事件推送的运行事件流（`GET /runs/{run_id}/events`）、原样过程事件按需拉取（`GET /runs/{run_id}/raw`）、手动取消（`POST /runs/{run_id}/cancel`）以及幂等审计确认（`POST /runs/{run_id}/confirm`）。其中 `/runs/{run_id}/*` 四个端点均支持可选请求头 `X-Chat-Session-Id` 或查询参数 `sessionId` 做跨会话归属防越权校验。内部机制详见 [嵌入式聊天选模板窗口组件剖析](chat-embed.md)。
 
 ## 相关页面
 

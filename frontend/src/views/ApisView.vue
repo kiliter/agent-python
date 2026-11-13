@@ -39,6 +39,12 @@ const refreshing = ref(false)
 const api = computed(() => store.currentApi)
 const tab = computed(() => store.apiDetailTab)
 
+/** 根据 Skill id 或 name 解析可读展示名称 */
+function resolveSkillDisplayName(skillKey: string): string {
+  const hit = store.skills.find(s => s.id === skillKey || s.name === skillKey)
+  return hit?.name || skillKey
+}
+
 /** 判断列表项是否为统一网关 JSON 协议 */
 function isJsonApiItem(item: Partial<ApiItem> & { connector?: string; format?: string }): boolean {
   if (item.connector === 'unified-gateway-json') return true
@@ -850,9 +856,18 @@ function handleDirectRollbackApi(rev: string) {
                 <div class="mono api-name-code">{{ a.name }}</div>
                 <div v-if="a.processCode" class="mono row-sub-id">编码: {{ a.processCode }}</div>
               </td>
-              <td>
-                <div class="row-primary-name">{{ a.title }}</div>
-                <div class="row-sub-desc">{{ a.description }}</div>
+              <td class="api-desc-cell">
+                <div class="row-primary-name" :title="a.title">{{ a.title }}</div>
+                <el-tooltip
+                  v-if="a.description"
+                  :content="a.description"
+                  placement="top-start"
+                  :show-after="180"
+                  popper-style="max-width: 400px; line-height: 1.55"
+                >
+                  <div class="row-sub-desc">{{ a.description }}</div>
+                </el-tooltip>
+                <div v-else class="row-sub-desc">—</div>
               </td>
               <td style="white-space: nowrap">
                 <span
@@ -865,19 +880,38 @@ function handleDirectRollbackApi(rev: string) {
               </td>
               <td style="white-space: nowrap"><StatusTag :status="a.status" /></td>
               <td @click.stop>
-                <div class="chip-wrap">
-                  <span v-if="a.refs.length === 0" class="muted-text">
-                    未被引用
-                  </span>
-                  <span
-                    v-for="r in a.refs"
-                    :key="r"
-                    class="chip-tag clickable skill-ref-chip"
-                    @click="store.openSkillByName(r)"
-                  >
-                    {{ r }}
-                  </span>
-                </div>
+                <span v-if="a.refs.length === 0" class="muted-text">
+                  未被引用
+                </span>
+                <el-popover v-else placement="bottom-start" :width="280" trigger="hover">
+                  <template #reference>
+                    <span class="chip-tag clickable ref-count-pill" @click.stop>
+                      {{ a.refs.length }} 个 Skill 规程 ▾
+                    </span>
+                  </template>
+                  <div class="ref-popover-panel">
+                    <div class="ref-popover-head">
+                      引用此接口的 Skill 规程 ({{ a.refs.length }})
+                    </div>
+                    <div class="ref-popover-list">
+                      <button
+                        v-for="r in a.refs"
+                        :key="r"
+                        type="button"
+                        class="ref-popover-item"
+                        @click="store.openSkillByName(r)"
+                      >
+                        <span class="ref-popover-item-title">{{ resolveSkillDisplayName(r) }}</span>
+                        <span
+                          v-if="resolveSkillDisplayName(r) !== r"
+                          class="ref-popover-sub mono"
+                        >
+                          {{ r }}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+                </el-popover>
               </td>
               <td class="mono" style="white-space: nowrap">
                 <strong>{{ a.calls7d }}</strong>
@@ -1716,9 +1750,17 @@ function handleDirectRollbackApi(rev: string) {
   color: var(--primary);
 }
 
+.api-desc-cell {
+  max-width: 280px;
+}
+
 .row-primary-name {
   font-weight: 600;
   color: var(--text-primary);
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .asset-row:hover .row-primary-name {
@@ -1732,6 +1774,10 @@ function handleDirectRollbackApi(rev: string) {
 }
 
 .row-sub-desc {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 11.5px;
   color: var(--text-secondary);
   margin-top: 2px;

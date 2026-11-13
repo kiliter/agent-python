@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import math
 import re
 from typing import Any, Callable, Literal
 
@@ -29,8 +30,53 @@ from ..runtime.runner import AgentRunner
 ROUTER_SKILL_NAME = "template-router"
 MAX_DOC_CHARS = 12_000
 MAX_HISTORY_MESSAGES = 20
+MAX_RUN_CARDS = 8
 MAX_MARKDOWN_PREVIEW = 1_500
+COMPACT_TRIGGER_MESSAGES = 24
+COMPACT_KEEP_RECENT = 12
+MANUAL_COMPACT_KEEP_RECENT = 6
+MANUAL_COMPACT_MIN_SLICE = 2
+MAX_MEMORY_SUMMARY_CHARS = 1_200
+MAX_SUMMARY_MSG_CHARS = 800
+CHAT_REQUEST_LIMIT = 8
+CHAT_TOOL_CALLS_LIMIT = 16
+CHAT_TIMEOUT_S = 120.0
+CHAT_SUMMARY_REQUEST_LIMIT = 3
+CHAT_SUMMARY_TOOL_CALLS_LIMIT = 4
+CHAT_SUMMARY_TIMEOUT_S = 60.0
 _JAVA_RULE_NOTE_RE = re.compile(r"\n*原规则（Java）：")
+
+
+def cfg_int(settings: Any, attr: str, default: int, *, min_val: int = 1) -> int:
+    """从运行配置安全读取整数参数，缺失、空值或越界时回退默认值。#Created By AiCoding(codex)"""
+    if settings is None:
+        return default
+    raw = getattr(settings, attr, None)
+    if raw is None or isinstance(raw, bool):
+        return default
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return val if val >= min_val else default
+
+
+def cfg_float(settings: Any, attr: str, default: float, *, gt_zero: bool = True) -> float:
+    """从运行配置安全读取浮点参数，缺失、空值、NaN/Inf 或非法时回退默认值。#Created By AiCoding(codex)"""
+    if settings is None:
+        return default
+    raw = getattr(settings, attr, None)
+    if raw is None or isinstance(raw, bool):
+        return default
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(val) or math.isinf(val):
+        return default
+    if gt_zero and val <= 0:
+        return default
+    return val
 
 AUTO_RECOMMEND_PROMPT = (
     "会话刚打开，请根据当前入参和单据推荐最匹配的模板（最多 3 个）；"
@@ -53,6 +99,36 @@ CHAT_SYSTEM_PROMPT = """你是「智能申告报告填写平台」嵌入式聊�
 - 推荐结果最多 3 个，每个候选必须写明结合当前单据/入参的具体匹配理由，且只推荐在线模板，不要自动触发运行。
 - 当用户询问“为什么某字段没查到 / 缺失”或要求改写某份报告时，优先调用 `get_run_result(runId)` 获取准确字段推理说明（`reasoning`）与最新报告全文。
 - 当用户要求改写、润色、精简或调整已生成报告口径时，**必须**使用 `action="rewrite"` 并在 `markdown` 字段输出改写后的**完整**报告正文（不能只输出局部修改片段；`text` 仅写简短改写说明，前端会在 `text` 下方直接渲染填充后的报告卡片），**严禁**使用 `action="reply"` 只口头声称已改写或在 `text` 中贴出正文却不提交 `markdown`。"""
+
+
+def build_summary_system_prompt(max_summary_chars: int = MAX_MEMORY_SUMMARY_CHARS) -> str:
+    """构造滚动对话记忆提炼系统提示词，动态注入摘要字符上限。#Created By AiCoding(codex)"""
+    limit = max(200, int(max_summary_chars))
+    return f"""你是「智能申告报告填写平台」嵌入式聊天窗口的对话记忆提炼助手。
+
+请将「已有早期对话记忆摘要」与「本批新增待归档对话记录」合并提炼为不超过 {limit} 字的精炼中文要点，用于后续轮次理解对话上下文。
+
+## 重点保留内容
+1. **用户补充的工单背景与客户诉求**：必须注明「用户口述」，严禁混同于原始单据或接口查证证据。
+2. **已排除或不满意的模板编号及原因**：记录用户明确否决、放弃或不满意的模板 `#编号` 与原因，避免后续重复推荐。
+3. **报告改写与输出偏好**：记录用户对措辞、语气、分段或篇幅的要求（若新偏好推翻了旧偏好，请以新偏好覆盖旧偏好）。
+4. **尚未解答的问题或待跟进事项**：记录仍待用户补充参数或尚待回答的疑问。
+
+## 严格禁忌与裁剪原则
+- 严禁编造任何未在已有摘要或本批对话中出现的业务数据、手机号、资费、时间或结论。
+- 剔除寒暄客套与大段完整报告正文抄录（仅保留改写要求与结论状态即可）。
+- 合并去重后控制总长度严格不超过 {limit} 字。"""
+
+
+CHAT_SUMMARY_SYSTEM_PROMPT = build_summary_system_prompt()
+
+
+class ChatSummaryOutput(BaseModel):
+    """早期对话历史滚动记忆摘要结构化输出。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(description="合并提炼后的精炼中文早期对话记忆摘要（不超过 1200 字）")
 
 
 class RecommendPick(BaseModel):
@@ -278,9 +354,12 @@ def _build_chat_tools(tool_retries: int) -> list[Tool[ChatDeps]]:
 
 
 # ============================================================================ 动态上下文与提示词组装
-def _build_context_instructions(deps: ChatDeps, output_mode: str) -> str:
+def _build_context_instructions(deps: ChatDeps, output_mode: str, settings: Any = None) -> str:
     rs = deps.resources
     session = deps.session
+    max_doc_chars = cfg_int(settings, "chat_max_doc_chars", MAX_DOC_CHARS)
+    max_run_cards = cfg_int(settings, "chat_max_run_cards", MAX_RUN_CARDS)
+    max_md_preview = cfg_int(settings, "chat_max_markdown_preview_chars", MAX_MARKDOWN_PREVIEW)
     online_count = sum(1 for t in rs.templates.values() if not t.offline)
     has_router = ROUTER_SKILL_NAME in rs.skills
     router_hint = (
@@ -304,9 +383,9 @@ def _build_context_instructions(deps: ChatDeps, output_mode: str) -> str:
     if not doc.strip():
         doc_header = "单据正文（0 字）："
         doc_body = "（上层未提供单据正文）"
-    elif doc_total > MAX_DOC_CHARS:
-        doc_header = f"单据正文（总长 {doc_total} 字，以下截取前 {MAX_DOC_CHARS} 字）："
-        doc_body = doc[:MAX_DOC_CHARS] + "\n…（单据过长已截断）"
+    elif doc_total > max_doc_chars:
+        doc_header = f"单据正文（总长 {doc_total} 字，以下截取前 {max_doc_chars} 字）："
+        doc_body = doc[:max_doc_chars] + "\n…（单据过长已截断）"
     else:
         doc_header = f"单据正文（共 {doc_total} 字）："
         doc_body = doc
@@ -325,7 +404,7 @@ def _build_context_instructions(deps: ChatDeps, output_mode: str) -> str:
     runs = _session_run_cards(session)
     if runs:
         run_blocks: list[str] = []
-        for r in runs[-8:]:
+        for r in runs[-max_run_cards:]:
             rid = r.get("runId")
             tid = r.get("templateId")
             tname = r.get("templateName")
@@ -338,7 +417,7 @@ def _build_context_instructions(deps: ChatDeps, output_mode: str) -> str:
             if versions:
                 latest = versions[-1]
                 md = str(latest.get("markdown") or "")
-                preview = md[:MAX_MARKDOWN_PREVIEW] + ("…" if len(md) > MAX_MARKDOWN_PREVIEW else "")
+                preview = md[:max_md_preview] + ("…" if len(md) > max_md_preview else "")
                 line += f"\n  最新版本（v{latest.get('no')}，{latest.get('kind')}）预览：\n  {preview}"
             run_blocks.append(line)
         runs_text = "\n".join(run_blocks)
@@ -368,53 +447,113 @@ def _build_context_instructions(deps: ChatDeps, output_mode: str) -> str:
 {submit_hint}"""
 
 
-def format_history_for_prompt(messages: list[dict[str, Any]], *, limit: int = MAX_HISTORY_MESSAGES) -> str:
+def _format_message_line(m: dict[str, Any], *, max_text_chars: int | None = None) -> str | None:
+    """将单条会话消息格式化为紧凑历史文本行；按需截断普通文本消息。"""
+    if not isinstance(m, dict):
+        return None
+    kind = m.get("kind")
+    role = m.get("role", "assistant")
+    if kind == "text":
+        raw_text = str(m.get("text") or "")
+        if max_text_chars is not None and len(raw_text) > max_text_chars:
+            text_val = raw_text[:max_text_chars] + "…"
+        else:
+            text_val = raw_text
+        rw_rid = str(m.get("rewriteRunId") or "").strip()
+        if role == "assistant" and rw_rid:
+            return f"[助手改写 runId={rw_rid} v{m.get('rewriteVersionNo')}] {text_val}"
+        speaker = "用户" if role == "user" else ("系统" if role == "system" else "助手")
+        return f"[{speaker}] {text_val}"
+    if kind == "divider":
+        return f"[系统提示] {m.get('text', '')}"
+    if kind == "recommend":
+        items = m.get("items") or []
+        picks = "；".join(
+            f"#{it.get('templateId')} {it.get('templateName')}（{it.get('level')}）"
+            for it in items if isinstance(it, dict)
+        )
+        return f"[助手推荐] {m.get('text', '')} -> {picks or '无'}"
+    if kind == "ask_params":
+        params = [p.get("key") for p in (m.get("params") or []) if isinstance(p, dict) and p.get("error")]
+        return f"[助手请用户补参] 模板 #{m.get('templateId')} {m.get('templateName')}，待补/修正：{params}"
+    if kind == "run":
+        return f"[运行卡片] runId={m.get('runId')} 模板=#{m.get('templateId')} {m.get('templateName')} 状态={m.get('status')}"
+    if kind == "confirmed":
+        return f"[已确认] runId={m.get('runId')}：{m.get('text', '')}"
+    return None
+
+
+def format_history_for_prompt(
+    messages: list[dict[str, Any]],
+    *,
+    limit: int | None = None,
+    max_messages: int | None = None,
+) -> str:
     """将最近 N 条会话消息格式化为紧凑对话历史文本。"""
-    recent = messages[-limit:] if limit > 0 else []
+    eff_limit = max_messages if max_messages is not None else (limit if limit is not None else MAX_HISTORY_MESSAGES)
+    recent = messages[-eff_limit:] if eff_limit > 0 else []
     if not recent:
         return "（暂无历史对话）"
-    lines: list[str] = []
-    for m in recent:
-        if not isinstance(m, dict):
-            continue
-        kind = m.get("kind")
-        role = m.get("role", "assistant")
-        if kind == "text":
-            rw_rid = str(m.get("rewriteRunId") or "").strip()
-            if role == "assistant" and rw_rid:
-                lines.append(f"[助手改写 runId={rw_rid} v{m.get('rewriteVersionNo')}] {m.get('text', '')}")
-            else:
-                speaker = "用户" if role == "user" else ("系统" if role == "system" else "助手")
-                lines.append(f"[{speaker}] {m.get('text', '')}")
-        elif kind == "divider":
-            lines.append(f"[系统提示] {m.get('text', '')}")
-        elif kind == "recommend":
-            items = m.get("items") or []
-            picks = "；".join(
-                f"#{it.get('templateId')} {it.get('templateName')}（{it.get('level')}）"
-                for it in items if isinstance(it, dict)
-            )
-            lines.append(f"[助手推荐] {m.get('text', '')} -> {picks or '无'}")
-        elif kind == "ask_params":
-            params = [p.get("key") for p in (m.get("params") or []) if isinstance(p, dict) and p.get("error")]
-            lines.append(
-                f"[助手请用户补参] 模板 #{m.get('templateId')} {m.get('templateName')}，待补/修正：{params}"
-            )
-        elif kind == "run":
-            lines.append(
-                f"[运行卡片] runId={m.get('runId')} 模板=#{m.get('templateId')} {m.get('templateName')} 状态={m.get('status')}"
-            )
-        elif kind == "confirmed":
-            lines.append(f"[已确认] runId={m.get('runId')}：{m.get('text', '')}")
+    lines = [line for m in recent if (line := _format_message_line(m)) is not None]
     return "\n".join(lines) if lines else "（暂无历史对话）"
 
 
-def build_chat_user_prompt(history_messages: list[dict[str, Any]], text: str, *, auto: bool = False) -> str:
-    """组装聊天 Agent 本轮用户输入提示词。"""
-    history_block = format_history_for_prompt(history_messages, limit=MAX_HISTORY_MESSAGES)
+def format_messages_for_summary(
+    messages: list[dict[str, Any]],
+    *,
+    max_msg_chars: int | None = None,
+) -> str:
+    """将待归档消息切片格式化为紧凑文本（text 消息截取前 max_msg_chars 字符）。"""
+    eff_max = max_msg_chars if max_msg_chars is not None else MAX_SUMMARY_MSG_CHARS
+    if not messages:
+        return "（无待归档对话）"
+    lines = [
+        line
+        for m in messages
+        if (line := _format_message_line(m, max_text_chars=eff_max)) is not None
+    ]
+    return "\n".join(lines) if lines else "（无待归档对话）"
+
+
+def build_chat_user_prompt(
+    history_messages: list[dict[str, Any]],
+    text: str,
+    *,
+    auto: bool = False,
+    memory_summary: str = "",
+    max_history_messages: int | None = None,
+) -> str:
+    """组装聊天 Agent 本轮用户输入提示词（存在早期记忆摘要时前置注入摘要段落）。"""
+    history_block = format_history_for_prompt(
+        history_messages,
+        max_messages=max_history_messages if max_history_messages is not None else MAX_HISTORY_MESSAGES,
+    )
     instruction = AUTO_RECOMMEND_PROMPT if auto else text.strip()
     label = "自动触发指令" if auto else "用户本轮消息"
-    return f"## 最近对话历史\n{history_block}\n\n## {label}\n{instruction}"
+    base_prompt = f"## 最近对话历史\n{history_block}\n\n## {label}\n{instruction}"
+    clean_summary = (memory_summary or "").strip()
+    if not clean_summary:
+        return base_prompt
+    return (
+        "## 早期对话记忆摘要（前序消息已压缩归档；仅供理解对话背景与改写口径偏好，严禁作为填报字段证据）\n"
+        f"{clean_summary}\n\n"
+        f"{base_prompt}"
+    )
+
+
+def _build_output_spec(
+    mode: str,
+    strict: bool,
+    model_cls: type[BaseModel],
+    *,
+    name: str,
+    description: str,
+) -> Any:
+    if mode == "native":
+        return NativeOutput(model_cls, name=name, strict=strict)
+    if mode in ("json_object", "prompted"):
+        return PromptedOutput(model_cls, name=name)
+    return ToolOutput(model_cls, name=name, description=description)
 
 
 class ChatAgent:
@@ -423,6 +562,7 @@ class ChatAgent:
     def __init__(self, runner: AgentRunner) -> None:
         self.runner = runner
         self._cached_agent: tuple[tuple[Any, ...], Any, Any, Agent[ChatDeps, ChatAction], float] | None = None
+        self._cached_summarizer: tuple[tuple[Any, ...], Any, Any, Agent[None, ChatSummaryOutput], float] | None = None
 
     def _snapshot_runtime(self) -> tuple[Any, Any, Any, Any]:
         bundle = getattr(self.runner, "_bundle", None)
@@ -439,21 +579,13 @@ class ChatAgent:
         if rt_settings is None or rt_model is None:
             _, rt_settings, rt_model, rt_model_settings = self._snapshot_runtime()
         mode = rt_settings.agent_output_mode
-
-        if mode == "native":
-            output: Any = NativeOutput(
-                ChatAction,
-                name="submit_chat_action",
-                strict=rt_settings.agent_native_strict,
-            )
-        elif mode in ("json_object", "prompted"):
-            output = PromptedOutput(ChatAction, name="submit_chat_action")
-        else:
-            output = ToolOutput(
-                ChatAction,
-                name="submit_chat_action",
-                description="提交聊天回复文本与本轮结构化动作（reply/recommend/ask_params/start_run/rewrite）。",
-            )
+        output = _build_output_spec(
+            mode,
+            rt_settings.agent_native_strict,
+            ChatAction,
+            name="submit_chat_action",
+            description="提交聊天回复文本与本轮结构化动作（reply/recommend/ask_params/start_run/rewrite）。",
+        )
 
         agent: Agent[ChatDeps, ChatAction] = Agent(
             rt_model,
@@ -461,7 +593,7 @@ class ChatAgent:
             output_type=output,
             instructions=[
                 CHAT_SYSTEM_PROMPT,
-                lambda ctx: _build_context_instructions(ctx.deps, mode),
+                lambda ctx: _build_context_instructions(ctx.deps, mode, rt_settings),
             ],
             tools=_build_chat_tools(rt_settings.agent_tool_retries),
             retries={
@@ -556,8 +688,8 @@ class ChatAgent:
                 raise ModelRetry("action='reply' 时 text 回复内容不能为空。")
             return out
 
-        timeout_s = min(float(rt_settings.agent_run_timeout_s), 120.0)
-        return agent, max(1.0, timeout_s)
+        timeout_s = cfg_float(rt_settings, "chat_timeout_s", CHAT_TIMEOUT_S)
+        return agent, timeout_s
 
     def _get_or_build_agent(self) -> tuple[Agent[ChatDeps, ChatAction], float]:
         """复用与当前运行期模型及配置快照完全一致的 Pydantic AI Agent，避免每轮重复构造 Schema。"""
@@ -569,6 +701,10 @@ class ChatAgent:
             rt_settings.agent_tool_retries,
             rt_settings.agent_output_retries,
             rt_settings.agent_run_timeout_s,
+            cfg_float(rt_settings, "chat_timeout_s", CHAT_TIMEOUT_S),
+            cfg_int(rt_settings, "chat_max_doc_chars", MAX_DOC_CHARS),
+            cfg_int(rt_settings, "chat_max_run_cards", MAX_RUN_CARDS),
+            cfg_int(rt_settings, "chat_max_markdown_preview_chars", MAX_MARKDOWN_PREVIEW),
         )
         cached = self._cached_agent
         if (
@@ -582,6 +718,90 @@ class ChatAgent:
         self._cached_agent = (cache_key, rt_model, rt_model_settings, agent, timeout_s)
         return agent, timeout_s
 
+    def _build_summarizer_agent(
+        self,
+        rt_settings: Any | None = None,
+        rt_model: Any | None = None,
+        rt_model_settings: Any | None = None,
+    ) -> tuple[Agent[None, ChatSummaryOutput], float]:
+        if rt_settings is None or rt_model is None:
+            _, rt_settings, rt_model, rt_model_settings = self._snapshot_runtime()
+        max_summary_chars = cfg_int(rt_settings, "chat_max_memory_summary_chars", MAX_MEMORY_SUMMARY_CHARS)
+        output = _build_output_spec(
+            rt_settings.agent_output_mode,
+            rt_settings.agent_native_strict,
+            ChatSummaryOutput,
+            name="submit_chat_summary",
+            description="提交合并压缩后的早期对话记忆摘要。",
+        )
+        summarizer: Agent[None, ChatSummaryOutput] = Agent(
+            rt_model,
+            output_type=output,
+            instructions=build_summary_system_prompt(max_summary_chars),
+            retries={"output": rt_settings.agent_output_retries},
+            model_settings=rt_model_settings,
+        )
+
+        @summarizer.output_validator
+        async def _validate_summary(out: ChatSummaryOutput) -> ChatSummaryOutput:
+            summary_text = (out.summary or "").strip()
+            if not summary_text:
+                raise ModelRetry("早期对话记忆摘要 summary 不能为空。")
+            if len(summary_text) > max_summary_chars:
+                summary_text = summary_text[: max_summary_chars - 1].rstrip() + "…"
+            return out.model_copy(update={"summary": summary_text})
+
+        timeout_s = cfg_float(rt_settings, "chat_summary_timeout_s", CHAT_SUMMARY_TIMEOUT_S)
+        return summarizer, timeout_s
+
+    def _get_or_build_summarizer(self) -> tuple[Agent[None, ChatSummaryOutput], float]:
+        """复用与当前运行期模型及配置快照完全一致的滚动摘要 Agent，避免重复构造 Schema。"""
+        seq, rt_settings, rt_model, rt_model_settings = self._snapshot_runtime()
+        cache_key = (
+            seq,
+            rt_settings.agent_output_mode,
+            rt_settings.agent_native_strict,
+            rt_settings.agent_output_retries,
+            rt_settings.agent_run_timeout_s,
+            cfg_float(rt_settings, "chat_summary_timeout_s", CHAT_SUMMARY_TIMEOUT_S),
+            cfg_int(rt_settings, "chat_max_memory_summary_chars", MAX_MEMORY_SUMMARY_CHARS),
+        )
+        cached = self._cached_summarizer
+        if (
+            cached is not None
+            and cached[0] == cache_key
+            and cached[1] is rt_model
+            and cached[2] == rt_model_settings
+        ):
+            return cached[3], cached[4]
+        summarizer, timeout_s = self._build_summarizer_agent(rt_settings, rt_model, rt_model_settings)
+        self._cached_summarizer = (cache_key, rt_model, rt_model_settings, summarizer, timeout_s)
+        return summarizer, timeout_s
+
+    async def summarize_history(
+        self,
+        existing_summary: str,
+        messages_to_compact: list[dict[str, Any]],
+    ) -> str:
+        """将已有早期对话记忆摘要与本批新增待归档对话切片合并提炼为新摘要。"""
+        _, rt_settings, _, _ = self._snapshot_runtime()
+        max_msg_chars = cfg_int(rt_settings, "chat_max_summary_msg_chars", MAX_SUMMARY_MSG_CHARS)
+        req_limit = cfg_int(rt_settings, "chat_summary_request_limit", CHAT_SUMMARY_REQUEST_LIMIT)
+        tool_limit = cfg_int(rt_settings, "chat_summary_tool_calls_limit", CHAT_SUMMARY_TOOL_CALLS_LIMIT)
+        clean_existing = (existing_summary or "").strip() or "（暂无早期记忆摘要）"
+        slice_text = format_messages_for_summary(messages_to_compact, max_msg_chars=max_msg_chars)
+        prompt = (
+            f"## 已有早期对话记忆摘要\n{clean_existing}\n\n"
+            f"## 本批新增待归档对话记录\n{slice_text}"
+        )
+        summarizer, timeout_s = self._get_or_build_summarizer()
+        async with asyncio.timeout(timeout_s):
+            result = await summarizer.run(
+                prompt,
+                usage_limits=UsageLimits(request_limit=req_limit, tool_calls_limit=tool_limit),
+            )
+        return result.output.summary
+
     async def run(
         self,
         deps: ChatDeps,
@@ -589,14 +809,25 @@ class ChatAgent:
         text: str,
         *,
         auto: bool = False,
+        memory_summary: str = "",
     ) -> ChatAction:
         """执行单轮聊天路由推理并返回通过校验的 ChatAction。"""
+        _, rt_settings, _, _ = self._snapshot_runtime()
+        max_hist = cfg_int(rt_settings, "chat_max_history_messages", MAX_HISTORY_MESSAGES)
+        req_limit = cfg_int(rt_settings, "chat_request_limit", CHAT_REQUEST_LIMIT)
+        tool_limit = cfg_int(rt_settings, "chat_tool_calls_limit", CHAT_TOOL_CALLS_LIMIT)
         agent, timeout_s = self._get_or_build_agent()
-        prompt = build_chat_user_prompt(history_messages, text, auto=auto)
+        prompt = build_chat_user_prompt(
+            history_messages,
+            text,
+            auto=auto,
+            memory_summary=memory_summary,
+            max_history_messages=max_hist,
+        )
         async with asyncio.timeout(timeout_s):
             result = await agent.run(
                 prompt,
                 deps=deps,
-                usage_limits=UsageLimits(request_limit=8, tool_calls_limit=16),
+                usage_limits=UsageLimits(request_limit=req_limit, tool_calls_limit=tool_limit),
             )
         return result.output

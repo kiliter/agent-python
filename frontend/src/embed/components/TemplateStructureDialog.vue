@@ -1,17 +1,19 @@
 <!--
   #Created By AiCoding(codex)
-  模板结构与样例大尺寸预览弹窗（挂载于 .embed-stage 内部）：
-  - 默认宽敞大尺寸（width: min(1040px, calc(var(--stage-w, 1280px) - 80px))，height: calc(var(--stage-h, 720px) * 0.85)）；
-  - 顶栏右侧提供「⤢ 页内全屏 / ⤡ 退出全屏」切换按钮；
-  - 调用 fetchTemplatePreview(sessionId, templateId)（带内存缓存、AbortController 与错误重试）；
-  - 三栏切换：填充效果样例（Markdown 渲染） | 模板原稿 (Jinja2)（纯 Vue Token 语法高亮，零 v-html） | 所需入参与核查字段（PC 双栏清晰表格）；
-  - 底栏提供「使用此模板开始核查」主按钮。
+  模板结构与样例 IDE 检查器弹窗（挂载于 .embed-stage 内部）：
+  - 单行 40px 合并顶栏（编号、标题、修订/状态、说明悬浮图标 + 三栏模式分段器 + 复制/页内全屏/关闭图标按钮）；
+  - Tab 1：填充效果样例（紧致 28px 页头 + 紧凑 Markdown 正文排版）；
+  - Tab 2：模板原稿 Jinja2（纯 Vue Token 语法高亮，零 v-html）；
+  - Tab 3：所需入参与核查字段（上下两段全宽独立滚动粘性表头表格，字段名不换行，规则默认单行省略悬浮看全文 + 点击行内展开）；
+  - 38px 紧凑底栏汇总 + 「选用此模板」主按钮。
 -->
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import {
   AlertCircle,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Clock,
   Code2,
   Copy,
@@ -19,14 +21,17 @@ import {
   Info,
   ListChecks,
   Loader2,
+  Maximize2,
+  Minimize2,
   Play,
   RefreshCw,
   X,
 } from 'lucide-vue-next'
-import type { ChatTarget, TemplatePreview, TemplatePreviewInput } from '../types'
+import type { ChatTarget, TemplatePreview, TemplatePreviewField, TemplatePreviewInput } from '../types'
 import { chatErrorText, fetchTemplatePreview, isAbortError } from '../chatApi'
 import { copyText, renderSafeMarkdown } from '../markdown'
 import { stageToast } from '../stageToast'
+import { useStageFloatTip } from '../useStageFloatTip'
 
 const props = defineProps<{
   visible: boolean
@@ -44,12 +49,16 @@ const emit = defineEmits<{
   (e: 'useTemplate', templateId: number): void
 }>()
 
+const cardRef = ref<HTMLElement | null>(null)
+const { tip, showTip, hideTip } = useStageFloatTip(cardRef)
+
 type SubTab = 'sample' | 'source' | 'schema'
 const subTab = ref<SubTab>('sample')
 const isFullscreen = ref(false)
 const loading = ref(false)
 const errorText = ref('')
 const preview = ref<TemplatePreview | null>(null)
+const expandedFields = ref<Set<string>>(new Set())
 
 /** 会话级模板预览内存缓存（key = `${sessionId}:${inputsVersion}:${templateId}`，draft 模式不走旧缓存） */
 const previewCache = new Map<string, TemplatePreview>()
@@ -112,6 +121,8 @@ watch(
   ([vis, sid, ver, tgt, tid], prev) => {
     if (!vis) {
       isFullscreen.value = false
+      expandedFields.value = new Set()
+      hideTip()
       abortPending()
       return
     }
@@ -123,6 +134,8 @@ watch(
     }
     if (!prev || prev[1] !== sid || prev[4] !== tid) {
       subTab.value = 'sample'
+      expandedFields.value = new Set()
+      hideTip()
     }
     const justOpened = !prev || !prev[0]
     const keyChanged = !prev || prev[1] !== sid || prev[2] !== ver || prev[3] !== tgt || prev[4] !== tid
@@ -140,6 +153,10 @@ watch(
   },
   { immediate: true },
 )
+
+watch(subTab, () => {
+  hideTip()
+})
 
 onBeforeUnmount(() => {
   abortPending()
@@ -194,6 +211,85 @@ function effectiveInputVal(inp: TemplatePreviewInput): string {
   return (inp.currentValue || '').trim()
 }
 
+const requiredInputCount = computed(() => (preview.value?.inputs || []).filter(i => i.required).length)
+const readyRequiredCount = computed(
+  () => (preview.value?.inputs || []).filter(i => i.required && !!effectiveInputVal(i)).length,
+)
+const readyInputCount = computed(
+  () => (preview.value?.inputs || []).filter(i => !!effectiveInputVal(i)).length,
+)
+
+const isSchemaMode = computed(
+  () => subTab.value === 'schema' && !!preview.value && !(loading.value && !preview.value) && !(errorText.value && !preview.value),
+)
+
+const allExpanded = computed(() => {
+  const fields = preview.value?.fields || []
+  return fields.length > 0 && fields.every(f => expandedFields.value.has(f.name))
+})
+
+function isFieldExpanded(name: string): boolean {
+  return expandedFields.value.has(name)
+}
+
+function toggleFieldExpand(name: string) {
+  const next = new Set(expandedFields.value)
+  if (next.has(name)) next.delete(name)
+  else next.add(name)
+  expandedFields.value = next
+}
+
+function toggleExpandAllFields() {
+  const fields = preview.value?.fields || []
+  if (!fields.length) return
+  if (allExpanded.value) {
+    expandedFields.value = new Set()
+  } else {
+    expandedFields.value = new Set(fields.map(f => f.name))
+  }
+}
+
+function formatInputFormatSummary(inp: TemplatePreviewInput): string {
+  if (inp.sample && inp.pattern) return `示例: ${inp.sample} · 正则约束`
+  if (inp.sample) return `示例: ${inp.sample}`
+  if (inp.pattern) return `正则: ${inp.pattern}`
+  return '—'
+}
+
+function formatInputFormatTip(inp: TemplatePreviewInput): string {
+  const parts: string[] = []
+  if (inp.sample) parts.push(`示例值：${inp.sample}`)
+  if (inp.pattern) parts.push(`校验正则：${inp.pattern}`)
+  return parts.join('\n')
+}
+
+function formatInputDescTip(inp: TemplatePreviewInput): string {
+  const parts: string[] = []
+  if (inp.description) parts.push(inp.description)
+  if (inp.pattern) parts.push(`正则：${inp.pattern}`)
+  if (inp.sample) parts.push(`示例：${inp.sample}`)
+  return parts.join('\n')
+}
+
+function formatFieldDomainTip(f: TemplatePreviewField): string {
+  if (f.values.length) return `允许枚举（${f.values.length}）：\n${f.values.join('、')}`
+  if (f.columns.length) {
+    const cols = f.columns.map(c => `${c.name}（${FIELD_TYPE_LABEL[c.type] || c.type}）`)
+    return `列表子列（${f.columns.length}）：\n${cols.join('、')}`
+  }
+  return ''
+}
+
+function formatFieldRuleTip(f: TemplatePreviewField): string {
+  const parts: string[] = []
+  if (f.values.length) parts.push(`枚举：${f.values.join(' / ')}`)
+  if (f.columns.length) {
+    parts.push(`子列：${f.columns.map(c => `${c.name}(${FIELD_TYPE_LABEL[c.type] || c.type})`).join('、')}`)
+  }
+  if (f.description) parts.push(f.description)
+  return parts.join('\n\n')
+}
+
 const useDisabled = computed(
   () => loading.value || !preview.value || preview.value.offline || props.busy || props.actionPending,
 )
@@ -230,93 +326,116 @@ function onUse() {
     aria-label="模板结构与样例预览"
     @click.self="emit('close')"
   >
-    <div class="stage-modal-card tpl-structure-card" :class="{ 'is-fullscreen': isFullscreen }">
-      <!-- 1. 弹窗顶栏 -->
+    <div
+      ref="cardRef"
+      class="stage-modal-card tpl-structure-card"
+      :class="{ 'is-fullscreen': isFullscreen }"
+    >
+      <!-- 1. 单行 40px 合并 IDE 顶栏 -->
       <header class="ts-header">
-        <div class="ts-title-group">
-          <div class="ts-title-row">
-            <span class="tpl-id-pill mono">#{{ preview?.templateId ?? templateId }}</span>
-            <h3 class="ts-title">{{ preview?.templateName || `模板 #${templateId}` }}</h3>
-            <span v-if="preview?.rev" class="rev-pill mono">{{ preview.rev }}</span>
-            <span v-if="preview && !preview.offline" class="online-pill">在线可用</span>
-            <span v-else-if="preview?.offline" class="offline-pill">已下线</span>
-          </div>
-          <p v-if="preview?.description" class="ts-desc">{{ preview.description }}</p>
+        <div class="ts-title-wrap">
+          <span class="tpl-id-pill mono">#{{ preview?.templateId ?? templateId }}</span>
+          <h3 class="ts-title" :title="preview?.templateName || `模板 #${templateId}`">
+            {{ preview?.templateName || `模板 #${templateId}` }}
+          </h3>
+          <span v-if="preview?.rev" class="rev-pill mono">{{ preview.rev }}</span>
+          <span v-if="preview && !preview.offline" class="online-pill">在线</span>
+          <span v-else-if="preview?.offline" class="offline-pill">已下线</span>
+          <button
+            v-if="preview?.description"
+            type="button"
+            class="desc-info-btn"
+            aria-label="查看模板说明"
+            @mouseenter="showTip($event, preview.description, '模板说明')"
+            @mouseleave="hideTip"
+          >
+            <Info :size="13" />
+          </button>
         </div>
 
         <div class="ts-head-actions">
+          <div class="mode-seg" role="tablist" aria-label="模板视图切换">
+            <button
+              type="button"
+              role="tab"
+              class="mode-btn"
+              :class="{ active: subTab === 'sample' }"
+              :aria-selected="subTab === 'sample'"
+              @click="subTab = 'sample'"
+            >
+              <FileText :size="12" />
+              <span>填充样例</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              class="mode-btn"
+              :class="{ active: subTab === 'source' }"
+              :aria-selected="subTab === 'source'"
+              @click="subTab = 'source'"
+            >
+              <Code2 :size="12" />
+              <span>Jinja2 原稿</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              class="mode-btn"
+              :class="{ active: subTab === 'schema' }"
+              :aria-selected="subTab === 'schema'"
+              @click="subTab = 'schema'"
+            >
+              <ListChecks :size="12" />
+              <span>入参与字段</span>
+              <span v-if="preview" class="tab-cnt mono">{{ preview.inputs.length }}/{{ preview.fields.length }}</span>
+            </button>
+          </div>
+
           <button
+            v-if="subTab === 'source' && preview?.bodyText"
             type="button"
-            class="btn-fullscreen-toggle"
-            :class="{ active: isFullscreen }"
-            :title="isFullscreen ? '退出页内全屏' : '在聊天窗口内全屏展开'"
-            @click="isFullscreen = !isFullscreen"
+            class="eb-icon-btn is-bordered"
+            aria-label="复制 Jinja2 原稿"
+            @click="onCopySource"
+            @mouseenter="showTip($event, '复制 Jinja2 原稿')"
+            @mouseleave="hideTip"
           >
-            <span>{{ isFullscreen ? '⤡ 退出全屏' : '⤢ 页内全屏' }}</span>
+            <Copy :size="13" />
           </button>
 
-          <button type="button" class="btn-close-circle" title="关闭 (ESC)" aria-label="关闭弹窗" @click="emit('close')">
-            <X :size="17" />
+          <button
+            type="button"
+            class="eb-icon-btn is-bordered"
+            :class="{ 'is-accent': isFullscreen }"
+            :aria-label="isFullscreen ? '退出全屏' : '页内全屏'"
+            @click="isFullscreen = !isFullscreen"
+            @mouseenter="showTip($event, isFullscreen ? '退出全屏' : '页内全屏')"
+            @mouseleave="hideTip"
+          >
+            <Minimize2 v-if="isFullscreen" :size="13" />
+            <Maximize2 v-else :size="13" />
+          </button>
+
+          <button type="button" class="eb-icon-btn" title="关闭 (ESC)" aria-label="关闭弹窗" @click="emit('close')">
+            <X :size="15" />
           </button>
         </div>
       </header>
 
-      <!-- 2. 三栏导航 -->
-      <div class="ts-tabs-bar">
-        <div class="ts-tabs" role="tablist">
-          <button
-            type="button"
-            role="tab"
-            class="ts-tab"
-            :class="{ active: subTab === 'sample' }"
-            :aria-selected="subTab === 'sample'"
-            @click="subTab = 'sample'"
-          >
-            <FileText :size="13" />
-            <span>填充效果样例</span>
-          </button>
-          <button
-            type="button"
-            role="tab"
-            class="ts-tab"
-            :class="{ active: subTab === 'source' }"
-            :aria-selected="subTab === 'source'"
-            @click="subTab = 'source'"
-          >
-            <Code2 :size="13" />
-            <span>模板原稿 (Jinja2)</span>
-          </button>
-          <button
-            type="button"
-            role="tab"
-            class="ts-tab"
-            :class="{ active: subTab === 'schema' }"
-            :aria-selected="subTab === 'schema'"
-            @click="subTab = 'schema'"
-          >
-            <ListChecks :size="13" />
-            <span>
-              所需入参与核查字段
-              <template v-if="preview">（{{ preview.inputs.length }} 入参 · {{ preview.fields.length }} 字段）</template>
-            </span>
-          </button>
-        </div>
-      </div>
-
-      <!-- 3. 主体内容 -->
-      <div class="ts-body">
+      <!-- 2. 主体内容 -->
+      <div class="ts-body" :class="{ 'is-schema-mode': isSchemaMode }" @scroll.passive="hideTip">
         <!-- 加载态 -->
         <div v-if="loading && !preview" class="ts-state">
-          <Loader2 :size="22" class="spin accent-ic" />
+          <Loader2 :size="20" class="spin accent-ic" />
           <span>正在加载模板结构与填充样例…</span>
         </div>
 
         <!-- 错误重试态 -->
         <div v-else-if="errorText && !preview" class="ts-state is-err">
-          <AlertCircle :size="24" />
+          <AlertCircle :size="22" />
           <span>{{ errorText }}</span>
           <button type="button" class="btn-retry" @click="loadPreview(true)">
-            <RefreshCw :size="13" />
+            <RefreshCw :size="12" />
             <span>重新加载</span>
           </button>
         </div>
@@ -324,13 +443,24 @@ function onUse() {
         <template v-else-if="preview">
           <!-- Tab 1：填充效果样例 -->
           <div v-if="subTab === 'sample'" class="sample-pane">
-            <div class="sample-tip">
-              <Info :size="14" class="tip-ic" />
-              <span>以下为代入枚举首项或字段占位符后的排版预览，实际运行后将由网关接口与单据实查证据填充。</span>
-            </div>
             <article class="sample-sheet">
-              <div v-if="preview.sampleMarkdown.trim()" class="md-body" v-html="sampleHtml"></div>
-              <div v-else class="empty-note">该模板暂无样例正文内容</div>
+              <div class="sample-sheet-head">
+                <span class="sheet-head-title">填充效果预览</span>
+                <span
+                  class="sample-hint-pill"
+                  @mouseenter="
+                    showTip($event, '代入枚举首项或字段占位符后的排版预览，实际运行后将由网关接口与单据实查证据填充。')
+                  "
+                  @mouseleave="hideTip"
+                >
+                  <Info :size="11" />
+                  <span>示例占位</span>
+                </span>
+              </div>
+              <div class="sample-sheet-body">
+                <div v-if="preview.sampleMarkdown.trim()" class="md-body" v-html="sampleHtml"></div>
+                <div v-else class="empty-note">该模板暂无样例正文内容</div>
+              </div>
             </article>
           </div>
 
@@ -356,26 +486,38 @@ function onUse() {
             </div>
           </div>
 
-          <!-- Tab 3：所需入参与核查字段（PC 双栏清晰表格） -->
-          <div v-else class="schema-grid">
-            <!-- 左栏：所需入参表格 -->
-            <section class="schema-card">
-              <div class="schema-card-head">
-                <span>所需结构化入参</span>
-                <span class="count-pill mono">{{ preview.inputs.length }} 项</span>
+          <!-- Tab 3：所需入参与核查字段（上下两段全宽 IDE 检查器，各自独立粘性表头与滚动） -->
+          <div v-else class="schema-stack">
+            <!-- 上段：所需结构化入参 -->
+            <section class="schema-section schema-inputs-sec">
+              <div class="schema-sec-head">
+                <div class="sec-title-left">
+                  <span>所需结构化入参</span>
+                  <span class="count-pill mono">{{ preview.inputs.length }} 项</span>
+                </div>
+                <span class="sec-meta mono">
+                  已传 {{ readyRequiredCount }} / 必填 {{ requiredInputCount }}
+                </span>
               </div>
 
-              <div v-if="!preview.inputs.length" class="empty-note">
+              <div v-if="!preview.inputs.length" class="empty-note compact">
                 无需额外结构化入参，直接依据单据原文与接口核查
               </div>
 
-              <div v-else class="table-wrap">
-                <table class="clean-table">
+              <div v-else class="sec-scroll inputs-scroll" @scroll.passive="hideTip">
+                <table class="ide-table">
+                  <colgroup>
+                    <col style="width: 140px" />
+                    <col style="width: 190px" />
+                    <col style="width: 220px" />
+                    <col />
+                  </colgroup>
                   <thead>
                     <tr>
                       <th>参数名</th>
-                      <th>约束与格式说明</th>
                       <th>当前工单传值</th>
+                      <th>格式 / 示例</th>
+                      <th>参数说明</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -384,15 +526,20 @@ function onUse() {
                         <span v-if="inp.required" class="req-star">*</span>
                         <span class="mono key-strong">{{ inp.key }}</span>
                       </td>
+
                       <td>
-                        <div>{{ inp.description || '—' }}</div>
-                        <div v-if="inp.pattern" class="sub-code mono">正则：{{ inp.pattern }}</div>
-                        <div v-if="inp.sample" class="sub-code mono">示例：{{ inp.sample }}</div>
-                      </td>
-                      <td class="nowrap">
-                        <span v-if="effectiveInputVal(inp)" class="val-chip ok mono">
+                        <span
+                          v-if="effectiveInputVal(inp)"
+                          class="val-chip ok mono"
+                          @mouseenter="
+                            effectiveInputVal(inp).length > 18
+                              ? showTip($event, effectiveInputVal(inp), `${inp.key} 当前传值`)
+                              : hideTip()
+                          "
+                          @mouseleave="hideTip"
+                        >
                           <CheckCircle2 :size="11" />
-                          <span>{{ effectiveInputVal(inp) }}</span>
+                          <span class="val-chip-txt">{{ effectiveInputVal(inp) }}</span>
                         </span>
                         <span v-else-if="inp.required" class="val-chip warn">
                           <Clock :size="11" />
@@ -400,47 +547,153 @@ function onUse() {
                         </span>
                         <span v-else class="val-chip muted">选填未传</span>
                       </td>
+
+                      <td>
+                        <span
+                          class="cell-ellipsis mono sub-mono"
+                          @mouseenter="
+                            inp.sample || inp.pattern
+                              ? showTip($event, formatInputFormatTip(inp), `${inp.key} 格式约束`)
+                              : hideTip()
+                          "
+                          @mouseleave="hideTip"
+                        >
+                          {{ formatInputFormatSummary(inp) }}
+                        </span>
+                      </td>
+
+                      <td>
+                        <span
+                          class="cell-ellipsis muted-txt"
+                          @mouseenter="showTip($event, formatInputDescTip(inp), inp.key)"
+                          @mouseleave="hideTip"
+                        >
+                          {{ inp.description || '—' }}
+                        </span>
+                      </td>
                     </tr>
                   </tbody>
                 </table>
               </div>
             </section>
 
-            <!-- 右栏：核查字段表格 -->
-            <section class="schema-card">
-              <div class="schema-card-head">
-                <span>自动核查与证据字段</span>
-                <span class="count-pill mono">{{ preview.fields.length }} 项</span>
+            <!-- 下段：自动核查与证据字段 -->
+            <section class="schema-section schema-fields-sec">
+              <div class="schema-sec-head">
+                <div class="sec-title-left">
+                  <span>自动核查与证据字段</span>
+                  <span class="count-pill mono">{{ preview.fields.length }} 项</span>
+                </div>
+                <div class="sec-head-right">
+                  <span class="sec-hint">悬浮查看规则 · 点击行展开</span>
+                  <button
+                    v-if="preview.fields.length"
+                    type="button"
+                    class="btn-link"
+                    @click="toggleExpandAllFields"
+                  >
+                    {{ allExpanded ? '全部收起' : '全部展开' }}
+                  </button>
+                </div>
               </div>
 
-              <div v-if="!preview.fields.length" class="empty-note">未声明可见核查字段</div>
+              <div v-if="!preview.fields.length" class="empty-note compact">未声明可见核查字段</div>
 
-              <div v-else class="table-wrap">
-                <table class="clean-table">
+              <div v-else class="sec-scroll fields-scroll" @scroll.passive="hideTip">
+                <table class="ide-table fields-table">
+                  <colgroup>
+                    <col style="width: 148px" />
+                    <col style="width: 68px" />
+                    <col style="width: 220px" />
+                    <col />
+                  </colgroup>
                   <thead>
                     <tr>
                       <th>字段名</th>
                       <th>类型</th>
-                      <th>取值范围 / 核查规则说明</th>
+                      <th>枚举值 / 子列</th>
+                      <th>核查取证规则</th>
                     </tr>
                   </thead>
                   <tbody>
-                    <tr v-for="f in preview.fields" :key="f.name">
-                      <td class="key-strong">{{ f.name }}</td>
+                    <tr
+                      v-for="f in preview.fields"
+                      :key="f.name"
+                      class="field-row"
+                      :class="{ 'is-expanded': isFieldExpanded(f.name) }"
+                      @click="toggleFieldExpand(f.name)"
+                    >
                       <td class="nowrap">
-                        <span class="ftype-chip">{{ FIELD_TYPE_LABEL[f.type] || f.type }}</span>
+                        <span class="field-name-cell">
+                          <ChevronDown v-if="isFieldExpanded(f.name)" :size="12" class="row-chev" />
+                          <ChevronRight v-else :size="12" class="row-chev" />
+                          <span class="key-strong field-name-txt">{{ f.name }}</span>
+                        </span>
                       </td>
+
+                      <td class="nowrap">
+                        <span class="ftype-chip" :class="`ftype-${f.type}`">
+                          {{ FIELD_TYPE_LABEL[f.type] || f.type }}
+                        </span>
+                      </td>
+
                       <td>
-                        <div v-if="f.values.length" class="enum-wrap">
-                          <span v-for="v in f.values" :key="v" class="enum-tag">{{ v }}</span>
+                        <div
+                          class="domain-cell"
+                          :class="{ 'is-expanded': isFieldExpanded(f.name) }"
+                          @mouseenter="
+                            !isFieldExpanded(f.name) && (f.values.length || f.columns.length)
+                              ? showTip($event, formatFieldDomainTip(f), `${f.name} 取值/子列`)
+                              : hideTip()
+                          "
+                          @mouseleave="hideTip"
+                        >
+                          <template v-if="f.values.length">
+                            <span
+                              v-for="v in isFieldExpanded(f.name) ? f.values : f.values.slice(0, 3)"
+                              :key="v"
+                              class="enum-tag"
+                            >
+                              {{ v }}
+                            </span>
+                            <span v-if="!isFieldExpanded(f.name) && f.values.length > 3" class="more-tag mono">
+                              +{{ f.values.length - 3 }}
+                            </span>
+                          </template>
+                          <template v-else-if="f.columns.length">
+                            <span
+                              v-for="c in isFieldExpanded(f.name) ? f.columns : f.columns.slice(0, 2)"
+                              :key="c.name"
+                              class="col-tag"
+                            >
+                              {{ c.name }} ({{ FIELD_TYPE_LABEL[c.type] || c.type }})
+                            </span>
+                            <span v-if="!isFieldExpanded(f.name) && f.columns.length > 2" class="more-tag mono">
+                              +{{ f.columns.length - 2 }}
+                            </span>
+                          </template>
+                          <span v-else class="muted-dash">—</span>
                         </div>
-                        <div v-if="f.columns.length" class="cols-wrap">
-                          <span v-for="c in f.columns" :key="c.name" class="col-tag">
-                            {{ c.name }} ({{ FIELD_TYPE_LABEL[c.type] || c.type }})
-                          </span>
+                      </td>
+
+                      <td>
+                        <div
+                          v-if="!isFieldExpanded(f.name)"
+                          class="cell-ellipsis rule-ellipsis"
+                          @mouseenter="
+                            showTip(
+                              $event,
+                              formatFieldRuleTip(f),
+                              `${f.name}（${FIELD_TYPE_LABEL[f.type] || f.type}）`,
+                            )
+                          "
+                          @mouseleave="hideTip"
+                        >
+                          {{ f.description || '—' }}
                         </div>
-                        <div v-if="f.description" class="field-desc-txt">{{ f.description }}</div>
-                        <span v-if="!f.values.length && !f.columns.length && !f.description" class="muted-dash">—</span>
+                        <div v-else class="rule-full">
+                          {{ f.description || '—' }}
+                        </div>
                       </td>
                     </tr>
                   </tbody>
@@ -451,22 +704,31 @@ function onUse() {
         </template>
       </div>
 
-      <!-- 4. 底栏 -->
+      <!-- 3. 紧致 38px IDE 底栏 -->
       <footer class="ts-footer">
-        <button type="button" class="btn-cancel" @click="emit('close')">关闭</button>
+        <div class="ts-footer-summary">
+          <span v-if="disableReason" class="warn-summary">{{ disableReason }}</span>
+          <span v-else-if="preview" class="mono">
+            入参已传 {{ readyInputCount }}/{{ preview.inputs.length }} · 核查字段 {{ preview.fields.length }} 项
+          </span>
+        </div>
 
-        <span class="inline-wrap" :title="disableReason || undefined">
-          <button
-            type="button"
-            class="btn-use-primary"
-            :disabled="useDisabled"
-            @click="onUse"
-          >
-            <Play :size="13" />
-            <span>使用此模板开始核查</span>
-          </button>
-        </span>
+        <div class="ts-footer-actions">
+          <button type="button" class="btn-cancel" @click="emit('close')">关闭</button>
+          <span class="inline-wrap" :title="disableReason || undefined">
+            <button type="button" class="btn-use-primary" :disabled="useDisabled" @click="onUse">
+              <Play :size="12" />
+              <span>选用此模板</span>
+            </button>
+          </span>
+        </div>
       </footer>
+
+      <!-- 舞台弹窗内零依赖悬浮提示 -->
+      <div v-if="tip.visible" class="eb-float-tip" :style="tip.style">
+        <div v-if="tip.title" class="eb-float-tip-title">{{ tip.title }}</div>
+        <div>{{ tip.text }}</div>
+      </div>
     </div>
   </div>
 </template>
@@ -496,182 +758,188 @@ function onUse() {
 }
 
 .tpl-structure-card {
-  width: min(1040px, calc(var(--stage-w, 1280px) - 80px));
-  height: calc(var(--stage-h, 720px) * 0.85);
+  width: min(1060px, calc(var(--stage-w, 1280px) - 64px));
+  height: calc(var(--stage-h, 720px) * 0.88);
 }
 
+/* ==================== 单行 40px 合并 IDE 顶栏 ==================== */
 .ts-header {
   flex-shrink: 0;
-  padding: 14px 20px;
+  height: 40px;
+  padding: 0 10px 0 14px;
   border-bottom: 1px solid var(--gpt-border);
-  background: #ffffff;
+  background: var(--gpt-bg-subtle);
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 14px;
+  gap: 10px;
+  flex-wrap: nowrap;
 }
 
-.ts-title-group {
+.ts-title-wrap {
   min-width: 0;
   flex: 1;
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.ts-title-row {
-  display: flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+  gap: 6px;
+  overflow: hidden;
 }
+
 .tpl-id-pill {
-  padding: 2px 8px;
-  border-radius: 6px;
+  padding: 1px 6px;
+  border-radius: 5px;
   background: var(--gpt-accent-soft);
   border: 1px solid var(--gpt-accent-border);
   color: var(--gpt-accent);
-  font-size: 12px;
-  font-weight: 600;
-}
-.ts-title {
-  margin: 0;
-  font-size: 15.5px;
-  font-weight: 650;
-  color: var(--gpt-ink);
-}
-.rev-pill {
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: var(--gpt-bg-muted);
-  color: var(--gpt-ink-secondary);
-  font-size: 11.5px;
-}
-.online-pill {
-  padding: 1.5px 8px;
-  border-radius: 999px;
-  background: var(--gpt-emerald-bg);
-  border: 1px solid var(--gpt-emerald-border);
-  color: var(--gpt-emerald);
   font-size: 11.5px;
   font-weight: 600;
-}
-.offline-pill {
-  padding: 1.5px 8px;
-  border-radius: 999px;
-  background: var(--gpt-bg-muted);
-  border: 1px solid var(--gpt-border);
-  color: var(--gpt-ink-muted);
-  font-size: 11.5px;
-}
-.ts-desc {
-  margin: 0;
-  font-size: 12.5px;
-  color: var(--gpt-ink-secondary);
-}
-
-.ts-head-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
   flex-shrink: 0;
 }
 
-.btn-fullscreen-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 32px;
-  padding: 0 13px;
-  border-radius: 9px;
-  border: 1px solid var(--gpt-border);
-  background: var(--gpt-bg-subtle);
+.ts-title {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 650;
   color: var(--gpt-ink);
-  font: inherit;
-  font-size: 12.5px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-.btn-fullscreen-toggle:hover,
-.btn-fullscreen-toggle.active {
-  border-color: var(--gpt-accent-border);
-  background: var(--gpt-accent-soft);
-  color: var(--gpt-accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.btn-close-circle {
-  width: 32px;
-  height: 32px;
-  border-radius: 999px;
+.rev-pill {
+  padding: 0 6px;
+  height: 18px;
+  line-height: 18px;
+  border-radius: 5px;
+  background: var(--gpt-bg-muted);
+  color: var(--gpt-ink-secondary);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.online-pill {
+  padding: 0 6px;
+  height: 18px;
+  line-height: 18px;
+  border-radius: 5px;
+  background: var(--gpt-emerald-bg);
+  border: 1px solid var(--gpt-emerald-border);
+  color: var(--gpt-emerald);
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.offline-pill {
+  padding: 0 6px;
+  height: 18px;
+  line-height: 18px;
+  border-radius: 5px;
+  background: var(--gpt-bg-muted);
+  border: 1px solid var(--gpt-border);
+  color: var(--gpt-ink-muted);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.desc-info-btn {
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
   border: none;
+  border-radius: 5px;
   background: transparent;
   color: var(--gpt-ink-muted);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
+  flex-shrink: 0;
 }
-.btn-close-circle:hover {
+.desc-info-btn:hover {
   background: var(--gpt-bg-muted);
-  color: var(--gpt-ink);
+  color: var(--gpt-accent);
 }
 
-.ts-tabs-bar {
+.ts-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   flex-shrink: 0;
-  padding: 9px 20px;
-  background: var(--gpt-bg-subtle);
-  border-bottom: 1px solid var(--gpt-border);
 }
-.ts-tabs {
+
+.mode-seg {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  padding: 3px;
-  border-radius: 10px;
-  background: #e4e4e7;
-  flex-wrap: wrap;
-}
-.ts-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 28px;
-  padding: 0 13px;
-  border: none;
+  gap: 2px;
+  height: 26px;
+  padding: 2px;
   border-radius: 7px;
+  background: #e4e4e7;
+}
+.mode-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 5px;
   background: transparent;
   color: var(--gpt-ink-secondary);
   font: inherit;
-  font-size: 12.5px;
+  font-size: 11.5px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.15s;
+  white-space: nowrap;
+  transition: background-color 0.14s, color 0.14s;
 }
-.ts-tab.active {
+.mode-btn.active {
   background: #ffffff;
   color: var(--gpt-ink);
   font-weight: 600;
   box-shadow: var(--gpt-shadow-xs);
 }
+.tab-cnt {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgba(24, 24, 27, 0.06);
+  font-size: 10.5px;
+  color: var(--gpt-ink-muted);
+}
 
+/* ==================== 主体内容容器 ==================== */
 .ts-body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 18px 20px;
+  padding: 12px 16px;
   background: #f8fafc;
+}
+.ts-body.is-schema-mode {
+  overflow: hidden;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+}
+
+@media (max-width: 680px) {
+  .ts-body.is-schema-mode {
+    overflow-y: auto;
+  }
 }
 
 .ts-state {
   height: 100%;
-  min-height: 240px;
+  min-height: 220px;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 10px;
   color: var(--gpt-ink-secondary);
-  font-size: 13.5px;
+  font-size: 13px;
 }
 .ts-state.is-err {
   color: var(--gpt-coral);
@@ -683,80 +951,94 @@ function onUse() {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  height: 32px;
-  padding: 0 14px;
-  border-radius: 999px;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 6px;
   border: 1px solid var(--gpt-border-strong);
   background: #ffffff;
   color: var(--gpt-ink);
   font: inherit;
-  font-size: 12.5px;
+  font-size: 12px;
   cursor: pointer;
 }
 
-/* Tab 1 */
+/* ==================== Tab 1：填充效果样例 ==================== */
 .sample-pane {
-  max-width: 840px;
+  max-width: 900px;
   margin: 0 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.sample-tip {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 9px 13px;
-  border-radius: 10px;
-  background: var(--gpt-accent-soft);
-  border: 1px solid var(--gpt-accent-border);
-  color: #1e40af;
-  font-size: 12.5px;
-}
-.tip-ic {
-  flex-shrink: 0;
 }
 .sample-sheet {
-  padding: 26px 34px;
-  border-radius: 14px;
+  border-radius: 10px;
   background: #ffffff;
   border: 1px solid var(--gpt-border);
   box-shadow: var(--gpt-shadow-xs);
-}
-
-/* Tab 2 */
-.source-pane {
-  max-width: 920px;
-  margin: 0 auto;
-}
-.source-card {
-  border-radius: 14px;
-  border: 1px solid var(--gpt-border);
-  background: #ffffff;
   overflow: hidden;
 }
-.source-head {
-  padding: 9px 14px;
+.sample-sheet-head {
+  height: 28px;
+  padding: 0 12px;
   background: var(--gpt-bg-subtle);
   border-bottom: 1px solid var(--gpt-border);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 12px;
+  font-size: 11.5px;
+}
+.sheet-head-title {
+  font-weight: 600;
+  color: var(--gpt-ink-secondary);
+}
+.sample-hint-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: var(--gpt-accent-soft);
+  border: 1px solid var(--gpt-accent-border);
+  color: var(--gpt-accent);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: default;
+}
+.sample-sheet-body {
+  padding: 14px 18px;
+}
+
+/* ==================== Tab 2：Jinja2 原稿 ==================== */
+.source-pane {
+  max-width: 960px;
+  margin: 0 auto;
+}
+.source-card {
+  border-radius: 10px;
+  border: 1px solid var(--gpt-border);
+  background: #ffffff;
+  overflow: hidden;
+}
+.source-head {
+  height: 28px;
+  padding: 0 12px;
+  background: var(--gpt-bg-subtle);
+  border-bottom: 1px solid var(--gpt-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11.5px;
   color: var(--gpt-ink-muted);
 }
 .btn-copy-src {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  height: 26px;
-  padding: 0 10px;
-  border-radius: 7px;
+  height: 21px;
+  padding: 0 8px;
+  border-radius: 5px;
   border: 1px solid var(--gpt-border);
   background: #ffffff;
   color: var(--gpt-ink-secondary);
   font: inherit;
-  font-size: 12px;
+  font-size: 11px;
   cursor: pointer;
 }
 .btn-copy-src:hover {
@@ -764,27 +1046,27 @@ function onUse() {
   color: var(--gpt-ink);
 }
 .source-code {
-  padding: 12px 0;
-  font-size: 12.5px;
-  line-height: 1.7;
+  padding: 8px 0;
+  font-size: 12px;
+  line-height: 1.58;
   background: #ffffff;
   overflow-x: auto;
 }
 .src-line {
   display: flex;
-  padding-right: 16px;
+  padding-right: 14px;
 }
 .src-line:hover {
   background: var(--gpt-bg-subtle);
 }
 .src-no {
-  width: 44px;
-  padding-right: 12px;
+  width: 40px;
+  padding-right: 10px;
   text-align: right;
   color: var(--gpt-ink-subtle);
   user-select: none;
   flex-shrink: 0;
-  font-size: 11.5px;
+  font-size: 11px;
 }
 .src-tokens {
   flex: 1;
@@ -812,69 +1094,127 @@ function onUse() {
   font-style: italic;
 }
 
-/* Tab 3：双栏清晰表格 */
-.schema-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
-  gap: 14px;
-  align-items: start;
-}
-@media (max-width: 820px) {
-  .schema-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
+/* ==================== Tab 3：上下全宽独立滚动 IDE 检查器 ==================== */
+.schema-stack {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
-.schema-card {
-  border-radius: 14px;
+.schema-section {
+  border-radius: 9px;
   border: 1px solid var(--gpt-border);
   background: #ffffff;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
-.schema-card-head {
-  padding: 11px 15px;
+.schema-inputs-sec {
+  flex-shrink: 0;
+}
+.schema-fields-sec {
+  flex: 1;
+  min-height: 180px;
+}
+
+.schema-sec-head {
+  flex-shrink: 0;
+  height: 28px;
+  padding: 0 12px;
   background: var(--gpt-bg-subtle);
   border-bottom: 1px solid var(--gpt-border);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 13.5px;
+  gap: 10px;
+}
+.sec-title-left {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
   font-weight: 650;
   color: var(--gpt-ink);
 }
 .count-pill {
-  padding: 1px 8px;
-  border-radius: 999px;
+  padding: 0 6px;
+  height: 17px;
+  line-height: 17px;
+  border-radius: 5px;
   background: var(--gpt-bg-muted);
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 600;
   color: var(--gpt-ink-secondary);
 }
-
-.table-wrap {
-  overflow-x: auto;
+.sec-meta {
+  font-size: 11px;
+  color: var(--gpt-ink-muted);
 }
-.clean-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12.5px;
+.sec-head-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
-.clean-table th,
-.clean-table td {
-  padding: 9px 13px;
-  border-bottom: 1px solid var(--gpt-border);
-  text-align: left;
-  vertical-align: top;
+.sec-hint {
+  font-size: 11px;
+  color: var(--gpt-ink-subtle);
 }
-.clean-table tr:last-child td {
-  border-bottom: none;
-}
-.clean-table th {
+.btn-link {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--gpt-accent);
+  font: inherit;
   font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.btn-link:hover {
+  text-decoration: underline;
+}
+
+.sec-scroll {
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.inputs-scroll {
+  max-height: 176px;
+}
+.fields-scroll {
+  flex: 1;
+  min-height: 0;
+}
+
+.ide-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.ide-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: 26px;
+  padding: 0 10px;
+  background: #f8fafc;
+  font-size: 11px;
   font-weight: 600;
   color: var(--gpt-ink-muted);
-  background: #fcfcfd;
+  text-align: left;
   white-space: nowrap;
+  box-shadow: inset 0 -1px 0 var(--gpt-border);
+}
+.ide-table tbody td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--gpt-border);
+  vertical-align: middle;
+  min-width: 0;
+}
+.ide-table tbody tr:last-child td {
+  border-bottom: none;
 }
 
 .req-star {
@@ -886,20 +1226,21 @@ function onUse() {
   font-weight: 600;
   color: var(--gpt-ink);
 }
-.sub-code {
-  margin-top: 3px;
-  font-size: 11px;
-  color: var(--gpt-ink-muted);
-}
 
 .val-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 1.5px 7px;
-  border-radius: 999px;
-  font-size: 11.5px;
+  max-width: 100%;
+  padding: 1px 7px;
+  border-radius: 5px;
+  font-size: 11px;
   font-weight: 500;
+}
+.val-chip-txt {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .val-chip.ok {
   background: var(--gpt-emerald-bg);
@@ -916,69 +1257,179 @@ function onUse() {
   color: var(--gpt-ink-muted);
 }
 
+.cell-ellipsis {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sub-mono {
+  font-size: 11px;
+  color: var(--gpt-ink-secondary);
+}
+.muted-txt {
+  color: var(--gpt-ink-secondary);
+}
+
+.field-row {
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+}
+.field-row:hover {
+  background: #f8fafc;
+}
+.field-row.is-expanded {
+  background: #fafcff;
+}
+.field-row.is-expanded td {
+  vertical-align: top;
+}
+
+.field-name-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+}
+.row-chev {
+  color: var(--gpt-ink-muted);
+  flex-shrink: 0;
+}
+.field-name-txt {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .ftype-chip {
-  padding: 1.5px 7px;
-  border-radius: 6px;
+  display: inline-block;
+  padding: 0 6px;
+  height: 18px;
+  line-height: 18px;
+  border-radius: 5px;
   background: var(--gpt-bg-muted);
   color: var(--gpt-ink-secondary);
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 600;
 }
-.enum-wrap,
-.cols-wrap {
+.ftype-chip.ftype-enum {
+  background: var(--gpt-accent-soft);
+  color: var(--gpt-accent);
+}
+.ftype-chip.ftype-list {
+  background: #f3e8ff;
+  color: #7e22ce;
+}
+.ftype-chip.ftype-date {
+  background: var(--gpt-amber-bg);
+  color: var(--gpt-amber);
+}
+
+.domain-cell {
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
   gap: 4px;
-  margin-bottom: 4px;
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+.domain-cell.is-expanded {
+  flex-wrap: wrap;
 }
 .enum-tag {
-  padding: 0 6px;
-  border-radius: 5px;
+  padding: 0 5px;
+  border-radius: 4px;
   background: var(--gpt-accent-soft);
   color: var(--gpt-accent);
   font-size: 11px;
+  white-space: nowrap;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .col-tag {
-  padding: 0 6px;
-  border-radius: 5px;
+  padding: 0 5px;
+  border-radius: 4px;
   background: var(--gpt-bg-muted);
   color: var(--gpt-ink-secondary);
   font-size: 11px;
+  white-space: nowrap;
 }
-.field-desc-txt {
+.domain-cell.is-expanded .enum-tag {
+  max-width: none;
+}
+.more-tag {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--gpt-bg-muted);
+  color: var(--gpt-ink-muted);
+  font-size: 10.5px;
+  flex-shrink: 0;
+}
+
+.rule-ellipsis {
   color: var(--gpt-ink-secondary);
-  line-height: 1.52;
+  font-size: 12px;
+}
+.rule-full {
+  color: var(--gpt-ink);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .muted-dash {
   color: var(--gpt-ink-subtle);
 }
+
 .empty-note {
-  padding: 24px 16px;
+  padding: 20px 14px;
   text-align: center;
   color: var(--gpt-ink-muted);
-  font-size: 13px;
+  font-size: 12.5px;
+}
+.empty-note.compact {
+  padding: 10px 12px;
+  font-size: 12px;
 }
 
-/* 底栏 */
+/* ==================== 紧致 38px IDE 底栏 ==================== */
 .ts-footer {
   flex-shrink: 0;
-  padding: 12px 20px;
+  height: 38px;
+  padding: 0 14px;
   border-top: 1px solid var(--gpt-border);
   background: #ffffff;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 10px;
 }
+.ts-footer-summary {
+  font-size: 11.5px;
+  color: var(--gpt-ink-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.warn-summary {
+  color: var(--gpt-amber);
+}
+.ts-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
 .btn-cancel {
-  height: 34px;
-  padding: 0 16px;
-  border-radius: 999px;
+  height: 27px;
+  padding: 0 11px;
+  border-radius: 6px;
   border: 1px solid var(--gpt-border);
   background: #ffffff;
   color: var(--gpt-ink-secondary);
   font: inherit;
-  font-size: 13px;
+  font-size: 12px;
   cursor: pointer;
 }
 .btn-cancel:hover {
@@ -988,18 +1439,18 @@ function onUse() {
 .btn-use-primary {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  height: 34px;
-  padding: 0 18px;
-  border-radius: 999px;
+  gap: 5px;
+  height: 27px;
+  padding: 0 12px;
+  border-radius: 6px;
   border: 1px solid var(--gpt-btn-dark);
   background: var(--gpt-btn-dark);
   color: #ffffff;
   font: inherit;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: background-color 0.14s;
 }
 .btn-use-primary:hover:not(:disabled) {
   background: var(--gpt-btn-dark-hover);

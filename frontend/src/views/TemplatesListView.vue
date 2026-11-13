@@ -577,18 +577,36 @@ async function handleRefresh() {
                 <StatusTag kind="resource" :value="t.status" />
               </td>
               <td @click.stop>
-                <div class="skill-chip-group">
-                  <span
-                    v-for="(s, i) in t.skills"
-                    :key="s"
-                    class="chip-tag clickable skill-chip"
-                    :title="`点击查看 Skill 规程：${s}`"
-                    @click="store.openSkillByName(s)"
-                  >
-                    {{ t.skillNames?.[i] || s }}
-                  </span>
-                  <span v-if="t.skills.length === 0" class="muted-dash">未绑定</span>
-                </div>
+                <span v-if="t.skills.length === 0" class="muted-dash">未绑定</span>
+                <el-popover v-else placement="bottom-start" :width="280" trigger="hover">
+                  <template #reference>
+                    <span class="chip-tag clickable ref-count-pill" @click.stop>
+                      {{ t.skills.length }} 个 Skill 规程 ▾
+                    </span>
+                  </template>
+                  <div class="ref-popover-panel">
+                    <div class="ref-popover-head">
+                      关联的 Skill 规程 ({{ t.skills.length }})
+                    </div>
+                    <div class="ref-popover-list">
+                      <button
+                        v-for="(s, i) in t.skills"
+                        :key="s"
+                        type="button"
+                        class="ref-popover-item"
+                        @click="store.openSkillByName(s)"
+                      >
+                        <span class="ref-popover-item-title">{{ t.skillNames?.[i] || s }}</span>
+                        <span
+                          v-if="t.skillNames?.[i] && t.skillNames[i] !== s"
+                          class="ref-popover-sub mono"
+                        >
+                          {{ s }}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+                </el-popover>
               </td>
               <td class="mono" style="white-space: nowrap">{{ t.casesCount }} 个</td>
               <td class="mono" style="white-space: nowrap">

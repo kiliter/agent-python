@@ -501,6 +501,15 @@ export interface ModelInfo {
   activeRev?: string
   gatewayUrl?: string
   gatewayConnectTimeoutS?: number
+  gatewayMaxConcurrency?: number
+  releasesKeep?: number
+  runsKeepDays?: number
+  queryDefaultLimit?: number
+  queryMaxLimit?: number
+  maxPeriodMonths?: number
+  chatMaxHistoryMessages?: number
+  chatCompactTriggerMessages?: number
+  chatCompactKeepRecent?: number
   maxTokens?: number | null
 }
 
@@ -533,6 +542,28 @@ export interface RuntimeConfig {
   gatewayAccessTokenMasked: string
   gatewayXmlStyle: string
   gatewayConnectTimeoutS: number
+  gatewayMaxConcurrency?: number
+  releasesKeep?: number
+  runsKeepDays?: number
+  agentQueryDefaultLimit?: number
+  agentQueryMaxLimit?: number
+  agentMaxPeriodMonths?: number
+  chatMaxDocChars?: number
+  chatMaxHistoryMessages?: number
+  chatMaxRunCards?: number
+  chatMaxMarkdownPreviewChars?: number
+  chatCompactTriggerMessages?: number
+  chatCompactKeepRecent?: number
+  chatManualCompactKeepRecent?: number
+  chatManualCompactMinSlice?: number
+  chatMaxMemorySummaryChars?: number
+  chatMaxSummaryMsgChars?: number
+  chatRequestLimit?: number
+  chatToolCallsLimit?: number
+  chatTimeoutS?: number
+  chatSummaryRequestLimit?: number
+  chatSummaryToolCallsLimit?: number
+  chatSummaryTimeoutS?: number
   hasReportApiKeys?: boolean
   reportApiKeysMasked?: string
   reportApiKeyCount?: number
@@ -567,6 +598,28 @@ export interface RuntimeConfigUpdatePayload {
   clearGatewayAccessToken?: boolean
   gatewayXmlStyle?: string
   gatewayConnectTimeoutS?: number
+  gatewayMaxConcurrency?: number
+  releasesKeep?: number
+  runsKeepDays?: number
+  agentQueryDefaultLimit?: number
+  agentQueryMaxLimit?: number
+  agentMaxPeriodMonths?: number
+  chatMaxDocChars?: number
+  chatMaxHistoryMessages?: number
+  chatMaxRunCards?: number
+  chatMaxMarkdownPreviewChars?: number
+  chatCompactTriggerMessages?: number
+  chatCompactKeepRecent?: number
+  chatManualCompactKeepRecent?: number
+  chatManualCompactMinSlice?: number
+  chatMaxMemorySummaryChars?: number
+  chatMaxSummaryMsgChars?: number
+  chatRequestLimit?: number
+  chatToolCallsLimit?: number
+  chatTimeoutS?: number
+  chatSummaryRequestLimit?: number
+  chatSummaryToolCallsLimit?: number
+  chatSummaryTimeoutS?: number
   reportApiKeys?: string
   clearReportApiKeys?: boolean
   note?: string

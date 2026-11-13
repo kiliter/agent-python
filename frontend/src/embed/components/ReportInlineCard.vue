@@ -1,22 +1,20 @@
 <!--
   #Created By AiCoding(codex)
-  高质感行内报告文档卡片组件（由 RunCard.vue 与 ChatEmbedApp.vue AI 改写回复共同复用）：
-  1. 顶栏展示「核查报告 · #<templateId> <templateName>」+「AI 改写 v<no>」醒目徽标 /「已手工微调」/ 证据校验徽标、
-     版本切换下拉框（挂载于 .embed-stage）、复制按钮与「⤢ 弹窗预览报告」按钮；
-  2. 保持未经证据校验琥珀色警示条、PARTIAL 缺失字段提示条与旧入参提示条；
-  3. 卡片正文实时渲染当前选中/关联版本的 Markdown（与 PreviewDialog 双向同步）；
-  4. 底栏完整提供「换模板」「重新核查」「恢复原始报告」「⤢ 弹窗预览 / 编辑」与「✓ 确认使用此报告」主按钮。
+  IDE 级紧凑行内报告文档卡片（由 RunCard.vue 与 ChatEmbedApp.vue AI 改写回复共同复用）：
+  1. 严格单行 36px 顶栏：#<id> <templateName> + 顶部语义 Tag（AI 改写 / 已微调 / 缺 N 项 / 已核验 / 旧入参 / 已回传），
+     鼠标悬浮 Tag 通过舞台内纯 CSS Tooltip（.eb-tip）展示缺失字段、未校验警告与旧入参详情，彻底消除整行提示条；
+  2. 右侧不换行工具区：紧凑版本选择 + 纯图标工具按钮（恢复原始 / 复制 / 重查 / 换模板 / 分栏 / 放大预览） + 紧凑「确认回传」主按钮；
+  3. 正文采用 12.5px 紧凑排版与低边距标题/列表，常规报告可在单张卡片内完整一屏预览。
 -->
 <script setup lang="ts">
 import { computed } from 'vue'
 import {
-  AlertTriangle,
   ArrowLeftRight,
   Check,
   CircleCheck,
+  Columns2,
   Copy,
   FileText,
-  Info,
   Maximize2,
   RefreshCw,
   RotateCcw,
@@ -67,46 +65,89 @@ const confirmDisabled = computed(
 const rerunDisabled = computed(() => props.busy || props.actionPending || props.run.templateOffline)
 const switchDisabled = computed(() => props.busy || props.actionPending)
 
-function versionOptionLabel(no: number): string {
-  const v = versions.value.find(x => x.no === no)
-  if (!v) return ''
-  return v.kind === 'original' ? '原始报告（经证据校验）' : `AI 改写 v${v.no}（未经证据校验）`
-}
+const partialTooltipText = computed(() =>
+  props.run.missingShown.length
+    ? `部分字段待人工补齐：${props.run.missingShown.join('、')}（可点击分栏图标直接编辑补齐）`
+    : '部分展示字段缺失，请核对后决定是否编辑补齐',
+)
+
+const staleTooltipText = computed(() => `入参已变更：此报告基于旧入参版本 v${props.run.inputsVersion} 生成`)
 
 const versionOptions = computed(() =>
-  versions.value.map(v => ({ value: v.no, label: versionOptionLabel(v.no) })),
+  versions.value.map(v => ({
+    value: v.no,
+    label: v.kind === 'original' ? '原始报告（经证据校验）' : `AI 改写 v${v.no}（未经证据校验）`,
+    shortLabel: v.kind === 'original' ? '原始报告' : `AI 改写 v${v.no}`,
+  })),
 )
 
 async function onCopyReport() {
   const ok = await copyText(effectiveDraft.value)
   if (ok) stageToast.success('已复制报告 Markdown')
-  else stageToast.warning('复制失败，请打开弹窗源码编辑手动复制')
+  else stageToast.warning('复制失败，请打开编辑弹窗手动复制')
 }
 </script>
 
 <template>
   <div class="report-inline-card" :class="{ 'is-rewrite-card': isRewrite }">
-    <!-- 1. 卡片顶栏 -->
+    <!-- 1. 严格单行 IDE 顶栏 -->
     <div class="ric-header">
       <div class="ric-title-group">
-        <span class="doc-icon-badge" :class="{ 'is-rewrite': isRewrite }">
-          <FileText :size="15" />
-        </span>
-        <span class="ric-title">
-          核查报告 · <span class="mono">#{{ run.templateId }}</span> {{ run.templateName }}
-        </span>
+        <FileText :size="13" class="ric-doc-ic" :class="{ 'is-rewrite': isRewrite }" />
+        <span class="ric-id mono">#{{ run.templateId }}</span>
+        <span class="ric-title" :title="run.templateName">{{ run.templateName }}</span>
 
-        <span v-if="isRewrite && selectedVersion" class="status-badge badge-rewrite">
-          <Sparkles :size="11" />
+        <!-- 顶部状态 Tag + 鼠标悬浮 Tooltip（替代整行提示条） -->
+        <span
+          v-if="isRewrite && selectedVersion"
+          class="status-badge badge-rewrite eb-tip eb-tip-left"
+          data-tip="当前展示 AI 改写内容，未经平台强证据核验，请人工复核后再确认回传"
+        >
+          <Sparkles :size="10" />
           <span>AI 改写 v{{ selectedVersion.no }}</span>
         </span>
-        <span v-if="edited" class="status-badge badge-amber">已手工微调</span>
-        <span v-else-if="!isRewrite && run.status === 'PARTIAL'" class="status-badge badge-amber">部分字段缺失</span>
-        <span v-else-if="!isRewrite && run.status === 'SUCCESS'" class="status-badge badge-emerald">
-          全部证据校验通过
+
+        <span
+          v-if="edited"
+          class="status-badge badge-amber eb-tip eb-tip-left"
+          data-tip="包含手工编辑改动，未经平台强证据核验，请人工复核后再确认回传"
+        >
+          已微调
+        </span>
+        <span
+          v-else-if="run.status === 'PARTIAL'"
+          class="status-badge badge-amber eb-tip eb-tip-left"
+          :data-tip="partialTooltipText"
+        >
+          缺 {{ run.missingShown.length || 1 }} 项
+        </span>
+        <span
+          v-else-if="!isRewrite && run.status === 'SUCCESS'"
+          class="status-badge badge-emerald eb-tip eb-tip-left"
+          data-tip="全部展示字段已通过平台强证据校验"
+        >
+          已核验
+        </span>
+
+        <span
+          v-if="run.stale"
+          class="status-badge badge-muted eb-tip eb-tip-left"
+          :data-tip="staleTooltipText"
+        >
+          旧入参 v{{ run.inputsVersion }}
+        </span>
+
+        <span
+          v-if="isConfirmedDisplay"
+          class="status-badge badge-emerald eb-tip eb-tip-left"
+          data-tip="当前版本已确认回传上层工单"
+        >
+          <CircleCheck :size="10" />
+          <span>已回传</span>
         </span>
       </div>
 
+      <!-- 右侧不换行工具区 -->
       <div class="ric-top-tools">
         <VersionSelect
           :model-value="selectedVersion?.no ?? 1"
@@ -115,107 +156,87 @@ async function onCopyReport() {
           @update:model-value="no => emit('selectVersion', no)"
         />
 
-        <button type="button" class="btn-tool" title="复制当前报告 Markdown" @click="onCopyReport">
-          <Copy :size="13" />
-          <span>复制</span>
-        </button>
-
-        <button
-          type="button"
-          class="btn-tool btn-tool-accent"
-          title="在大尺寸弹窗中预览或分栏编辑报告"
-          @click="emit('openPreview', 'preview')"
-        >
-          <Maximize2 :size="13" />
-          <span>⤢ 弹窗预览报告</span>
-        </button>
-      </div>
-    </div>
-
-    <!-- 2. 警示与上下文提示条 -->
-    <div v-if="isRewrite || edited" class="ric-alert alert-amber">
-      <AlertTriangle :size="14" class="alert-ic" />
-      <span>当前内容包含 AI 改写或手工编辑，未经平台强证据核验，请人工复核后再确认回传</span>
-    </div>
-
-    <div v-if="run.status === 'PARTIAL' && run.missingShown.length" class="ric-alert alert-info">
-      <Info :size="14" class="alert-ic" />
-      <span>部分字段待人工补齐：{{ run.missingShown.join('、') }}</span>
-    </div>
-
-    <div v-if="run.stale" class="ric-alert alert-amber">
-      <AlertTriangle :size="14" class="alert-ic" />
-      <span>入参已变更：此报告基于旧入参版本（v{{ run.inputsVersion }}）生成</span>
-    </div>
-
-    <!-- 3. 卡片文档正文 -->
-    <div class="ric-body">
-      <div class="md-body report-prose" v-html="renderedReportHtml"></div>
-    </div>
-
-    <!-- 4. 卡片底栏 -->
-    <div class="ric-footer">
-      <div class="ric-footer-left">
-        <button
-          type="button"
-          class="btn-ghost"
-          :disabled="switchDisabled"
-          @click="emit('switchTemplate')"
-        >
-          <ArrowLeftRight :size="13" />
-          <span>换模板</span>
-        </button>
-
-        <span class="inline-wrap" :title="run.templateOffline ? '该模板已下线，不可重新核查' : undefined">
-          <button
-            type="button"
-            class="btn-ghost"
-            :disabled="rerunDisabled"
-            @click="emit('rerun')"
-          >
-            <RefreshCw :size="13" />
-            <span>重新核查</span>
-          </button>
-        </span>
-
         <button
           v-if="edited"
           type="button"
-          class="btn-ghost"
-          title="还原当前版本的手工修改"
+          class="eb-icon-btn eb-tip eb-tip-right"
+          data-tip="恢复原始报告"
+          aria-label="恢复原始报告"
           @click="emit('resetDraft')"
         >
           <RotateCcw :size="13" />
-          <span>恢复原始报告</span>
         </button>
-      </div>
-
-      <div class="ric-footer-right">
-        <span v-if="isConfirmedDisplay" class="confirmed-mark">
-          <CircleCheck :size="14" />
-          <span>✓ 已确认回传</span>
-        </span>
 
         <button
           type="button"
-          class="btn-preview-edit"
+          class="eb-icon-btn eb-tip eb-tip-right"
+          data-tip="复制报告 Markdown"
+          aria-label="复制报告 Markdown"
+          @click="onCopyReport"
+        >
+          <Copy :size="13" />
+        </button>
+
+        <button
+          type="button"
+          class="eb-icon-btn eb-tip eb-tip-right"
+          :disabled="rerunDisabled"
+          :data-tip="run.templateOffline ? '该模板已下线，不可重跑' : '重新核查'"
+          aria-label="重新核查"
+          @click="emit('rerun')"
+        >
+          <RefreshCw :size="13" />
+        </button>
+
+        <button
+          type="button"
+          class="eb-icon-btn eb-tip eb-tip-right"
+          :disabled="switchDisabled"
+          data-tip="切换核查模板"
+          aria-label="切换核查模板"
+          @click="emit('switchTemplate')"
+        >
+          <ArrowLeftRight :size="13" />
+        </button>
+
+        <button
+          type="button"
+          class="eb-icon-btn eb-tip eb-tip-right"
+          data-tip="分栏对比与源码编辑"
+          aria-label="分栏对比与源码编辑"
           @click="emit('openPreview', 'split')"
         >
-          <span>⤢ 弹窗预览 / 编辑</span>
+          <Columns2 :size="13" />
+        </button>
+
+        <button
+          type="button"
+          class="eb-icon-btn is-accent eb-tip eb-tip-right"
+          data-tip="放大预览报告"
+          aria-label="放大预览报告"
+          @click="emit('openPreview', 'preview')"
+        >
+          <Maximize2 :size="13" />
         </button>
 
         <button
           v-if="run.status !== 'FAILED'"
           type="button"
-          class="btn-confirm"
+          class="btn-confirm-compact eb-tip eb-tip-right"
           :class="{ 'is-confirmed': isConfirmedDisplay }"
           :disabled="confirmDisabled"
+          :data-tip="isConfirmedDisplay ? '再次确认并回传此报告' : '确认并回传上层工单'"
           @click="emit('confirm')"
         >
-          <Check :size="14" :stroke-width="2.5" />
-          <span>{{ isConfirmedDisplay ? '再次回传' : '确认使用此报告' }}</span>
+          <Check :size="12" :stroke-width="2.5" />
+          <span>{{ isConfirmedDisplay ? '再次回传' : '确认回传' }}</span>
         </button>
       </div>
+    </div>
+
+    <!-- 2. 紧凑文档正文（争取一卡直接完整预览） -->
+    <div class="ric-body">
+      <div class="md-body report-prose" v-html="renderedReportHtml"></div>
     </div>
   </div>
 </template>
@@ -224,73 +245,87 @@ async function onCopyReport() {
 .mono {
   font-family: var(--gpt-font-mono);
 }
-.inline-wrap {
-  display: inline-flex;
-}
 
 .report-inline-card {
-  border-radius: 18px;
+  border-radius: 10px;
   border: 1px solid var(--gpt-border);
   background: #ffffff;
-  box-shadow: var(--gpt-shadow-sm);
-  overflow: hidden;
+  box-shadow: var(--gpt-shadow-xs);
+  overflow: visible;
   display: flex;
   flex-direction: column;
 }
+.report-inline-card.is-rewrite-card {
+  border-color: var(--gpt-accent-border);
+}
 
 .ric-header {
-  padding: 11px 16px;
+  height: 36px;
+  padding: 0 10px;
   background: var(--gpt-bg-subtle);
   border-bottom: 1px solid var(--gpt-border);
+  border-radius: 9px 9px 0 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
+  gap: 8px;
+  flex-wrap: nowrap;
+  position: relative;
+  z-index: 20;
 }
 
 .ric-title-group {
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+  gap: 5px;
+  flex-wrap: nowrap;
   min-width: 0;
+  flex: 1;
 }
 
-.doc-icon-badge {
-  width: 26px;
-  height: 26px;
-  border-radius: 8px;
-  background: #ffffff;
-  border: 1px solid var(--gpt-border);
-  color: var(--gpt-ink);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+.ric-doc-ic {
   flex-shrink: 0;
+  color: var(--gpt-ink-secondary);
 }
-.doc-icon-badge.is-rewrite {
-  background: var(--gpt-accent-soft);
-  border-color: var(--gpt-accent-border);
+.ric-doc-ic.is-rewrite {
   color: var(--gpt-accent);
 }
 
+.ric-id {
+  padding: 0 5px;
+  height: 18px;
+  line-height: 18px;
+  border-radius: 4px;
+  background: var(--gpt-bg-muted);
+  color: var(--gpt-ink-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
 .ric-title {
-  font-size: 14px;
-  font-weight: 650;
+  font-size: 12.5px;
+  font-weight: 600;
   color: var(--gpt-ink);
-  letter-spacing: -0.01em;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .status-badge {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 1.5px 9px;
-  border-radius: 999px;
-  font-size: 11.5px;
+  gap: 3px;
+  padding: 0 6px;
+  height: 18px;
+  line-height: 17px;
+  border-radius: 4px;
+  font-size: 10.5px;
   font-weight: 600;
-  line-height: 18px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  cursor: help;
 }
 .badge-rewrite {
   background: var(--gpt-accent-soft);
@@ -307,196 +342,100 @@ async function onCopyReport() {
   border: 1px solid var(--gpt-amber-border);
   color: var(--gpt-amber);
 }
+.badge-muted {
+  background: var(--gpt-bg-muted);
+  border: 1px solid var(--gpt-border);
+  color: var(--gpt-ink-secondary);
+}
 
 .ric-top-tools {
   display: flex;
   align-items: center;
-  gap: 7px;
-  flex-wrap: wrap;
+  gap: 3px;
+  flex-wrap: nowrap;
+  flex-shrink: 0;
 }
 
 .ver-select {
-  width: 204px;
+  width: 108px;
+  margin-right: 2px;
 }
 
-.btn-tool {
+.btn-confirm-compact {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 30px;
-  padding: 0 11px;
-  border-radius: 8px;
-  border: 1px solid var(--gpt-border);
-  background: #ffffff;
-  color: var(--gpt-ink-secondary);
-  font: inherit;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-.btn-tool:hover {
-  border-color: var(--gpt-border-strong);
-  color: var(--gpt-ink);
-  background: var(--gpt-bg-muted);
-}
-.btn-tool-accent {
-  border-color: var(--gpt-accent-border);
-  background: var(--gpt-accent-soft);
-  color: var(--gpt-accent);
-  font-weight: 600;
-}
-.btn-tool-accent:hover {
-  background: #dbeafe;
-  border-color: #93c5fd;
-  color: var(--gpt-accent-hover);
-}
-
-.ric-alert {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 8px 16px;
-  font-size: 12.5px;
-  line-height: 1.5;
-  border-bottom: 1px solid var(--gpt-border);
-}
-.alert-amber {
-  background: var(--gpt-amber-bg);
-  border-bottom-color: var(--gpt-amber-border);
-  color: var(--gpt-amber);
-  font-weight: 500;
-}
-.alert-info {
-  background: var(--gpt-accent-soft);
-  border-bottom-color: var(--gpt-accent-border);
-  color: #1e40af;
-}
-.alert-ic {
-  flex-shrink: 0;
-  margin-top: 2px;
-}
-
-.ric-body {
-  padding: 20px 22px;
-  max-height: 560px;
-  overflow-y: auto;
-  background: #ffffff;
-}
-.report-prose {
-  font-size: 14px;
-  line-height: 1.76;
-}
-
-.ric-footer {
-  padding: 11px 16px;
-  background: var(--gpt-bg-subtle);
-  border-top: 1px solid var(--gpt-border);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.ric-footer-left,
-.ric-footer-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.btn-ghost {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 32px;
-  padding: 0 12px;
-  border-radius: 999px;
-  border: 1px solid var(--gpt-border);
-  background: #ffffff;
-  color: var(--gpt-ink-secondary);
-  font: inherit;
-  font-size: 12.5px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-.btn-ghost:hover:not(:disabled) {
-  border-color: var(--gpt-border-strong);
-  color: var(--gpt-ink);
-  background: var(--gpt-bg-muted);
-}
-.btn-ghost:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.confirmed-mark {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 4px 11px;
-  border-radius: 999px;
-  background: var(--gpt-emerald-bg);
-  border: 1px solid var(--gpt-emerald-border);
-  color: var(--gpt-emerald);
-  font-size: 12.5px;
-  font-weight: 600;
-}
-
-.btn-preview-edit {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 34px;
-  padding: 0 14px;
-  border-radius: 999px;
-  border: 1px solid var(--gpt-border-strong);
-  background: #ffffff;
-  color: var(--gpt-ink);
-  font: inherit;
-  font-size: 12.5px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-.btn-preview-edit:hover {
-  background: var(--gpt-bg-muted);
-  border-color: var(--gpt-ink);
-}
-
-.btn-confirm {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 34px;
-  padding: 0 17px;
-  border-radius: 999px;
-  border: 1px solid var(--gpt-btn-dark);
-  background: var(--gpt-btn-dark);
+  gap: 4px;
+  height: 25px;
+  padding: 0 9px;
+  margin-left: 2px;
+  border-radius: 6px;
+  border: 1px solid #2563eb;
+  background: #2563eb;
   color: #ffffff;
   font: inherit;
-  font-size: 12.5px;
+  font-size: 11.5px;
   font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all 0.14s ease;
 }
-.btn-confirm:hover:not(:disabled) {
-  background: var(--gpt-btn-dark-hover);
-  border-color: var(--gpt-btn-dark-hover);
+.btn-confirm-compact:hover:not(:disabled) {
+  background: #1d4ed8;
+  border-color: #1d4ed8;
 }
-.btn-confirm.is-confirmed {
+.btn-confirm-compact.is-confirmed {
   background: #ffffff;
   border-color: var(--gpt-emerald-border);
   color: var(--gpt-emerald);
 }
-.btn-confirm.is-confirmed:hover:not(:disabled) {
+.btn-confirm-compact.is-confirmed:hover:not(:disabled) {
   background: var(--gpt-emerald-bg);
 }
-.btn-confirm:disabled {
+.btn-confirm-compact:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+.ric-body {
+  padding: 10px 13px;
+  max-height: 760px;
+  overflow-y: auto;
+  background: #ffffff;
+  border-radius: 0 0 9px 9px;
+}
+
+.report-prose {
+  font-size: 12.5px;
+  line-height: 1.52;
+}
+.report-prose :deep(p) {
+  margin: 0.25em 0;
+}
+.report-prose :deep(h1),
+.report-prose :deep(h2),
+.report-prose :deep(h3),
+.report-prose :deep(h4) {
+  font-size: 13px;
+  margin: 0.42em 0 0.2em;
+}
+.report-prose :deep(ul),
+.report-prose :deep(ol) {
+  margin: 0.25em 0;
+  padding-left: 1.25em;
+}
+.report-prose :deep(li + li) {
+  margin-top: 0.1em;
+}
+.report-prose :deep(hr) {
+  margin: 6px 0;
+}
+.report-prose :deep(table) {
+  margin: 5px 0;
+}
+.report-prose :deep(th),
+.report-prose :deep(td) {
+  padding: 4px 8px;
+  font-size: 12px;
 }
 </style>

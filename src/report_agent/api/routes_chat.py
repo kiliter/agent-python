@@ -176,6 +176,16 @@ async def get_chat_session(
     return await _chat(request).get_session_view(sid, caller=caller)
 
 
+@chat_router.post("/sessions/{sid}/compact")
+async def compact_chat_session(
+    request: Request,
+    sid: str,
+    caller: ChatCaller = Depends(require_chat_caller),
+) -> dict[str, Any]:
+    """手动触发对话上下文滚动压缩（保留最近原文消息，归档更早对话为记忆摘要）。"""
+    return await _chat(request).compact_session(sid, caller=caller)
+
+
 @chat_router.post("/sessions/{sid}/messages")
 async def send_chat_message(
     request: Request,

@@ -445,13 +445,14 @@ def _split_period_range(raw: str) -> tuple[str, str] | None:
     return None
 
 
-def expand_period(period: str) -> dict[str, Any]:
+def expand_period(period: str, *, max_months: int | None = None) -> dict[str, Any]:
     """解析账期、单日或日期/年月区间，展开涉及的月份列表与总体起止窗口。#Created By AiCoding(codex)"""
     if period is None or isinstance(period, bool):
         raise ValueError("账期/日期文本不能为空")
     raw = str(period).strip()
     if not raw:
         raise ValueError("账期/日期文本不能为空")
+    eff_max_months = MAX_PERIOD_MONTHS if max_months is None else max(1, int(max_months))
 
     # 1. 多账期分隔（$、,、，、;、；、顿号）：
     #    - 恰好 2 段 A$B 且 A <= B 时按闭区间展开连续月份（对齐 Java billing-cycle-sms）；
@@ -471,8 +472,8 @@ def expand_period(period: str) -> dict[str, Any]:
         if is_dollar_pair and parsed_yms[0] <= parsed_yms[1]:
             (y1, m1), (y2, m2) = parsed_yms
             total_months = (y2 - y1) * 12 + (m2 - m1) + 1
-            if total_months > MAX_PERIOD_MONTHS:
-                raise ValueError(f"区间跨度为 {total_months} 个月，超过上限（{MAX_PERIOD_MONTHS} 个月）")
+            if total_months > eff_max_months:
+                raise ValueError(f"区间跨度为 {total_months} 个月，超过上限（{eff_max_months} 个月）")
             month_items: list[dict[str, str]] = []
             cur_y, cur_m = y1, m1
             for _ in range(total_months):
@@ -484,8 +485,8 @@ def expand_period(period: str) -> dict[str, Any]:
                     cur_m += 1
         else:
             unique_yms = sorted(set(parsed_yms))
-            if len(unique_yms) > MAX_PERIOD_MONTHS:
-                raise ValueError(f"账期月份数量为 {len(unique_yms)} 个月，超过上限（{MAX_PERIOD_MONTHS} 个月）")
+            if len(unique_yms) > eff_max_months:
+                raise ValueError(f"账期月份数量为 {len(unique_yms)} 个月，超过上限（{eff_max_months} 个月）")
             month_items = [_make_month_item(y, m) for y, m in unique_yms]
 
         overall_start = month_items[0]["startDate"]
@@ -521,8 +522,8 @@ def expand_period(period: str) -> dict[str, Any]:
         if start_dt > end_dt:
             raise ValueError(f"区间起始日期 {start_dt:%Y%m%d} 不能晚于结束日期 {end_dt:%Y%m%d}")
         total_months = (end_dt.year - start_dt.year) * 12 + (end_dt.month - start_dt.month) + 1
-        if total_months > MAX_PERIOD_MONTHS:
-            raise ValueError(f"区间跨度为 {total_months} 个月，超过上限（{MAX_PERIOD_MONTHS} 个月）")
+        if total_months > eff_max_months:
+            raise ValueError(f"区间跨度为 {total_months} 个月，超过上限（{eff_max_months} 个月）")
         month_items = []
         cur_y, cur_m = start_dt.year, start_dt.month
         for _ in range(total_months):

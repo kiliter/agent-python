@@ -103,19 +103,19 @@ function onSubmit() {
     <div class="ask-card">
       <div class="ask-header">
         <span class="ask-badge">
-          <SlidersHorizontal :size="13" />
+          <SlidersHorizontal :size="12" />
         </span>
         <span class="ask-title">补充核查参数</span>
         <span class="ask-tpl-pill mono">#{{ message.templateId }} {{ message.templateName }}</span>
         <span class="spacer"></span>
         <button
           type="button"
-          class="btn-tpl-peek"
-          title="预览此模板结构与入参要求"
+          class="eb-icon-btn is-bordered eb-tip eb-tip-right"
+          data-tip="预览模板结构与入参"
+          aria-label="预览模板"
           @click.stop="emit('preview', message.templateId)"
         >
           <Eye :size="13" />
-          <span>预览模板</span>
         </button>
       </div>
 
@@ -166,8 +166,8 @@ function onSubmit() {
 
       <div class="ask-actions">
         <button type="button" class="btn-submit" :disabled="disabled" @click="onSubmit">
-          <Play :size="13" />
-          <span>{{ submitted ? '重新提交并核查' : '提交参数并开始核查' }}</span>
+          <Play :size="12" />
+          <span>{{ submitted ? '重新核查' : '开始核查' }}</span>
         </button>
       </div>
     </div>
@@ -193,21 +193,22 @@ function onSubmit() {
 }
 
 .ask-card {
-  border-radius: 16px;
+  border-radius: 10px;
   border: 1px solid var(--gpt-border);
   background: #ffffff;
-  padding: 16px 18px;
+  padding: 10px 12px;
   box-shadow: var(--gpt-shadow-xs);
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 9px;
 }
 
 .ask-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+  gap: 6px;
+  flex-wrap: nowrap;
+  min-width: 0;
 }
 
 .ask-badge {
@@ -229,41 +230,22 @@ function onSubmit() {
 }
 
 .ask-tpl-pill {
-  padding: 2px 9px;
-  border-radius: 999px;
+  padding: 1px 7px;
+  border-radius: 6px;
   background: var(--gpt-bg-subtle);
   border: 1px solid var(--gpt-border);
   color: var(--gpt-ink-secondary);
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 500;
-}
-
-.btn-tpl-peek {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 30px;
-  padding: 0 12px;
-  border-radius: 999px;
-  border: 1px solid var(--gpt-border);
-  background: #ffffff;
-  color: var(--gpt-ink-secondary);
-  font: inherit;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-.btn-tpl-peek:hover {
-  border-color: var(--gpt-border-strong);
-  background: var(--gpt-bg-muted);
-  color: var(--gpt-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .params-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px 16px;
+  gap: 8px 12px;
 }
 .param-cell {
   min-width: 0;
@@ -382,15 +364,15 @@ function onSubmit() {
 .btn-submit {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  height: 34px;
-  padding: 0 18px;
-  border-radius: 999px;
+  gap: 5px;
+  height: 28px;
+  padding: 0 13px;
+  border-radius: 7px;
   border: 1px solid var(--gpt-btn-dark);
   background: var(--gpt-btn-dark);
   color: #ffffff;
   font: inherit;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.15s;

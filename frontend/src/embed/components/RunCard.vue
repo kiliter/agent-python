@@ -206,8 +206,11 @@ async function onCopyRunId() {
             <span>取消</span>
           </button>
 
-          <span class="tb-fold-label">
-            <span>{{ traceExpanded ? '收起运行记录' : '展开运行记录' }}</span>
+          <span
+            class="tb-fold-label"
+            :title="traceExpanded ? '收起运行记录' : '展开运行记录'"
+            :aria-label="traceExpanded ? '收起运行记录' : '展开运行记录'"
+          >
             <ChevronUp v-if="traceExpanded" :size="14" />
             <ChevronDown v-else :size="14" />
           </span>
@@ -345,13 +348,13 @@ async function onCopyRunId() {
 .run-unit {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
   min-width: 0;
 }
 
 /* ==================== Thinking Bar ==================== */
 .thinking-bar {
-  border-radius: 16px;
+  border-radius: 10px;
   border: 1px solid var(--gpt-border);
   background: var(--gpt-bg-subtle);
   overflow: hidden;
@@ -366,12 +369,12 @@ async function onCopyRunId() {
 }
 
 .thinking-bar-head {
-  padding: 10px 14px;
+  padding: 6px 10px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
+  gap: 8px;
+  flex-wrap: nowrap;
   cursor: pointer;
   user-select: none;
   transition: background-color 0.15s ease;
@@ -383,11 +386,12 @@ async function onCopyRunId() {
 .tb-left {
   display: flex;
   align-items: center;
-  gap: 7px;
-  flex-wrap: wrap;
+  gap: 6px;
+  flex-wrap: nowrap;
+  overflow: hidden;
   min-width: 0;
   flex: 1;
-  font-size: 13px;
+  font-size: 12px;
   color: var(--gpt-ink-secondary);
 }
 
@@ -416,28 +420,41 @@ async function onCopyRunId() {
 .tb-summary {
   font-weight: 600;
   color: var(--gpt-ink);
+  flex-shrink: 0;
 }
 .tb-sep {
   color: var(--gpt-border-strong);
+  flex-shrink: 0;
 }
 .tb-tpl {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--gpt-ink-secondary);
   font-weight: 500;
 }
+.tb-tpl > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .tb-meta {
   color: var(--gpt-ink-muted);
-  font-size: 12.5px;
+  font-size: 11.5px;
+  flex-shrink: 0;
 }
 
 .tb-tag {
-  padding: 1px 7px;
+  padding: 1px 6px;
   border-radius: 999px;
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
-  line-height: 17px;
+  line-height: 16px;
+  flex-shrink: 0;
 }
 .tag-amber {
   background: var(--gpt-amber-bg);

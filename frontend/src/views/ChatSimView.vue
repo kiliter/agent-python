@@ -385,7 +385,7 @@ async function handleOpenChatInGlobalTab() {
 async function handleResendInitToOpenTab() {
   const existing = matchingChatTab.value || tabsStore.chatTabs[0] || null
   if (!existing) {
-    ElMessage.warning('当前没有已打开的聊天窗口页签，请先点击「在顶部新页签打开聊天窗口」')
+    ElMessage.warning('当前没有已打开的聊天窗口，请先点击「打开聊天窗口」')
     return
   }
   const inputs = collectInputs()
@@ -541,7 +541,7 @@ function jumpToRunRecord(runId: string) {
           <div class="sim-card-title-group">
             <h2 class="sim-card-title">父页面模拟参数</h2>
             <span class="sim-card-subtitle">
-              模拟外部工单系统上下文，在顶部全局页签栏打开智能填报窗口
+              模拟外部工单系统上下文，在右侧全屏打开智能填报窗口
             </span>
           </div>
           <el-button size="small" type="primary" plain @click="pickerOpen = true">
@@ -772,8 +772,8 @@ function jumpToRunRecord(runId: string) {
           <span class="footer-note">
             {{
               matchingChatTab
-                ? `工单 ${matchingChatTab.orderId} 已在顶部页签打开，点击主按钮将切换过去并同步最新入参`
-                : '将在右侧顶部的全局多页签栏新增「智能填报 · 工单号」页签并自动完成握手'
+                ? `工单 ${matchingChatTab.orderId} 会话已打开，点击将右侧全屏切换过去并同步最新入参`
+                : '将在右侧全屏打开智能填报窗口并自动完成握手（点击右上角 × 可返回）'
             }}
           </span>
           <div class="footer-btns">
@@ -782,12 +782,12 @@ function jumpToRunRecord(runId: string) {
               title="不离开当前页，向已打开的聊天窗口重新发送最新 chat-init 入参"
               @click="handleResendInitToOpenTab"
             >
-              <Send :size="13" style="margin-right: 5px" />
-              重新下发入参
+              <Send :size="13" style="margin-right: 4px" />
+              同步入参
             </el-button>
             <el-button type="primary" @click="handleOpenChatInGlobalTab">
-              <ExternalLink :size="13" style="margin-right: 5px" />
-              {{ matchingChatTab ? '切换并同步顶部聊天页签' : '在顶部新页签打开聊天窗口' }}
+              <ExternalLink :size="13" style="margin-right: 4px" />
+              {{ matchingChatTab ? '进入聊天窗口' : '打开聊天窗口' }}
             </el-button>
           </div>
         </footer>
@@ -901,7 +901,7 @@ function jumpToRunRecord(runId: string) {
               <Terminal :size="24" class="empty-icon" />
               <div class="empty-title">暂无 postMessage 交互报文</div>
               <p class="empty-desc">
-                点击左侧「在顶部新页签打开聊天窗口」后，`chat-ready`、`chat-init`、`report-confirmed` 与 `chat-close-request` 报文将实时记录在此。
+                点击左侧「打开聊天窗口」后，`chat-ready`、`chat-init`、`report-confirmed` 与 `chat-close-request` 报文将实时记录在此。
               </p>
             </div>
 

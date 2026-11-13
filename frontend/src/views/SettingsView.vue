@@ -311,11 +311,60 @@ const isEditingRuntime = ref(false)
 const savingRuntime = ref(false)
 const syncingEnv = ref(false)
 
+/** 运行期非敏感配置全量默认值（后端旧快照缺字段或表单留空时统一兜底） */
+const DEFAULT_RUNTIME_CONFIG = {
+  gatewayMode: 'mock',
+  gatewayXmlStyle: 'java',
+  gatewayUrl: '',
+  gatewayConnectTimeoutS: 5,
+  gatewayMaxConcurrency: 32,
+  llmModel: '',
+  llmBaseUrl: '',
+  llmTemperature: 0.1,
+  llmMaxTokens: null as number | null,
+  llmTimeoutS: 60,
+  llmHttpRetries: 2,
+  llmParallelToolCalls: null as boolean | null,
+  llmStrictTools: null as boolean | null,
+  llmToolChoiceRequired: null as boolean | null,
+  agentOutputMode: 'tool',
+  agentNativeStrict: true,
+  agentOutputRetries: 2,
+  agentToolRetries: 2,
+  agentRequestLimit: 12,
+  agentToolCallsLimit: 16,
+  agentRunTimeoutS: 120,
+  agentMaxConcurrentRuns: 4,
+  agentPreviewRows: 50,
+  releasesKeep: 50,
+  runsKeepDays: 90,
+  agentQueryDefaultLimit: 20,
+  agentQueryMaxLimit: 100,
+  agentMaxPeriodMonths: 36,
+  chatMaxDocChars: 12000,
+  chatMaxHistoryMessages: 20,
+  chatMaxRunCards: 8,
+  chatMaxMarkdownPreviewChars: 1500,
+  chatCompactTriggerMessages: 24,
+  chatCompactKeepRecent: 12,
+  chatManualCompactKeepRecent: 6,
+  chatManualCompactMinSlice: 2,
+  chatMaxMemorySummaryChars: 1200,
+  chatMaxSummaryMsgChars: 800,
+  chatRequestLimit: 8,
+  chatToolCallsLimit: 16,
+  chatTimeoutS: 120,
+  chatSummaryRequestLimit: 3,
+  chatSummaryToolCallsLimit: 4,
+  chatSummaryTimeoutS: 60,
+}
+
 interface RuntimeFormModel {
   gatewayMode: string
   gatewayXmlStyle: string
   gatewayUrl: string
   gatewayConnectTimeoutS: number
+  gatewayMaxConcurrency: number
   gatewayAppIdInput: string
   clearGatewayAppId: boolean
   gatewayAccessTokenInput: string
@@ -340,38 +389,81 @@ interface RuntimeFormModel {
   agentRunTimeoutS: number
   agentMaxConcurrentRuns: number
   agentPreviewRows: number
+  releasesKeep: number
+  runsKeepDays: number
+  agentQueryDefaultLimit: number
+  agentQueryMaxLimit: number
+  agentMaxPeriodMonths: number
+  chatMaxDocChars: number
+  chatMaxHistoryMessages: number
+  chatMaxRunCards: number
+  chatMaxMarkdownPreviewChars: number
+  chatCompactTriggerMessages: number
+  chatCompactKeepRecent: number
+  chatManualCompactKeepRecent: number
+  chatManualCompactMinSlice: number
+  chatMaxMemorySummaryChars: number
+  chatMaxSummaryMsgChars: number
+  chatRequestLimit: number
+  chatToolCallsLimit: number
+  chatTimeoutS: number
+  chatSummaryRequestLimit: number
+  chatSummaryToolCallsLimit: number
+  chatSummaryTimeoutS: number
   note: string
 }
 
 const runtimeForm = reactive<RuntimeFormModel>({
-  gatewayMode: 'mock',
-  gatewayXmlStyle: 'java',
-  gatewayUrl: '',
-  gatewayConnectTimeoutS: 5,
+  gatewayMode: DEFAULT_RUNTIME_CONFIG.gatewayMode,
+  gatewayXmlStyle: DEFAULT_RUNTIME_CONFIG.gatewayXmlStyle,
+  gatewayUrl: DEFAULT_RUNTIME_CONFIG.gatewayUrl,
+  gatewayConnectTimeoutS: DEFAULT_RUNTIME_CONFIG.gatewayConnectTimeoutS,
+  gatewayMaxConcurrency: DEFAULT_RUNTIME_CONFIG.gatewayMaxConcurrency,
   gatewayAppIdInput: '',
   clearGatewayAppId: false,
   gatewayAccessTokenInput: '',
   clearGatewayAccessToken: false,
-  llmModel: '',
-  llmBaseUrl: '',
+  llmModel: DEFAULT_RUNTIME_CONFIG.llmModel,
+  llmBaseUrl: DEFAULT_RUNTIME_CONFIG.llmBaseUrl,
   llmApiKeyInput: '',
   clearLlmApiKey: false,
-  llmTemperature: 0.1,
+  llmTemperature: DEFAULT_RUNTIME_CONFIG.llmTemperature,
   llmMaxTokensStr: '',
-  llmTimeoutS: 60,
-  llmHttpRetries: 2,
+  llmTimeoutS: DEFAULT_RUNTIME_CONFIG.llmTimeoutS,
+  llmHttpRetries: DEFAULT_RUNTIME_CONFIG.llmHttpRetries,
   llmParallelToolCalls: 'null',
   llmStrictTools: 'null',
   llmToolChoiceRequired: 'null',
-  agentOutputMode: 'tool',
-  agentNativeStrict: true,
-  agentOutputRetries: 2,
-  agentToolRetries: 2,
-  agentRequestLimit: 12,
-  agentToolCallsLimit: 16,
-  agentRunTimeoutS: 120,
-  agentMaxConcurrentRuns: 4,
-  agentPreviewRows: 50,
+  agentOutputMode: DEFAULT_RUNTIME_CONFIG.agentOutputMode,
+  agentNativeStrict: DEFAULT_RUNTIME_CONFIG.agentNativeStrict,
+  agentOutputRetries: DEFAULT_RUNTIME_CONFIG.agentOutputRetries,
+  agentToolRetries: DEFAULT_RUNTIME_CONFIG.agentToolRetries,
+  agentRequestLimit: DEFAULT_RUNTIME_CONFIG.agentRequestLimit,
+  agentToolCallsLimit: DEFAULT_RUNTIME_CONFIG.agentToolCallsLimit,
+  agentRunTimeoutS: DEFAULT_RUNTIME_CONFIG.agentRunTimeoutS,
+  agentMaxConcurrentRuns: DEFAULT_RUNTIME_CONFIG.agentMaxConcurrentRuns,
+  agentPreviewRows: DEFAULT_RUNTIME_CONFIG.agentPreviewRows,
+  releasesKeep: DEFAULT_RUNTIME_CONFIG.releasesKeep,
+  runsKeepDays: DEFAULT_RUNTIME_CONFIG.runsKeepDays,
+  agentQueryDefaultLimit: DEFAULT_RUNTIME_CONFIG.agentQueryDefaultLimit,
+  agentQueryMaxLimit: DEFAULT_RUNTIME_CONFIG.agentQueryMaxLimit,
+  agentMaxPeriodMonths: DEFAULT_RUNTIME_CONFIG.agentMaxPeriodMonths,
+  chatMaxDocChars: DEFAULT_RUNTIME_CONFIG.chatMaxDocChars,
+  chatMaxHistoryMessages: DEFAULT_RUNTIME_CONFIG.chatMaxHistoryMessages,
+  chatMaxRunCards: DEFAULT_RUNTIME_CONFIG.chatMaxRunCards,
+  chatMaxMarkdownPreviewChars: DEFAULT_RUNTIME_CONFIG.chatMaxMarkdownPreviewChars,
+  chatCompactTriggerMessages: DEFAULT_RUNTIME_CONFIG.chatCompactTriggerMessages,
+  chatCompactKeepRecent: DEFAULT_RUNTIME_CONFIG.chatCompactKeepRecent,
+  chatManualCompactKeepRecent: DEFAULT_RUNTIME_CONFIG.chatManualCompactKeepRecent,
+  chatManualCompactMinSlice: DEFAULT_RUNTIME_CONFIG.chatManualCompactMinSlice,
+  chatMaxMemorySummaryChars: DEFAULT_RUNTIME_CONFIG.chatMaxMemorySummaryChars,
+  chatMaxSummaryMsgChars: DEFAULT_RUNTIME_CONFIG.chatMaxSummaryMsgChars,
+  chatRequestLimit: DEFAULT_RUNTIME_CONFIG.chatRequestLimit,
+  chatToolCallsLimit: DEFAULT_RUNTIME_CONFIG.chatToolCallsLimit,
+  chatTimeoutS: DEFAULT_RUNTIME_CONFIG.chatTimeoutS,
+  chatSummaryRequestLimit: DEFAULT_RUNTIME_CONFIG.chatSummaryRequestLimit,
+  chatSummaryToolCallsLimit: DEFAULT_RUNTIME_CONFIG.chatSummaryToolCallsLimit,
+  chatSummaryTimeoutS: DEFAULT_RUNTIME_CONFIG.chatSummaryTimeoutS,
   note: '',
 })
 
@@ -388,38 +480,122 @@ function boolFromTri(v: 'null' | 'true' | 'false'): boolean | null {
 }
 
 const effectiveRuntimeConfig = computed<RuntimeConfig | null>(() => {
-  if (store.runtimeState?.config) return store.runtimeState.config
+  const raw = store.runtimeState?.config
+  if (raw) {
+    return {
+      ...raw,
+      llmBaseUrl: raw.llmBaseUrl ?? DEFAULT_RUNTIME_CONFIG.llmBaseUrl,
+      llmModel: raw.llmModel ?? DEFAULT_RUNTIME_CONFIG.llmModel,
+      llmTemperature: raw.llmTemperature ?? DEFAULT_RUNTIME_CONFIG.llmTemperature,
+      llmMaxTokens: raw.llmMaxTokens ?? DEFAULT_RUNTIME_CONFIG.llmMaxTokens,
+      llmTimeoutS: raw.llmTimeoutS ?? DEFAULT_RUNTIME_CONFIG.llmTimeoutS,
+      llmHttpRetries: raw.llmHttpRetries ?? DEFAULT_RUNTIME_CONFIG.llmHttpRetries,
+      llmParallelToolCalls: raw.llmParallelToolCalls ?? DEFAULT_RUNTIME_CONFIG.llmParallelToolCalls,
+      llmStrictTools: raw.llmStrictTools ?? DEFAULT_RUNTIME_CONFIG.llmStrictTools,
+      llmToolChoiceRequired: raw.llmToolChoiceRequired ?? DEFAULT_RUNTIME_CONFIG.llmToolChoiceRequired,
+      agentOutputMode: raw.agentOutputMode || DEFAULT_RUNTIME_CONFIG.agentOutputMode,
+      agentNativeStrict: raw.agentNativeStrict ?? DEFAULT_RUNTIME_CONFIG.agentNativeStrict,
+      agentOutputRetries: raw.agentOutputRetries ?? DEFAULT_RUNTIME_CONFIG.agentOutputRetries,
+      agentToolRetries: raw.agentToolRetries ?? DEFAULT_RUNTIME_CONFIG.agentToolRetries,
+      agentRequestLimit: raw.agentRequestLimit ?? DEFAULT_RUNTIME_CONFIG.agentRequestLimit,
+      agentToolCallsLimit: raw.agentToolCallsLimit ?? DEFAULT_RUNTIME_CONFIG.agentToolCallsLimit,
+      agentRunTimeoutS: raw.agentRunTimeoutS ?? DEFAULT_RUNTIME_CONFIG.agentRunTimeoutS,
+      agentMaxConcurrentRuns: raw.agentMaxConcurrentRuns ?? DEFAULT_RUNTIME_CONFIG.agentMaxConcurrentRuns,
+      agentPreviewRows: raw.agentPreviewRows ?? DEFAULT_RUNTIME_CONFIG.agentPreviewRows,
+      gatewayMode: raw.gatewayMode || DEFAULT_RUNTIME_CONFIG.gatewayMode,
+      gatewayUrl: raw.gatewayUrl ?? DEFAULT_RUNTIME_CONFIG.gatewayUrl,
+      gatewayXmlStyle: raw.gatewayXmlStyle || DEFAULT_RUNTIME_CONFIG.gatewayXmlStyle,
+      gatewayConnectTimeoutS: raw.gatewayConnectTimeoutS ?? DEFAULT_RUNTIME_CONFIG.gatewayConnectTimeoutS,
+      gatewayMaxConcurrency: raw.gatewayMaxConcurrency ?? DEFAULT_RUNTIME_CONFIG.gatewayMaxConcurrency,
+      releasesKeep: raw.releasesKeep ?? DEFAULT_RUNTIME_CONFIG.releasesKeep,
+      runsKeepDays: raw.runsKeepDays ?? DEFAULT_RUNTIME_CONFIG.runsKeepDays,
+      agentQueryDefaultLimit: raw.agentQueryDefaultLimit ?? DEFAULT_RUNTIME_CONFIG.agentQueryDefaultLimit,
+      agentQueryMaxLimit: raw.agentQueryMaxLimit ?? DEFAULT_RUNTIME_CONFIG.agentQueryMaxLimit,
+      agentMaxPeriodMonths: raw.agentMaxPeriodMonths ?? DEFAULT_RUNTIME_CONFIG.agentMaxPeriodMonths,
+      chatMaxDocChars: raw.chatMaxDocChars ?? DEFAULT_RUNTIME_CONFIG.chatMaxDocChars,
+      chatMaxHistoryMessages: raw.chatMaxHistoryMessages ?? DEFAULT_RUNTIME_CONFIG.chatMaxHistoryMessages,
+      chatMaxRunCards: raw.chatMaxRunCards ?? DEFAULT_RUNTIME_CONFIG.chatMaxRunCards,
+      chatMaxMarkdownPreviewChars:
+        raw.chatMaxMarkdownPreviewChars ?? DEFAULT_RUNTIME_CONFIG.chatMaxMarkdownPreviewChars,
+      chatCompactTriggerMessages:
+        raw.chatCompactTriggerMessages ?? DEFAULT_RUNTIME_CONFIG.chatCompactTriggerMessages,
+      chatCompactKeepRecent: raw.chatCompactKeepRecent ?? DEFAULT_RUNTIME_CONFIG.chatCompactKeepRecent,
+      chatManualCompactKeepRecent:
+        raw.chatManualCompactKeepRecent ?? DEFAULT_RUNTIME_CONFIG.chatManualCompactKeepRecent,
+      chatManualCompactMinSlice:
+        raw.chatManualCompactMinSlice ?? DEFAULT_RUNTIME_CONFIG.chatManualCompactMinSlice,
+      chatMaxMemorySummaryChars:
+        raw.chatMaxMemorySummaryChars ?? DEFAULT_RUNTIME_CONFIG.chatMaxMemorySummaryChars,
+      chatMaxSummaryMsgChars: raw.chatMaxSummaryMsgChars ?? DEFAULT_RUNTIME_CONFIG.chatMaxSummaryMsgChars,
+      chatRequestLimit: raw.chatRequestLimit ?? DEFAULT_RUNTIME_CONFIG.chatRequestLimit,
+      chatToolCallsLimit: raw.chatToolCallsLimit ?? DEFAULT_RUNTIME_CONFIG.chatToolCallsLimit,
+      chatTimeoutS: raw.chatTimeoutS ?? DEFAULT_RUNTIME_CONFIG.chatTimeoutS,
+      chatSummaryRequestLimit:
+        raw.chatSummaryRequestLimit ?? DEFAULT_RUNTIME_CONFIG.chatSummaryRequestLimit,
+      chatSummaryToolCallsLimit:
+        raw.chatSummaryToolCallsLimit ?? DEFAULT_RUNTIME_CONFIG.chatSummaryToolCallsLimit,
+      chatSummaryTimeoutS: raw.chatSummaryTimeoutS ?? DEFAULT_RUNTIME_CONFIG.chatSummaryTimeoutS,
+    }
+  }
   const info: ModelInfo | null = store.modelInfo
   if (!info) return null
   return {
-    llmBaseUrl: info.baseUrl || '',
+    llmBaseUrl: info.baseUrl || DEFAULT_RUNTIME_CONFIG.llmBaseUrl,
     hasLlmApiKey: false,
     llmApiKeyMasked: '',
-    llmModel: info.model || '',
-    llmTemperature: info.temperature ?? 0.1,
-    llmMaxTokens: info.maxTokens ?? null,
-    llmTimeoutS: info.timeoutS ?? 60,
-    llmHttpRetries: info.httpRetries ?? 2,
-    llmParallelToolCalls: null,
-    llmStrictTools: null,
-    llmToolChoiceRequired: null,
-    agentOutputMode: info.outputMode || 'tool',
-    agentNativeStrict: true,
-    agentOutputRetries: info.outputRetries ?? 2,
-    agentToolRetries: info.toolRetries ?? 2,
-    agentRequestLimit: info.requestLimit ?? 12,
-    agentToolCallsLimit: info.toolCallsLimit ?? 16,
-    agentRunTimeoutS: info.runTimeoutS ?? 120,
-    agentMaxConcurrentRuns: info.maxConcurrentRuns ?? 4,
-    agentPreviewRows: 50,
-    gatewayMode: info.gatewayMode || 'mock',
-    gatewayUrl: info.gatewayUrl || '',
+    llmModel: info.model || DEFAULT_RUNTIME_CONFIG.llmModel,
+    llmTemperature: info.temperature ?? DEFAULT_RUNTIME_CONFIG.llmTemperature,
+    llmMaxTokens: info.maxTokens ?? DEFAULT_RUNTIME_CONFIG.llmMaxTokens,
+    llmTimeoutS: info.timeoutS ?? DEFAULT_RUNTIME_CONFIG.llmTimeoutS,
+    llmHttpRetries: info.httpRetries ?? DEFAULT_RUNTIME_CONFIG.llmHttpRetries,
+    llmParallelToolCalls: DEFAULT_RUNTIME_CONFIG.llmParallelToolCalls,
+    llmStrictTools: DEFAULT_RUNTIME_CONFIG.llmStrictTools,
+    llmToolChoiceRequired: DEFAULT_RUNTIME_CONFIG.llmToolChoiceRequired,
+    agentOutputMode: info.outputMode || DEFAULT_RUNTIME_CONFIG.agentOutputMode,
+    agentNativeStrict: DEFAULT_RUNTIME_CONFIG.agentNativeStrict,
+    agentOutputRetries: info.outputRetries ?? DEFAULT_RUNTIME_CONFIG.agentOutputRetries,
+    agentToolRetries: info.toolRetries ?? DEFAULT_RUNTIME_CONFIG.agentToolRetries,
+    agentRequestLimit: info.requestLimit ?? DEFAULT_RUNTIME_CONFIG.agentRequestLimit,
+    agentToolCallsLimit: info.toolCallsLimit ?? DEFAULT_RUNTIME_CONFIG.agentToolCallsLimit,
+    agentRunTimeoutS: info.runTimeoutS ?? DEFAULT_RUNTIME_CONFIG.agentRunTimeoutS,
+    agentMaxConcurrentRuns: info.maxConcurrentRuns ?? DEFAULT_RUNTIME_CONFIG.agentMaxConcurrentRuns,
+    agentPreviewRows: DEFAULT_RUNTIME_CONFIG.agentPreviewRows,
+    gatewayMode: info.gatewayMode || DEFAULT_RUNTIME_CONFIG.gatewayMode,
+    gatewayUrl: info.gatewayUrl || DEFAULT_RUNTIME_CONFIG.gatewayUrl,
     hasGatewayAppId: false,
     gatewayAppIdMasked: '',
     hasGatewayAccessToken: false,
     gatewayAccessTokenMasked: '',
-    gatewayXmlStyle: info.gatewayXmlStyle || 'java',
-    gatewayConnectTimeoutS: info.gatewayConnectTimeoutS ?? 5,
+    gatewayXmlStyle: info.gatewayXmlStyle || DEFAULT_RUNTIME_CONFIG.gatewayXmlStyle,
+    gatewayConnectTimeoutS:
+      info.gatewayConnectTimeoutS ?? DEFAULT_RUNTIME_CONFIG.gatewayConnectTimeoutS,
+    gatewayMaxConcurrency:
+      info.gatewayMaxConcurrency ?? DEFAULT_RUNTIME_CONFIG.gatewayMaxConcurrency,
+    releasesKeep: info.releasesKeep ?? DEFAULT_RUNTIME_CONFIG.releasesKeep,
+    runsKeepDays: info.runsKeepDays ?? DEFAULT_RUNTIME_CONFIG.runsKeepDays,
+    agentQueryDefaultLimit:
+      info.queryDefaultLimit ?? DEFAULT_RUNTIME_CONFIG.agentQueryDefaultLimit,
+    agentQueryMaxLimit: info.queryMaxLimit ?? DEFAULT_RUNTIME_CONFIG.agentQueryMaxLimit,
+    agentMaxPeriodMonths: info.maxPeriodMonths ?? DEFAULT_RUNTIME_CONFIG.agentMaxPeriodMonths,
+    chatMaxDocChars: DEFAULT_RUNTIME_CONFIG.chatMaxDocChars,
+    chatMaxHistoryMessages:
+      info.chatMaxHistoryMessages ?? DEFAULT_RUNTIME_CONFIG.chatMaxHistoryMessages,
+    chatMaxRunCards: DEFAULT_RUNTIME_CONFIG.chatMaxRunCards,
+    chatMaxMarkdownPreviewChars: DEFAULT_RUNTIME_CONFIG.chatMaxMarkdownPreviewChars,
+    chatCompactTriggerMessages:
+      info.chatCompactTriggerMessages ?? DEFAULT_RUNTIME_CONFIG.chatCompactTriggerMessages,
+    chatCompactKeepRecent:
+      info.chatCompactKeepRecent ?? DEFAULT_RUNTIME_CONFIG.chatCompactKeepRecent,
+    chatManualCompactKeepRecent: DEFAULT_RUNTIME_CONFIG.chatManualCompactKeepRecent,
+    chatManualCompactMinSlice: DEFAULT_RUNTIME_CONFIG.chatManualCompactMinSlice,
+    chatMaxMemorySummaryChars: DEFAULT_RUNTIME_CONFIG.chatMaxMemorySummaryChars,
+    chatMaxSummaryMsgChars: DEFAULT_RUNTIME_CONFIG.chatMaxSummaryMsgChars,
+    chatRequestLimit: DEFAULT_RUNTIME_CONFIG.chatRequestLimit,
+    chatToolCallsLimit: DEFAULT_RUNTIME_CONFIG.chatToolCallsLimit,
+    chatTimeoutS: DEFAULT_RUNTIME_CONFIG.chatTimeoutS,
+    chatSummaryRequestLimit: DEFAULT_RUNTIME_CONFIG.chatSummaryRequestLimit,
+    chatSummaryToolCallsLimit: DEFAULT_RUNTIME_CONFIG.chatSummaryToolCallsLimit,
+    chatSummaryTimeoutS: DEFAULT_RUNTIME_CONFIG.chatSummaryTimeoutS,
     hasReportApiKeys: false,
     reportApiKeysMasked: '',
     reportApiKeyCount: 0,
@@ -647,36 +823,126 @@ function handleClearApiKey() {
 
 function populateRuntimeForm(cfg: RuntimeConfig | null, note = '') {
   if (!cfg) return
-  runtimeForm.gatewayMode = cfg.gatewayMode || 'mock'
-  runtimeForm.gatewayXmlStyle = cfg.gatewayXmlStyle || 'java'
-  runtimeForm.gatewayUrl = cfg.gatewayUrl || ''
-  runtimeForm.gatewayConnectTimeoutS = cfg.gatewayConnectTimeoutS ?? 5
+  runtimeForm.gatewayMode = cfg.gatewayMode || DEFAULT_RUNTIME_CONFIG.gatewayMode
+  runtimeForm.gatewayXmlStyle = cfg.gatewayXmlStyle || DEFAULT_RUNTIME_CONFIG.gatewayXmlStyle
+  runtimeForm.gatewayUrl = cfg.gatewayUrl || DEFAULT_RUNTIME_CONFIG.gatewayUrl
+  runtimeForm.gatewayConnectTimeoutS =
+    cfg.gatewayConnectTimeoutS ?? DEFAULT_RUNTIME_CONFIG.gatewayConnectTimeoutS
+  runtimeForm.gatewayMaxConcurrency =
+    cfg.gatewayMaxConcurrency ?? DEFAULT_RUNTIME_CONFIG.gatewayMaxConcurrency
   runtimeForm.gatewayAppIdInput = ''
   runtimeForm.clearGatewayAppId = false
   runtimeForm.gatewayAccessTokenInput = ''
   runtimeForm.clearGatewayAccessToken = false
-  runtimeForm.llmModel = cfg.llmModel || ''
-  runtimeForm.llmBaseUrl = cfg.llmBaseUrl || ''
+  runtimeForm.llmModel = cfg.llmModel || DEFAULT_RUNTIME_CONFIG.llmModel
+  runtimeForm.llmBaseUrl = cfg.llmBaseUrl || DEFAULT_RUNTIME_CONFIG.llmBaseUrl
   runtimeForm.llmApiKeyInput = ''
   runtimeForm.clearLlmApiKey = false
-  runtimeForm.llmTemperature = cfg.llmTemperature ?? 0.1
+  runtimeForm.llmTemperature = cfg.llmTemperature ?? DEFAULT_RUNTIME_CONFIG.llmTemperature
   runtimeForm.llmMaxTokensStr =
     cfg.llmMaxTokens !== null && cfg.llmMaxTokens !== undefined ? String(cfg.llmMaxTokens) : ''
-  runtimeForm.llmTimeoutS = cfg.llmTimeoutS ?? 60
-  runtimeForm.llmHttpRetries = cfg.llmHttpRetries ?? 2
+  runtimeForm.llmTimeoutS = cfg.llmTimeoutS ?? DEFAULT_RUNTIME_CONFIG.llmTimeoutS
+  runtimeForm.llmHttpRetries = cfg.llmHttpRetries ?? DEFAULT_RUNTIME_CONFIG.llmHttpRetries
   runtimeForm.llmParallelToolCalls = triFromBool(cfg.llmParallelToolCalls)
   runtimeForm.llmStrictTools = triFromBool(cfg.llmStrictTools)
   runtimeForm.llmToolChoiceRequired = triFromBool(cfg.llmToolChoiceRequired)
-  runtimeForm.agentOutputMode = cfg.agentOutputMode || 'tool'
-  runtimeForm.agentNativeStrict = Boolean(cfg.agentNativeStrict)
-  runtimeForm.agentOutputRetries = cfg.agentOutputRetries ?? 2
-  runtimeForm.agentToolRetries = cfg.agentToolRetries ?? 2
-  runtimeForm.agentRequestLimit = cfg.agentRequestLimit ?? 12
-  runtimeForm.agentToolCallsLimit = cfg.agentToolCallsLimit ?? 16
-  runtimeForm.agentRunTimeoutS = cfg.agentRunTimeoutS ?? 120
-  runtimeForm.agentMaxConcurrentRuns = cfg.agentMaxConcurrentRuns ?? 4
-  runtimeForm.agentPreviewRows = cfg.agentPreviewRows ?? 50
+  runtimeForm.agentOutputMode = cfg.agentOutputMode || DEFAULT_RUNTIME_CONFIG.agentOutputMode
+  runtimeForm.agentNativeStrict =
+    cfg.agentNativeStrict ?? DEFAULT_RUNTIME_CONFIG.agentNativeStrict
+  runtimeForm.agentOutputRetries =
+    cfg.agentOutputRetries ?? DEFAULT_RUNTIME_CONFIG.agentOutputRetries
+  runtimeForm.agentToolRetries = cfg.agentToolRetries ?? DEFAULT_RUNTIME_CONFIG.agentToolRetries
+  runtimeForm.agentRequestLimit =
+    cfg.agentRequestLimit ?? DEFAULT_RUNTIME_CONFIG.agentRequestLimit
+  runtimeForm.agentToolCallsLimit =
+    cfg.agentToolCallsLimit ?? DEFAULT_RUNTIME_CONFIG.agentToolCallsLimit
+  runtimeForm.agentRunTimeoutS = cfg.agentRunTimeoutS ?? DEFAULT_RUNTIME_CONFIG.agentRunTimeoutS
+  runtimeForm.agentMaxConcurrentRuns =
+    cfg.agentMaxConcurrentRuns ?? DEFAULT_RUNTIME_CONFIG.agentMaxConcurrentRuns
+  runtimeForm.agentPreviewRows = cfg.agentPreviewRows ?? DEFAULT_RUNTIME_CONFIG.agentPreviewRows
+  runtimeForm.releasesKeep = cfg.releasesKeep ?? DEFAULT_RUNTIME_CONFIG.releasesKeep
+  runtimeForm.runsKeepDays = cfg.runsKeepDays ?? DEFAULT_RUNTIME_CONFIG.runsKeepDays
+  runtimeForm.agentQueryDefaultLimit =
+    cfg.agentQueryDefaultLimit ?? DEFAULT_RUNTIME_CONFIG.agentQueryDefaultLimit
+  runtimeForm.agentQueryMaxLimit =
+    cfg.agentQueryMaxLimit ?? DEFAULT_RUNTIME_CONFIG.agentQueryMaxLimit
+  runtimeForm.agentMaxPeriodMonths =
+    cfg.agentMaxPeriodMonths ?? DEFAULT_RUNTIME_CONFIG.agentMaxPeriodMonths
+  runtimeForm.chatMaxDocChars = cfg.chatMaxDocChars ?? DEFAULT_RUNTIME_CONFIG.chatMaxDocChars
+  runtimeForm.chatMaxHistoryMessages =
+    cfg.chatMaxHistoryMessages ?? DEFAULT_RUNTIME_CONFIG.chatMaxHistoryMessages
+  runtimeForm.chatMaxRunCards = cfg.chatMaxRunCards ?? DEFAULT_RUNTIME_CONFIG.chatMaxRunCards
+  runtimeForm.chatMaxMarkdownPreviewChars =
+    cfg.chatMaxMarkdownPreviewChars ?? DEFAULT_RUNTIME_CONFIG.chatMaxMarkdownPreviewChars
+  runtimeForm.chatCompactTriggerMessages =
+    cfg.chatCompactTriggerMessages ?? DEFAULT_RUNTIME_CONFIG.chatCompactTriggerMessages
+  runtimeForm.chatCompactKeepRecent =
+    cfg.chatCompactKeepRecent ?? DEFAULT_RUNTIME_CONFIG.chatCompactKeepRecent
+  runtimeForm.chatManualCompactKeepRecent =
+    cfg.chatManualCompactKeepRecent ?? DEFAULT_RUNTIME_CONFIG.chatManualCompactKeepRecent
+  runtimeForm.chatManualCompactMinSlice =
+    cfg.chatManualCompactMinSlice ?? DEFAULT_RUNTIME_CONFIG.chatManualCompactMinSlice
+  runtimeForm.chatMaxMemorySummaryChars =
+    cfg.chatMaxMemorySummaryChars ?? DEFAULT_RUNTIME_CONFIG.chatMaxMemorySummaryChars
+  runtimeForm.chatMaxSummaryMsgChars =
+    cfg.chatMaxSummaryMsgChars ?? DEFAULT_RUNTIME_CONFIG.chatMaxSummaryMsgChars
+  runtimeForm.chatRequestLimit = cfg.chatRequestLimit ?? DEFAULT_RUNTIME_CONFIG.chatRequestLimit
+  runtimeForm.chatToolCallsLimit =
+    cfg.chatToolCallsLimit ?? DEFAULT_RUNTIME_CONFIG.chatToolCallsLimit
+  runtimeForm.chatTimeoutS = cfg.chatTimeoutS ?? DEFAULT_RUNTIME_CONFIG.chatTimeoutS
+  runtimeForm.chatSummaryRequestLimit =
+    cfg.chatSummaryRequestLimit ?? DEFAULT_RUNTIME_CONFIG.chatSummaryRequestLimit
+  runtimeForm.chatSummaryToolCallsLimit =
+    cfg.chatSummaryToolCallsLimit ?? DEFAULT_RUNTIME_CONFIG.chatSummaryToolCallsLimit
+  runtimeForm.chatSummaryTimeoutS =
+    cfg.chatSummaryTimeoutS ?? DEFAULT_RUNTIME_CONFIG.chatSummaryTimeoutS
   runtimeForm.note = note
+}
+
+function handleResetDefaultParams() {
+  // 只重置数值/配额/枚举模式为默认值，绝不清空网关 URL、大模型 URL、模型名及已填密钥
+  runtimeForm.gatewayMode = DEFAULT_RUNTIME_CONFIG.gatewayMode
+  runtimeForm.gatewayXmlStyle = DEFAULT_RUNTIME_CONFIG.gatewayXmlStyle
+  runtimeForm.gatewayConnectTimeoutS = DEFAULT_RUNTIME_CONFIG.gatewayConnectTimeoutS
+  runtimeForm.gatewayMaxConcurrency = DEFAULT_RUNTIME_CONFIG.gatewayMaxConcurrency
+  runtimeForm.llmTemperature = DEFAULT_RUNTIME_CONFIG.llmTemperature
+  runtimeForm.llmMaxTokensStr = ''
+  runtimeForm.llmTimeoutS = DEFAULT_RUNTIME_CONFIG.llmTimeoutS
+  runtimeForm.llmHttpRetries = DEFAULT_RUNTIME_CONFIG.llmHttpRetries
+  runtimeForm.llmParallelToolCalls = 'null'
+  runtimeForm.llmStrictTools = 'null'
+  runtimeForm.llmToolChoiceRequired = 'null'
+  runtimeForm.agentOutputMode = DEFAULT_RUNTIME_CONFIG.agentOutputMode
+  runtimeForm.agentNativeStrict = DEFAULT_RUNTIME_CONFIG.agentNativeStrict
+  runtimeForm.agentOutputRetries = DEFAULT_RUNTIME_CONFIG.agentOutputRetries
+  runtimeForm.agentToolRetries = DEFAULT_RUNTIME_CONFIG.agentToolRetries
+  runtimeForm.agentRequestLimit = DEFAULT_RUNTIME_CONFIG.agentRequestLimit
+  runtimeForm.agentToolCallsLimit = DEFAULT_RUNTIME_CONFIG.agentToolCallsLimit
+  runtimeForm.agentRunTimeoutS = DEFAULT_RUNTIME_CONFIG.agentRunTimeoutS
+  runtimeForm.agentMaxConcurrentRuns = DEFAULT_RUNTIME_CONFIG.agentMaxConcurrentRuns
+  runtimeForm.agentPreviewRows = DEFAULT_RUNTIME_CONFIG.agentPreviewRows
+  runtimeForm.releasesKeep = DEFAULT_RUNTIME_CONFIG.releasesKeep
+  runtimeForm.runsKeepDays = DEFAULT_RUNTIME_CONFIG.runsKeepDays
+  runtimeForm.agentQueryDefaultLimit = DEFAULT_RUNTIME_CONFIG.agentQueryDefaultLimit
+  runtimeForm.agentQueryMaxLimit = DEFAULT_RUNTIME_CONFIG.agentQueryMaxLimit
+  runtimeForm.agentMaxPeriodMonths = DEFAULT_RUNTIME_CONFIG.agentMaxPeriodMonths
+  runtimeForm.chatMaxDocChars = DEFAULT_RUNTIME_CONFIG.chatMaxDocChars
+  runtimeForm.chatMaxHistoryMessages = DEFAULT_RUNTIME_CONFIG.chatMaxHistoryMessages
+  runtimeForm.chatMaxRunCards = DEFAULT_RUNTIME_CONFIG.chatMaxRunCards
+  runtimeForm.chatMaxMarkdownPreviewChars = DEFAULT_RUNTIME_CONFIG.chatMaxMarkdownPreviewChars
+  runtimeForm.chatCompactTriggerMessages = DEFAULT_RUNTIME_CONFIG.chatCompactTriggerMessages
+  runtimeForm.chatCompactKeepRecent = DEFAULT_RUNTIME_CONFIG.chatCompactKeepRecent
+  runtimeForm.chatManualCompactKeepRecent = DEFAULT_RUNTIME_CONFIG.chatManualCompactKeepRecent
+  runtimeForm.chatManualCompactMinSlice = DEFAULT_RUNTIME_CONFIG.chatManualCompactMinSlice
+  runtimeForm.chatMaxMemorySummaryChars = DEFAULT_RUNTIME_CONFIG.chatMaxMemorySummaryChars
+  runtimeForm.chatMaxSummaryMsgChars = DEFAULT_RUNTIME_CONFIG.chatMaxSummaryMsgChars
+  runtimeForm.chatRequestLimit = DEFAULT_RUNTIME_CONFIG.chatRequestLimit
+  runtimeForm.chatToolCallsLimit = DEFAULT_RUNTIME_CONFIG.chatToolCallsLimit
+  runtimeForm.chatTimeoutS = DEFAULT_RUNTIME_CONFIG.chatTimeoutS
+  runtimeForm.chatSummaryRequestLimit = DEFAULT_RUNTIME_CONFIG.chatSummaryRequestLimit
+  runtimeForm.chatSummaryToolCallsLimit = DEFAULT_RUNTIME_CONFIG.chatSummaryToolCallsLimit
+  runtimeForm.chatSummaryTimeoutS = DEFAULT_RUNTIME_CONFIG.chatSummaryTimeoutS
+  store.showToast('已重置数值/配额/枚举模式为默认值（保留服务地址、模型名及密钥），点击「保存热更新」后生效', 'info')
 }
 
 watch(
@@ -741,14 +1007,14 @@ async function handleSaveRuntimeConfig() {
     parsedMaxTokens = n
   }
 
-  function parseRequiredNum(
+  function parseNumOrDefault(
     raw: unknown,
+    defaultVal: number,
     label: string,
     opts: { int?: boolean; min?: number; max?: number; gtZero?: boolean } = {},
   ): number | null {
     if (raw === '' || raw === null || raw === undefined || (typeof raw === 'string' && raw.trim() === '')) {
-      store.showToast(`请填写有效的${label}`, 'warning')
-      return null
+      return defaultVal
     }
     const n = Number(raw)
     if (!Number.isFinite(n)) {
@@ -776,34 +1042,260 @@ async function handleSaveRuntimeConfig() {
     return n
   }
 
-  const gatewayConnectTimeoutS = parseRequiredNum(runtimeForm.gatewayConnectTimeoutS, '网关连接超时 (gatewayConnectTimeoutS)', { gtZero: true })
+  const gatewayConnectTimeoutS = parseNumOrDefault(
+    runtimeForm.gatewayConnectTimeoutS,
+    DEFAULT_RUNTIME_CONFIG.gatewayConnectTimeoutS,
+    '网关连接超时 (gatewayConnectTimeoutS)',
+    { gtZero: true },
+  )
   if (gatewayConnectTimeoutS === null) return
-  const llmTemperature = parseRequiredNum(runtimeForm.llmTemperature, '采样温度 (llmTemperature)', { min: 0, max: 2 })
+  const gatewayMaxConcurrency = parseNumOrDefault(
+    runtimeForm.gatewayMaxConcurrency,
+    DEFAULT_RUNTIME_CONFIG.gatewayMaxConcurrency,
+    '网关最大并发连接数 (gatewayMaxConcurrency)',
+    { int: true, min: 1, max: 512 },
+  )
+  if (gatewayMaxConcurrency === null) return
+  const llmTemperature = parseNumOrDefault(
+    runtimeForm.llmTemperature,
+    DEFAULT_RUNTIME_CONFIG.llmTemperature,
+    '采样温度 (llmTemperature)',
+    { min: 0, max: 2 },
+  )
   if (llmTemperature === null) return
-  const llmTimeoutS = parseRequiredNum(runtimeForm.llmTimeoutS, '模型请求超时 (llmTimeoutS)', { gtZero: true })
+  const llmTimeoutS = parseNumOrDefault(
+    runtimeForm.llmTimeoutS,
+    DEFAULT_RUNTIME_CONFIG.llmTimeoutS,
+    '模型请求超时 (llmTimeoutS)',
+    { gtZero: true },
+  )
   if (llmTimeoutS === null) return
-  const llmHttpRetries = parseRequiredNum(runtimeForm.llmHttpRetries, '模型 HTTP 重试次数 (llmHttpRetries)', { int: true, min: 0, max: 10 })
+  const llmHttpRetries = parseNumOrDefault(
+    runtimeForm.llmHttpRetries,
+    DEFAULT_RUNTIME_CONFIG.llmHttpRetries,
+    '模型 HTTP 重试次数 (llmHttpRetries)',
+    { int: true, min: 0, max: 10 },
+  )
   if (llmHttpRetries === null) return
-  const agentOutputRetries = parseRequiredNum(runtimeForm.agentOutputRetries, '校验退回重试上限 (agentOutputRetries)', { int: true, min: 0, max: 10 })
+  const agentOutputRetries = parseNumOrDefault(
+    runtimeForm.agentOutputRetries,
+    DEFAULT_RUNTIME_CONFIG.agentOutputRetries,
+    '校验退回重试上限 (agentOutputRetries)',
+    { int: true, min: 0, max: 10 },
+  )
   if (agentOutputRetries === null) return
-  const agentToolRetries = parseRequiredNum(runtimeForm.agentToolRetries, '工具报错重试上限 (agentToolRetries)', { int: true, min: 0, max: 10 })
+  const agentToolRetries = parseNumOrDefault(
+    runtimeForm.agentToolRetries,
+    DEFAULT_RUNTIME_CONFIG.agentToolRetries,
+    '工具报错重试上限 (agentToolRetries)',
+    { int: true, min: 0, max: 10 },
+  )
   if (agentToolRetries === null) return
-  const agentRequestLimit = parseRequiredNum(runtimeForm.agentRequestLimit, '单次请求轮数上限 (agentRequestLimit)', { int: true, min: 1, max: 200 })
+  const agentRequestLimit = parseNumOrDefault(
+    runtimeForm.agentRequestLimit,
+    DEFAULT_RUNTIME_CONFIG.agentRequestLimit,
+    '单次请求轮数上限 (agentRequestLimit)',
+    { int: true, min: 1, max: 200 },
+  )
   if (agentRequestLimit === null) return
-  const agentToolCallsLimit = parseRequiredNum(runtimeForm.agentToolCallsLimit, '工具调用次数上限 (agentToolCallsLimit)', { int: true, min: 1, max: 500 })
+  const agentToolCallsLimit = parseNumOrDefault(
+    runtimeForm.agentToolCallsLimit,
+    DEFAULT_RUNTIME_CONFIG.agentToolCallsLimit,
+    '工具调用次数上限 (agentToolCallsLimit)',
+    { int: true, min: 1, max: 500 },
+  )
   if (agentToolCallsLimit === null) return
-  const agentRunTimeoutS = parseRequiredNum(runtimeForm.agentRunTimeoutS, '单次核查总超时 (agentRunTimeoutS)', { gtZero: true })
+  const agentRunTimeoutS = parseNumOrDefault(
+    runtimeForm.agentRunTimeoutS,
+    DEFAULT_RUNTIME_CONFIG.agentRunTimeoutS,
+    '单次核查总超时 (agentRunTimeoutS)',
+    { gtZero: true },
+  )
   if (agentRunTimeoutS === null) return
-  const agentMaxConcurrentRuns = parseRequiredNum(runtimeForm.agentMaxConcurrentRuns, '最大并发运行路数 (agentMaxConcurrentRuns)', { int: true, min: 1, max: 128 })
+  const agentMaxConcurrentRuns = parseNumOrDefault(
+    runtimeForm.agentMaxConcurrentRuns,
+    DEFAULT_RUNTIME_CONFIG.agentMaxConcurrentRuns,
+    '最大并发运行路数 (agentMaxConcurrentRuns)',
+    { int: true, min: 1, max: 128 },
+  )
   if (agentMaxConcurrentRuns === null) return
-  const agentPreviewRows = parseRequiredNum(runtimeForm.agentPreviewRows, '工具预览行数上限 (agentPreviewRows)', { int: true, min: 1, max: 200 })
+  const agentPreviewRows = parseNumOrDefault(
+    runtimeForm.agentPreviewRows,
+    DEFAULT_RUNTIME_CONFIG.agentPreviewRows,
+    '工具预览行数上限 (agentPreviewRows)',
+    { int: true, min: 1, max: 200 },
+  )
   if (agentPreviewRows === null) return
+
+  const releasesKeep = parseNumOrDefault(
+    runtimeForm.releasesKeep,
+    DEFAULT_RUNTIME_CONFIG.releasesKeep,
+    '发布快照保留数 (releasesKeep)',
+    { int: true, min: 1, max: 500 },
+  )
+  if (releasesKeep === null) return
+  const runsKeepDays = parseNumOrDefault(
+    runtimeForm.runsKeepDays,
+    DEFAULT_RUNTIME_CONFIG.runsKeepDays,
+    '运行与会话留存天数 (runsKeepDays)',
+    { int: true, min: 0, max: 3650 },
+  )
+  if (runsKeepDays === null) return
+  const agentQueryDefaultLimit = parseNumOrDefault(
+    runtimeForm.agentQueryDefaultLimit,
+    DEFAULT_RUNTIME_CONFIG.agentQueryDefaultLimit,
+    '结果筛选默认行数 (agentQueryDefaultLimit)',
+    { int: true, min: 1, max: 500 },
+  )
+  if (agentQueryDefaultLimit === null) return
+  const agentQueryMaxLimit = parseNumOrDefault(
+    runtimeForm.agentQueryMaxLimit,
+    DEFAULT_RUNTIME_CONFIG.agentQueryMaxLimit,
+    '结果筛选最大行数 (agentQueryMaxLimit)',
+    { int: true, min: 1, max: 1000 },
+  )
+  if (agentQueryMaxLimit === null) return
+  if (agentQueryMaxLimit < agentQueryDefaultLimit) {
+    store.showToast(
+      '结果筛选最大行数 (agentQueryMaxLimit) 必须大于或等于默认行数 (agentQueryDefaultLimit)',
+      'warning',
+    )
+    return
+  }
+  const agentMaxPeriodMonths = parseNumOrDefault(
+    runtimeForm.agentMaxPeriodMonths,
+    DEFAULT_RUNTIME_CONFIG.agentMaxPeriodMonths,
+    '多账期展开跨度上限 (agentMaxPeriodMonths)',
+    { int: true, min: 1, max: 120 },
+  )
+  if (agentMaxPeriodMonths === null) return
+
+  const chatMaxDocChars = parseNumOrDefault(
+    runtimeForm.chatMaxDocChars,
+    DEFAULT_RUNTIME_CONFIG.chatMaxDocChars,
+    '对话单据注入字符上限 (chatMaxDocChars)',
+    { int: true, min: 500, max: 200000 },
+  )
+  if (chatMaxDocChars === null) return
+  const chatMaxHistoryMessages = parseNumOrDefault(
+    runtimeForm.chatMaxHistoryMessages,
+    DEFAULT_RUNTIME_CONFIG.chatMaxHistoryMessages,
+    '对话历史滑窗条数 (chatMaxHistoryMessages)',
+    { int: true, min: 1, max: 200 },
+  )
+  if (chatMaxHistoryMessages === null) return
+  const chatMaxRunCards = parseNumOrDefault(
+    runtimeForm.chatMaxRunCards,
+    DEFAULT_RUNTIME_CONFIG.chatMaxRunCards,
+    '历史运行卡片保留数 (chatMaxRunCards)',
+    { int: true, min: 1, max: 50 },
+  )
+  if (chatMaxRunCards === null) return
+  const chatMaxMarkdownPreviewChars = parseNumOrDefault(
+    runtimeForm.chatMaxMarkdownPreviewChars,
+    DEFAULT_RUNTIME_CONFIG.chatMaxMarkdownPreviewChars,
+    '报告预览截取字符上限 (chatMaxMarkdownPreviewChars)',
+    { int: true, min: 100, max: 20000 },
+  )
+  if (chatMaxMarkdownPreviewChars === null) return
+  const chatCompactTriggerMessages = parseNumOrDefault(
+    runtimeForm.chatCompactTriggerMessages,
+    DEFAULT_RUNTIME_CONFIG.chatCompactTriggerMessages,
+    '自动压缩触发阈值 (chatCompactTriggerMessages)',
+    { int: true, min: 2, max: 500 },
+  )
+  if (chatCompactTriggerMessages === null) return
+  const chatCompactKeepRecent = parseNumOrDefault(
+    runtimeForm.chatCompactKeepRecent,
+    DEFAULT_RUNTIME_CONFIG.chatCompactKeepRecent,
+    '自动压缩保留原文条数 (chatCompactKeepRecent)',
+    { int: true, min: 1, max: 200 },
+  )
+  if (chatCompactKeepRecent === null) return
+  if (chatCompactTriggerMessages <= chatCompactKeepRecent) {
+    store.showToast(
+      '自动压缩触发阈值 (chatCompactTriggerMessages) 必须严格大于保留原文条数 (chatCompactKeepRecent)',
+      'warning',
+    )
+    return
+  }
+  const chatManualCompactKeepRecent = parseNumOrDefault(
+    runtimeForm.chatManualCompactKeepRecent,
+    DEFAULT_RUNTIME_CONFIG.chatManualCompactKeepRecent,
+    '手动压缩保留原文条数 (chatManualCompactKeepRecent)',
+    { int: true, min: 1, max: 200 },
+  )
+  if (chatManualCompactKeepRecent === null) return
+  const chatManualCompactMinSlice = parseNumOrDefault(
+    runtimeForm.chatManualCompactMinSlice,
+    DEFAULT_RUNTIME_CONFIG.chatManualCompactMinSlice,
+    '手动压缩最小归档切片 (chatManualCompactMinSlice)',
+    { int: true, min: 1, max: 100 },
+  )
+  if (chatManualCompactMinSlice === null) return
+  const chatMaxMemorySummaryChars = parseNumOrDefault(
+    runtimeForm.chatMaxMemorySummaryChars,
+    DEFAULT_RUNTIME_CONFIG.chatMaxMemorySummaryChars,
+    '记忆摘要长度上限 (chatMaxMemorySummaryChars)',
+    { int: true, min: 200, max: 10000 },
+  )
+  if (chatMaxMemorySummaryChars === null) return
+  const chatMaxSummaryMsgChars = parseNumOrDefault(
+    runtimeForm.chatMaxSummaryMsgChars,
+    DEFAULT_RUNTIME_CONFIG.chatMaxSummaryMsgChars,
+    '待压缩单条截取上限 (chatMaxSummaryMsgChars)',
+    { int: true, min: 100, max: 10000 },
+  )
+  if (chatMaxSummaryMsgChars === null) return
+  const chatRequestLimit = parseNumOrDefault(
+    runtimeForm.chatRequestLimit,
+    DEFAULT_RUNTIME_CONFIG.chatRequestLimit,
+    '对话请求轮数上限 (chatRequestLimit)',
+    { int: true, min: 1, max: 50 },
+  )
+  if (chatRequestLimit === null) return
+  const chatToolCallsLimit = parseNumOrDefault(
+    runtimeForm.chatToolCallsLimit,
+    DEFAULT_RUNTIME_CONFIG.chatToolCallsLimit,
+    '对话工具调用上限 (chatToolCallsLimit)',
+    { int: true, min: 1, max: 100 },
+  )
+  if (chatToolCallsLimit === null) return
+  const chatTimeoutS = parseNumOrDefault(
+    runtimeForm.chatTimeoutS,
+    DEFAULT_RUNTIME_CONFIG.chatTimeoutS,
+    '对话单次超时 (chatTimeoutS)',
+    { gtZero: true },
+  )
+  if (chatTimeoutS === null) return
+  const chatSummaryRequestLimit = parseNumOrDefault(
+    runtimeForm.chatSummaryRequestLimit,
+    DEFAULT_RUNTIME_CONFIG.chatSummaryRequestLimit,
+    '摘要请求轮数上限 (chatSummaryRequestLimit)',
+    { int: true, min: 1, max: 20 },
+  )
+  if (chatSummaryRequestLimit === null) return
+  const chatSummaryToolCallsLimit = parseNumOrDefault(
+    runtimeForm.chatSummaryToolCallsLimit,
+    DEFAULT_RUNTIME_CONFIG.chatSummaryToolCallsLimit,
+    '摘要工具调用上限 (chatSummaryToolCallsLimit)',
+    { int: true, min: 1, max: 30 },
+  )
+  if (chatSummaryToolCallsLimit === null) return
+  const chatSummaryTimeoutS = parseNumOrDefault(
+    runtimeForm.chatSummaryTimeoutS,
+    DEFAULT_RUNTIME_CONFIG.chatSummaryTimeoutS,
+    '摘要生成超时 (chatSummaryTimeoutS)',
+    { gtZero: true },
+  )
+  if (chatSummaryTimeoutS === null) return
 
   const payload: RuntimeConfigUpdatePayload = {
     gatewayMode: runtimeForm.gatewayMode,
     gatewayXmlStyle: runtimeForm.gatewayXmlStyle,
     gatewayUrl: runtimeForm.gatewayUrl.trim(),
     gatewayConnectTimeoutS,
+    gatewayMaxConcurrency,
     llmModel: runtimeForm.llmModel.trim(),
     llmBaseUrl: runtimeForm.llmBaseUrl.trim(),
     llmTemperature,
@@ -822,6 +1314,27 @@ async function handleSaveRuntimeConfig() {
     agentRunTimeoutS,
     agentMaxConcurrentRuns,
     agentPreviewRows,
+    releasesKeep,
+    runsKeepDays,
+    agentQueryDefaultLimit,
+    agentQueryMaxLimit,
+    agentMaxPeriodMonths,
+    chatMaxDocChars,
+    chatMaxHistoryMessages,
+    chatMaxRunCards,
+    chatMaxMarkdownPreviewChars,
+    chatCompactTriggerMessages,
+    chatCompactKeepRecent,
+    chatManualCompactKeepRecent,
+    chatManualCompactMinSlice,
+    chatMaxMemorySummaryChars,
+    chatMaxSummaryMsgChars,
+    chatRequestLimit,
+    chatToolCallsLimit,
+    chatTimeoutS,
+    chatSummaryRequestLimit,
+    chatSummaryToolCallsLimit,
+    chatSummaryTimeoutS,
     note: runtimeForm.note.trim(),
   }
 
@@ -886,15 +1399,23 @@ const gatewaySpecRows = computed(() => {
   if (!cfg) return []
   return [
     { label: '统一网关接入模式', value: cfg.gatewayMode === 'live' ? 'live（真实网关）' : 'mock（本地样例）' },
-    { label: '统一 XML 报文风格', value: cfg.gatewayXmlStyle || '—' },
+    { label: '统一 XML 报文风格', value: cfg.gatewayXmlStyle || DEFAULT_RUNTIME_CONFIG.gatewayXmlStyle },
     { label: '统一网关服务地址', value: cfg.gatewayUrl || '（mock 模式免配）', full: true },
-    { label: '网关连接超时', value: `${cfg.gatewayConnectTimeoutS ?? '—'} 秒` },
+    {
+      label: '网关连接超时',
+      value: `${cfg.gatewayConnectTimeoutS ?? DEFAULT_RUNTIME_CONFIG.gatewayConnectTimeoutS} 秒`,
+    },
+    {
+      label: '网关最大并发连接',
+      value: `${cfg.gatewayMaxConcurrency ?? DEFAULT_RUNTIME_CONFIG.gatewayMaxConcurrency} 并发`,
+    },
     {
       label: '网关鉴权凭据',
       value:
         cfg.hasGatewayAppId || cfg.hasGatewayAccessToken
           ? `AppId ${cfg.gatewayAppIdMasked || '未配'} · Token ${cfg.hasGatewayAccessToken ? cfg.gatewayAccessTokenMasked || '已配置' : '未配'}`
           : '未配置密钥',
+      full: true,
     },
   ]
 })
@@ -902,6 +1423,7 @@ const gatewaySpecRows = computed(() => {
 const engineSpecRows = computed(() => {
   const cfg = effectiveRuntimeConfig.value
   if (!cfg) return []
+  const keepDays = cfg.runsKeepDays ?? DEFAULT_RUNTIME_CONFIG.runsKeepDays
   return [
     { label: '推理模型名称', value: cfg.llmModel || '—', full: true },
     { label: '推理服务地址', value: cfg.llmBaseUrl || '—', full: true },
@@ -909,13 +1431,121 @@ const engineSpecRows = computed(() => {
       label: '模型 API 密钥',
       value: cfg.hasLlmApiKey ? `已配置 (${cfg.llmApiKeyMasked})` : '未配置',
     },
-    { label: '采样温度 / 最大 Token', value: `${cfg.llmTemperature} / ${cfg.llmMaxTokens ?? '不限'}` },
-    { label: '结构化输出模式', value: `${cfg.agentOutputMode}${cfg.agentNativeStrict ? ' (strict)' : ''}` },
-    { label: '模型超时 / HTTP 重试', value: `${cfg.llmTimeoutS}s / ${cfg.llmHttpRetries} 次` },
-    { label: '单次核查总超时', value: `${cfg.agentRunTimeoutS} 秒` },
-    { label: '最大并发运行配额', value: `${cfg.agentMaxConcurrentRuns} 路` },
-    { label: '请求轮数 / 工具上限', value: `${cfg.agentRequestLimit} 轮 / ${cfg.agentToolCallsLimit} 次` },
-    { label: '输出重试 / 工具重试', value: `${cfg.agentOutputRetries} 次 / ${cfg.agentToolRetries} 次` },
+    {
+      label: '采样温度 / 最大 Token',
+      value: `${cfg.llmTemperature ?? DEFAULT_RUNTIME_CONFIG.llmTemperature} / ${cfg.llmMaxTokens ?? '不限'}`,
+    },
+    {
+      label: '结构化输出模式',
+      value: `${cfg.agentOutputMode || DEFAULT_RUNTIME_CONFIG.agentOutputMode}${cfg.agentNativeStrict ? ' (strict)' : ''}`,
+    },
+    {
+      label: '模型超时 / HTTP 重试',
+      value: `${cfg.llmTimeoutS ?? DEFAULT_RUNTIME_CONFIG.llmTimeoutS}s / ${cfg.llmHttpRetries ?? DEFAULT_RUNTIME_CONFIG.llmHttpRetries} 次`,
+    },
+    {
+      label: '单次核查总超时',
+      value: `${cfg.agentRunTimeoutS ?? DEFAULT_RUNTIME_CONFIG.agentRunTimeoutS} 秒`,
+    },
+    {
+      label: '最大并发运行配额',
+      value: `${cfg.agentMaxConcurrentRuns ?? DEFAULT_RUNTIME_CONFIG.agentMaxConcurrentRuns} 路`,
+    },
+    {
+      label: '请求轮数 / 工具上限',
+      value: `${cfg.agentRequestLimit ?? DEFAULT_RUNTIME_CONFIG.agentRequestLimit} 轮 / ${cfg.agentToolCallsLimit ?? DEFAULT_RUNTIME_CONFIG.agentToolCallsLimit} 次`,
+    },
+    {
+      label: '输出重试 / 工具重试',
+      value: `${cfg.agentOutputRetries ?? DEFAULT_RUNTIME_CONFIG.agentOutputRetries} 次 / ${cfg.agentToolRetries ?? DEFAULT_RUNTIME_CONFIG.agentToolRetries} 次`,
+    },
+    {
+      label: '结果筛选默认/最大行数',
+      value: `${cfg.agentQueryDefaultLimit ?? DEFAULT_RUNTIME_CONFIG.agentQueryDefaultLimit} 行 / ${cfg.agentQueryMaxLimit ?? DEFAULT_RUNTIME_CONFIG.agentQueryMaxLimit} 行`,
+    },
+    {
+      label: '多账期展开跨度上限',
+      value: `${cfg.agentMaxPeriodMonths ?? DEFAULT_RUNTIME_CONFIG.agentMaxPeriodMonths} 个月`,
+    },
+    {
+      label: '发布快照保留数',
+      value: `最近 ${cfg.releasesKeep ?? DEFAULT_RUNTIME_CONFIG.releasesKeep} 个`,
+    },
+    {
+      label: '运行与会话留存天数',
+      value: keepDays === 0 ? '永久保留 (0 天)' : `${keepDays} 天`,
+    },
+  ]
+})
+
+const chatSpecRows = computed(() => {
+  const cfg = effectiveRuntimeConfig.value
+  if (!cfg) return []
+  return [
+    {
+      label: '单据注入字符上限',
+      value: `${cfg.chatMaxDocChars ?? DEFAULT_RUNTIME_CONFIG.chatMaxDocChars} 字符`,
+    },
+    {
+      label: '对话历史滑窗条数',
+      value: `${cfg.chatMaxHistoryMessages ?? DEFAULT_RUNTIME_CONFIG.chatMaxHistoryMessages} 条`,
+    },
+    {
+      label: '历史运行卡片保留',
+      value: `${cfg.chatMaxRunCards ?? DEFAULT_RUNTIME_CONFIG.chatMaxRunCards} 张`,
+    },
+    {
+      label: '报告预览截取上限',
+      value: `${cfg.chatMaxMarkdownPreviewChars ?? DEFAULT_RUNTIME_CONFIG.chatMaxMarkdownPreviewChars} 字符`,
+    },
+    {
+      label: '自动压缩触发阈值',
+      value: `${cfg.chatCompactTriggerMessages ?? DEFAULT_RUNTIME_CONFIG.chatCompactTriggerMessages} 条`,
+    },
+    {
+      label: '自动压缩保留原文',
+      value: `${cfg.chatCompactKeepRecent ?? DEFAULT_RUNTIME_CONFIG.chatCompactKeepRecent} 条`,
+    },
+    {
+      label: '手动压缩保留原文',
+      value: `${cfg.chatManualCompactKeepRecent ?? DEFAULT_RUNTIME_CONFIG.chatManualCompactKeepRecent} 条`,
+    },
+    {
+      label: '手动压缩最小归档',
+      value: `${cfg.chatManualCompactMinSlice ?? DEFAULT_RUNTIME_CONFIG.chatManualCompactMinSlice} 条`,
+    },
+    {
+      label: '记忆摘要长度上限',
+      value: `${cfg.chatMaxMemorySummaryChars ?? DEFAULT_RUNTIME_CONFIG.chatMaxMemorySummaryChars} 字符`,
+    },
+    {
+      label: '待压缩单条截取',
+      value: `${cfg.chatMaxSummaryMsgChars ?? DEFAULT_RUNTIME_CONFIG.chatMaxSummaryMsgChars} 字符`,
+    },
+    {
+      label: '对话请求轮数上限',
+      value: `${cfg.chatRequestLimit ?? DEFAULT_RUNTIME_CONFIG.chatRequestLimit} 轮`,
+    },
+    {
+      label: '对话工具调用上限',
+      value: `${cfg.chatToolCallsLimit ?? DEFAULT_RUNTIME_CONFIG.chatToolCallsLimit} 次`,
+    },
+    {
+      label: '对话单次超时',
+      value: `${cfg.chatTimeoutS ?? DEFAULT_RUNTIME_CONFIG.chatTimeoutS} 秒`,
+    },
+    {
+      label: '摘要请求轮数上限',
+      value: `${cfg.chatSummaryRequestLimit ?? DEFAULT_RUNTIME_CONFIG.chatSummaryRequestLimit} 轮`,
+    },
+    {
+      label: '摘要工具调用上限',
+      value: `${cfg.chatSummaryToolCallsLimit ?? DEFAULT_RUNTIME_CONFIG.chatSummaryToolCallsLimit} 次`,
+    },
+    {
+      label: '摘要生成超时',
+      value: `${cfg.chatSummaryTimeoutS ?? DEFAULT_RUNTIME_CONFIG.chatSummaryTimeoutS} 秒`,
+    },
   ]
 })
 
@@ -932,6 +1562,7 @@ const RUNTIME_KEY_LABELS: Record<string, string> = {
   gatewayUrl: '统一网关地址',
   gatewayXmlStyle: 'XML 报文风格',
   gatewayConnectTimeoutS: '网关连接超时 (秒)',
+  gatewayMaxConcurrency: '网关最大并发连接数',
   gatewayAppId: '网关 AppId',
   hasGatewayAppId: '网关 AppId 状态',
   gatewayAppIdMasked: '网关 AppId（脱敏）',
@@ -959,6 +1590,27 @@ const RUNTIME_KEY_LABELS: Record<string, string> = {
   agentRunTimeoutS: '单次核查总超时 (秒)',
   agentMaxConcurrentRuns: '最大并发运行配额',
   agentPreviewRows: '工具结果预览行数',
+  releasesKeep: '发布快照保留数',
+  runsKeepDays: '运行与会话留存天数',
+  agentQueryDefaultLimit: '结果筛选默认行数',
+  agentQueryMaxLimit: '结果筛选最大行数',
+  agentMaxPeriodMonths: '多账期展开跨度上限 (月)',
+  chatMaxDocChars: '对话单据注入字符上限',
+  chatMaxHistoryMessages: '对话历史滑窗条数',
+  chatMaxRunCards: '历史运行卡片保留数',
+  chatMaxMarkdownPreviewChars: '报告预览截取字符上限',
+  chatCompactTriggerMessages: '自动压缩触发阈值 (条)',
+  chatCompactKeepRecent: '自动压缩保留原文 (条)',
+  chatManualCompactKeepRecent: '手动压缩保留原文 (条)',
+  chatManualCompactMinSlice: '手动压缩最小归档切片 (条)',
+  chatMaxMemorySummaryChars: '记忆摘要长度上限 (字)',
+  chatMaxSummaryMsgChars: '待压缩单条截取上限 (字)',
+  chatRequestLimit: '对话请求轮数上限',
+  chatToolCallsLimit: '对话工具调用上限',
+  chatTimeoutS: '对话单次超时 (秒)',
+  chatSummaryRequestLimit: '摘要请求轮数上限',
+  chatSummaryToolCallsLimit: '摘要工具调用上限',
+  chatSummaryTimeoutS: '摘要生成超时 (秒)',
 }
 
 function formatKeyLabel(k: string): string {
@@ -994,6 +1646,7 @@ const COMPARE_CONFIG_KEYS: Array<keyof RuntimeConfig> = [
   'gatewayUrl',
   'gatewayXmlStyle',
   'gatewayConnectTimeoutS',
+  'gatewayMaxConcurrency',
   'gatewayAppIdMasked',
   'gatewayAccessTokenMasked',
   'llmModel',
@@ -1012,10 +1665,38 @@ const COMPARE_CONFIG_KEYS: Array<keyof RuntimeConfig> = [
   'agentOutputRetries',
   'agentToolRetries',
   'agentPreviewRows',
+  'agentQueryDefaultLimit',
+  'agentQueryMaxLimit',
+  'agentMaxPeriodMonths',
+  'releasesKeep',
+  'runsKeepDays',
   'llmParallelToolCalls',
   'llmStrictTools',
   'llmToolChoiceRequired',
+  'chatMaxDocChars',
+  'chatMaxHistoryMessages',
+  'chatMaxRunCards',
+  'chatMaxMarkdownPreviewChars',
+  'chatCompactTriggerMessages',
+  'chatCompactKeepRecent',
+  'chatManualCompactKeepRecent',
+  'chatManualCompactMinSlice',
+  'chatMaxMemorySummaryChars',
+  'chatMaxSummaryMsgChars',
+  'chatRequestLimit',
+  'chatToolCallsLimit',
+  'chatTimeoutS',
+  'chatSummaryRequestLimit',
+  'chatSummaryToolCallsLimit',
+  'chatSummaryTimeoutS',
 ]
+
+const NULLABLE_COMPARE_KEYS = new Set<keyof RuntimeConfig>([
+  'llmMaxTokens',
+  'llmParallelToolCalls',
+  'llmStrictTools',
+  'llmToolChoiceRequired',
+])
 
 function formatCfgValue(cfg: RuntimeConfig, key: keyof RuntimeConfig): string {
   if (key === 'reportApiKeysMasked') {
@@ -1034,7 +1715,17 @@ function formatCfgValue(cfg: RuntimeConfig, key: keyof RuntimeConfig): string {
     return cfg.hasGatewayAccessToken ? cfg.gatewayAccessTokenMasked || '已配置' : '未配置'
   }
   const val = cfg[key]
-  if (val === null || val === undefined || val === '') return '默认 / 未限'
+  if (val === null || val === undefined || val === '') {
+    if (!NULLABLE_COMPARE_KEYS.has(key)) {
+      const defVal = (DEFAULT_RUNTIME_CONFIG as Record<string, unknown>)[key as string]
+      if (defVal !== undefined && defVal !== null && defVal !== '') {
+        const defText = typeof defVal === 'boolean' ? (defVal ? '开启 (true)' : '关闭 (false)') : String(defVal)
+        return `默认 (${defText})`
+      }
+      return '未配置'
+    }
+    return '默认 / 未限'
+  }
   if (typeof val === 'boolean') return val ? '开启 (true)' : '关闭 (false)'
   return String(val)
 }
@@ -1433,6 +2124,16 @@ onMounted(async () => {
                   type="button"
                   class="btn btn-sm"
                   :disabled="syncingEnv || savingRuntime"
+                  title="只重置数值/配额/枚举模式为默认值，保留网关 URL、大模型 URL、模型名及已填密钥"
+                  @click="handleResetDefaultParams"
+                >
+                  <RotateCcw :size="12" />
+                  <span>恢复默认参数</span>
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-sm"
+                  :disabled="syncingEnv || savingRuntime"
                   title="重新从启动环境变量同步默认参数"
                   @click="handleSyncFromEnv"
                 >
@@ -1464,7 +2165,7 @@ onMounted(async () => {
           <!-- 态 A：清晰紧凑参数总览 -->
           <div v-if="!isEditingRuntime" class="settings-spec-scroll">
             <template v-if="effectiveRuntimeConfig">
-              <div class="spec-section-title">API 统一网关参数（XML / JSON 双协议）</div>
+              <div class="spec-section-title">统一网关与鉴权（XML / JSON 双协议）</div>
               <div class="spec-kv-grid">
                 <div
                   v-for="item in gatewaySpecRows"
@@ -1477,13 +2178,25 @@ onMounted(async () => {
                 </div>
               </div>
 
-              <div class="spec-section-title" style="margin-top: 10px">大模型推理与并发治理配额</div>
+              <div class="spec-section-title" style="margin-top: 10px">推理模型与引擎配额</div>
               <div class="spec-kv-grid">
                 <div
                   v-for="item in engineSpecRows"
                   :key="item.label"
                   class="spec-kv-cell"
                   :class="{ 'is-full': item.full }"
+                >
+                  <span class="spec-kv-label">{{ item.label }}</span>
+                  <span class="spec-kv-val mono">{{ item.value }}</span>
+                </div>
+              </div>
+
+              <div class="spec-section-title" style="margin-top: 10px">聊天会话与上下文压缩配额</div>
+              <div class="spec-kv-grid">
+                <div
+                  v-for="item in chatSpecRows"
+                  :key="item.label"
+                  class="spec-kv-cell"
                 >
                   <span class="spec-kv-label">{{ item.label }}</span>
                   <span class="spec-kv-val mono">{{ item.value }}</span>
@@ -1498,7 +2211,7 @@ onMounted(async () => {
                   </template>
                 </span>
                 <span class="hint-sep">·</span>
-                <span>修改保存后自动持久化落盘，并立即热重载网关与模型实例</span>
+                <span>修改保存后自动持久化落盘，并立即热重载网关、聊天窗口与模型实例</span>
               </div>
             </template>
 
@@ -1509,7 +2222,7 @@ onMounted(async () => {
 
           <!-- 态 B：在线编辑表单（密钥掩码保护，留空不覆盖） -->
           <div v-else class="settings-spec-scroll runtime-form-scroll">
-            <div class="spec-section-title">1. API 统一网关连接与鉴权（保存后热切换连接池）</div>
+            <div class="spec-section-title">1. 统一网关与接口鉴权（保存后热切换连接池）</div>
             <div class="rt-form-grid">
               <label class="rt-field">
                 <span class="rt-label">网关接入模式</span>
@@ -1550,6 +2263,18 @@ onMounted(async () => {
                 />
               </label>
 
+              <label class="rt-field">
+                <span class="rt-label">网关最大并发连接 (1 ~ 512)</span>
+                <input
+                  v-model.number="runtimeForm.gatewayMaxConcurrency"
+                  type="number"
+                  min="1"
+                  max="512"
+                  step="1"
+                  class="input mono"
+                />
+              </label>
+
               <div class="rt-field">
                 <div class="rt-label-row">
                   <span class="rt-label">网关 AppId</span>
@@ -1572,7 +2297,7 @@ onMounted(async () => {
                 />
               </div>
 
-              <div class="rt-field is-full">
+              <div class="rt-field">
                 <div class="rt-label-row">
                   <span class="rt-label">网关 AccessToken 密钥</span>
                   <label v-if="effectiveRuntimeConfig?.hasGatewayAccessToken" class="clear-chk">
@@ -1802,13 +2527,273 @@ onMounted(async () => {
                   <option value="false">不支持强制调用 (false)</option>
                 </select>
               </label>
+            </div>
+
+            <div class="spec-section-title" style="margin-top: 12px">
+              3. 聊天会话与滚动上下文压缩配额（保存后立即热生效）
+            </div>
+            <div class="rt-form-grid">
+              <label class="rt-field">
+                <span class="rt-label">单据注入字符上限 (500 ~ 200000)</span>
+                <input
+                  v-model.number="runtimeForm.chatMaxDocChars"
+                  type="number"
+                  min="500"
+                  max="200000"
+                  step="500"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">对话历史滑窗条数 (1 ~ 200)</span>
+                <input
+                  v-model.number="runtimeForm.chatMaxHistoryMessages"
+                  type="number"
+                  min="1"
+                  max="200"
+                  step="1"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">历史运行卡片保留数 (1 ~ 50)</span>
+                <input
+                  v-model.number="runtimeForm.chatMaxRunCards"
+                  type="number"
+                  min="1"
+                  max="50"
+                  step="1"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">报告预览截取上限 (100 ~ 20000)</span>
+                <input
+                  v-model.number="runtimeForm.chatMaxMarkdownPreviewChars"
+                  type="number"
+                  min="100"
+                  max="20000"
+                  step="100"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">自动压缩触发阈值 (2 ~ 500, &gt; 保留条数)</span>
+                <input
+                  v-model.number="runtimeForm.chatCompactTriggerMessages"
+                  type="number"
+                  min="2"
+                  max="500"
+                  step="1"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">自动压缩保留原文 (1 ~ 200)</span>
+                <input
+                  v-model.number="runtimeForm.chatCompactKeepRecent"
+                  type="number"
+                  min="1"
+                  max="200"
+                  step="1"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">手动压缩保留原文 (1 ~ 200)</span>
+                <input
+                  v-model.number="runtimeForm.chatManualCompactKeepRecent"
+                  type="number"
+                  min="1"
+                  max="200"
+                  step="1"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">手动压缩最小归档切片 (1 ~ 100)</span>
+                <input
+                  v-model.number="runtimeForm.chatManualCompactMinSlice"
+                  type="number"
+                  min="1"
+                  max="100"
+                  step="1"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">记忆摘要长度上限 (200 ~ 10000)</span>
+                <input
+                  v-model.number="runtimeForm.chatMaxMemorySummaryChars"
+                  type="number"
+                  min="200"
+                  max="10000"
+                  step="100"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">待压缩单条截取上限 (100 ~ 10000)</span>
+                <input
+                  v-model.number="runtimeForm.chatMaxSummaryMsgChars"
+                  type="number"
+                  min="100"
+                  max="10000"
+                  step="100"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">对话请求轮数上限 (1 ~ 50)</span>
+                <input
+                  v-model.number="runtimeForm.chatRequestLimit"
+                  type="number"
+                  min="1"
+                  max="50"
+                  step="1"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">对话工具调用上限 (1 ~ 100)</span>
+                <input
+                  v-model.number="runtimeForm.chatToolCallsLimit"
+                  type="number"
+                  min="1"
+                  max="100"
+                  step="1"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">对话单次超时 (秒, &gt; 0)</span>
+                <input
+                  v-model.number="runtimeForm.chatTimeoutS"
+                  type="number"
+                  min="1"
+                  step="5"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">摘要生成超时 (秒, &gt; 0)</span>
+                <input
+                  v-model.number="runtimeForm.chatSummaryTimeoutS"
+                  type="number"
+                  min="1"
+                  step="5"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">摘要请求轮数上限 (1 ~ 20)</span>
+                <input
+                  v-model.number="runtimeForm.chatSummaryRequestLimit"
+                  type="number"
+                  min="1"
+                  max="20"
+                  step="1"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">摘要工具调用上限 (1 ~ 30)</span>
+                <input
+                  v-model.number="runtimeForm.chatSummaryToolCallsLimit"
+                  type="number"
+                  min="1"
+                  max="30"
+                  step="1"
+                  class="input mono"
+                />
+              </label>
+            </div>
+
+            <div class="spec-section-title" style="margin-top: 12px">
+              4. 平台工具限额与历史数据留存
+            </div>
+            <div class="rt-form-grid">
+              <label class="rt-field">
+                <span class="rt-label">结果筛选默认行数 (1 ~ 500, ≤ 最大行数)</span>
+                <input
+                  v-model.number="runtimeForm.agentQueryDefaultLimit"
+                  type="number"
+                  min="1"
+                  max="500"
+                  step="1"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">结果筛选最大行数 (1 ~ 1000)</span>
+                <input
+                  v-model.number="runtimeForm.agentQueryMaxLimit"
+                  type="number"
+                  min="1"
+                  max="1000"
+                  step="1"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">多账期展开跨度上限 (月, 1 ~ 120)</span>
+                <input
+                  v-model.number="runtimeForm.agentMaxPeriodMonths"
+                  type="number"
+                  min="1"
+                  max="120"
+                  step="1"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field">
+                <span class="rt-label">发布快照保留数 (1 ~ 500)</span>
+                <input
+                  v-model.number="runtimeForm.releasesKeep"
+                  type="number"
+                  min="1"
+                  max="500"
+                  step="1"
+                  class="input mono"
+                />
+              </label>
+
+              <label class="rt-field is-full">
+                <span class="rt-label">运行与会话留存天数 (0=永久保留, 0 ~ 3650)</span>
+                <input
+                  v-model.number="runtimeForm.runsKeepDays"
+                  type="number"
+                  min="0"
+                  max="3650"
+                  step="1"
+                  class="input mono"
+                />
+              </label>
 
               <label class="rt-field is-full">
                 <span class="rt-label">变更备注（记入 cN 审计台账，选填）</span>
                 <input
                   v-model="runtimeForm.note"
                   class="input"
-                  placeholder="例如：切换生产统一网关地址并调高并发配额"
+                  placeholder="例如：调整对话上下文压缩阈值与平台工具限额"
                 />
               </label>
             </div>

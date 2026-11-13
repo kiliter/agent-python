@@ -474,7 +474,7 @@ const navGroups = computed(() => [
         key: 'chatSim' as NavKey,
         label: '聊天窗口模拟',
         icon: 'play',
-        active: !tabsStore.isChatIframeActive && store.currentNav === 'chatSim',
+        active: store.currentNav === 'chatSim' || tabsStore.isChatIframeActive,
         badge: '',
       },
     ],
@@ -565,10 +565,10 @@ function handleUserMenuCommand(cmd: string) {
       </button>
     </aside>
 
-    <!-- 右侧主控工作舱（亮色内嵌圆角云舱 / 暗色全幅省网指挥舱） -->
-    <div class="main-wrapper">
+    <!-- 右侧主控工作舱（亮色内嵌圆角云舱 / 暗色全幅省网指挥舱 / 模拟聊天右侧全屏舱） -->
+    <div class="main-wrapper" :class="{ 'is-chat-fullscreen': tabsStore.isChatIframeActive }">
       <!-- 50px 顶栏：规范面包屑、生产基线胶囊、⌘K 全局检索、双主题切换、纯文字账号胶囊 -->
-      <header class="topbar">
+      <header v-show="!tabsStore.isChatIframeActive" class="topbar">
         <div class="topbar-left">
           <div class="breadcrumb">
             <template v-if="tabsStore.activeChatTab">
@@ -690,8 +690,8 @@ function handleUserMenuCommand(cmd: string) {
         </div>
       </header>
 
-      <!-- 右侧全局多页签导航栏（专注全屏模式下自动收起让位） -->
-      <WorkspaceTabsBar v-if="!store.isFocusFullscreen" />
+      <!-- 右侧全局多页签导航栏（专注全屏或模拟聊天右侧全屏模式下自动收起让位） -->
+      <WorkspaceTabsBar v-if="!store.isFocusFullscreen" v-show="!tabsStore.isChatIframeActive" />
 
       <!-- 页面主体内容：路由视图 KeepAlive 保活 + 动态聊天窗口 iframe v-show 保活 -->
       <main class="main-content" :class="{ 'is-chat-iframe-active': tabsStore.isChatIframeActive }">

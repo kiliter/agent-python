@@ -89,6 +89,8 @@ class Container:
                     self.gateway = ReloadableGatewayClient(new_gw)
                     self.runner.gateway = self.gateway
             self.settings = effective
+            if hasattr(self, "releases") and self.releases is not None:
+                self.releases.keep = effective.releases_keep
             self.runner.reload_config(effective, rebuild_model=not self.external_model)
             return effective
 
@@ -130,6 +132,7 @@ def build_container(settings: Settings, model=None, gateway: GatewayClient | Non
     if had_persisted:
         runtime_config.bootstrap_or_load(env_settings)
         effective_settings = runtime_config.to_effective_settings(env_settings)
+        releases.keep = effective_settings.releases_keep
     else:
         effective_settings = RuntimeConfig.from_settings(env_settings).to_effective_settings(env_settings)
 

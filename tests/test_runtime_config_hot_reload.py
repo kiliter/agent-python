@@ -13,16 +13,26 @@ from typing import Any
 import pytest
 import yaml
 from fastapi.testclient import TestClient
+from pydantic_ai import ModelRetry, RunContext
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.usage import RunUsage
 
 from report_agent.api.auth import UserStore
 from report_agent.config import Settings
 from report_agent.container import build_container
 from report_agent.domain.api_contract import ApiContract
+from report_agent.domain.resources import ResourceSet
+from report_agent.domain.template import FieldDef, Template, TemplateDef
 from report_agent.gateway.base import ApiCallResult
 from report_agent.gateway.mock import MockGatewayClient
 from report_agent.gateway.reloadable import ReloadableGatewayClient
 from report_agent.gateway.unified_xml import UnifiedGatewayXmlClient
 from report_agent.main import create_app
+from report_agent.runtime.deps import RunDeps
+from report_agent.runtime.tools import expand_period, query_result
+from report_agent.runtime.workspace import ApiResult, EventSink, Workspace
+from report_agent.store.fsutil import write_json
+from report_agent.store.runtime_config import RuntimeConfig
 from scripted_model import scripted_model
 
 
@@ -599,3 +609,511 @@ def test_api_key_settings_hot_reload_masking_rollback_and_legacy_fallback(
     assert c_reloaded.settings.report_api_key_set() == {"legacy-env-key-001", "legacy-env-key-002"}
     upgraded_doc = json.loads(cur_file.read_text(encoding="utf-8"))
     assert upgraded_doc["config"]["reportApiKeys"] == "legacy-env-key-001,legacy-env-key-002"
+
+
+_NEW_22_KEYS: tuple[str, ...] = (
+    "gatewayMaxConcurrency",
+    "releasesKeep",
+    "runsKeepDays",
+    "agentQueryDefaultLimit",
+    "agentQueryMaxLimit",
+    "agentMaxPeriodMonths",
+    "chatMaxDocChars",
+    "chatMaxHistoryMessages",
+    "chatMaxRunCards",
+    "chatMaxMarkdownPreviewChars",
+    "chatCompactTriggerMessages",
+    "chatCompactKeepRecent",
+    "chatManualCompactKeepRecent",
+    "chatManualCompactMinSlice",
+    "chatMaxMemorySummaryChars",
+    "chatMaxSummaryMsgChars",
+    "chatRequestLimit",
+    "chatToolCallsLimit",
+    "chatTimeoutS",
+    "chatSummaryRequestLimit",
+    "chatSummaryToolCallsLimit",
+    "chatSummaryTimeoutS",
+)
+
+
+def _make_tool_ctx(settings: Settings, gateway: Any, *, row_count: int = 60, retry: int = 0, max_retries: int = 1):
+    """构造用于直接调用 query_result / expand_period 验证运行期工具配额热生效的上下文。"""
+    tpl = Template(
+        definition=TemplateDef(
+            id=9001,
+            name="配额热更新验证模板",
+            fields=[FieldDef(name="结论", type="string", evidence="derive", description="测试结论")],
+        ),
+        body="{{结论}}",
+    )
+    ws = Workspace()
+    ws.add_result(
+        ApiResult(
+            result_id="r1",
+            api="mockApi",
+            title="模拟结果",
+            args={},
+            ok=True,
+            error=None,
+            columns={"idx": "序号"},
+            records=[{"idx": f"row-{i:03d}"} for i in range(row_count)],
+            cost_ms=5,
+        )
+    )
+    deps = RunDeps(
+        run_id="run_cfg_hot",
+        rev="test",
+        settings=settings,
+        resources=ResourceSet(templates={9001: tpl}),
+        template=tpl,
+        allowed_skills=[],
+        allowed_apis=[],
+        inputs={},
+        document="",
+        gateway=gateway,
+        workspace=ws,
+        events=EventSink(),
+    )
+    return RunContext(deps=deps, model=TestModel(), usage=RunUsage(), prompt="", retry=retry, max_retries=max_retries)
+
+
+def test_settings_and_legacy_runtime_config_default_fallbacks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """校验 Settings 空字符串/None 默认兜底、历史 RuntimeConfig 缺失/null 兼容及 PUT 空值沿用当前值。"""
+    # 1. Settings 传入空字符串 "" / 空白 / None（针对非可空数值/布尔/枚举字段）自动回退内置默认值；可空字段保持 None
+    s_kwargs = Settings(
+        _env_file=None,
+        data_dir=tmp_path / "data_kw",
+        seed_on_empty="",  # type: ignore[arg-type]
+        releases_keep="  ",  # type: ignore[arg-type]
+        runs_keep_days=None,  # type: ignore[arg-type]
+        llm_temperature="",  # type: ignore[arg-type]
+        llm_max_tokens=None,
+        llm_timeout_s=None,  # type: ignore[arg-type]
+        llm_http_retries=" ",  # type: ignore[arg-type]
+        llm_parallel_tool_calls=None,
+        llm_strict_tools=None,
+        llm_tool_choice_required=None,
+        agent_output_mode="",  # type: ignore[arg-type]
+        agent_native_strict=None,  # type: ignore[arg-type]
+        agent_output_retries="",  # type: ignore[arg-type]
+        agent_tool_retries=None,  # type: ignore[arg-type]
+        agent_request_limit="  ",  # type: ignore[arg-type]
+        agent_tool_calls_limit=None,  # type: ignore[arg-type]
+        agent_run_timeout_s="",  # type: ignore[arg-type]
+        agent_max_concurrent_runs=None,  # type: ignore[arg-type]
+        agent_preview_rows="",  # type: ignore[arg-type]
+        agent_query_default_limit="",  # type: ignore[arg-type]
+        agent_query_max_limit=None,  # type: ignore[arg-type]
+        agent_max_period_months="  ",  # type: ignore[arg-type]
+        chat_max_doc_chars="",  # type: ignore[arg-type]
+        chat_max_history_messages=None,  # type: ignore[arg-type]
+        chat_max_run_cards="",  # type: ignore[arg-type]
+        chat_max_markdown_preview_chars=None,  # type: ignore[arg-type]
+        chat_compact_trigger_messages="",  # type: ignore[arg-type]
+        chat_compact_keep_recent=None,  # type: ignore[arg-type]
+        chat_manual_compact_keep_recent="",  # type: ignore[arg-type]
+        chat_manual_compact_min_slice=None,  # type: ignore[arg-type]
+        chat_max_memory_summary_chars="",  # type: ignore[arg-type]
+        chat_max_summary_msg_chars=None,  # type: ignore[arg-type]
+        chat_request_limit="",  # type: ignore[arg-type]
+        chat_tool_calls_limit=None,  # type: ignore[arg-type]
+        chat_timeout_s="",  # type: ignore[arg-type]
+        chat_summary_request_limit=None,  # type: ignore[arg-type]
+        chat_summary_tool_calls_limit="",  # type: ignore[arg-type]
+        chat_summary_timeout_s=None,  # type: ignore[arg-type]
+        gateway_mode="",  # type: ignore[arg-type]
+        gateway_xml_style=None,  # type: ignore[arg-type]
+        gateway_connect_timeout_s="",  # type: ignore[arg-type]
+        gateway_max_concurrency=None,  # type: ignore[arg-type]
+        admin_token_ttl_s="",  # type: ignore[arg-type]
+        admin_cookie_secure=None,  # type: ignore[arg-type]
+    )
+    assert s_kwargs.seed_on_empty is True
+    assert s_kwargs.releases_keep == 50
+    assert s_kwargs.runs_keep_days == 90
+    assert s_kwargs.llm_temperature == 0.0
+    assert s_kwargs.llm_timeout_s == 120.0
+    assert s_kwargs.llm_http_retries == 2
+    assert s_kwargs.agent_output_mode == "tool"
+    assert s_kwargs.agent_native_strict is True
+    assert s_kwargs.agent_query_default_limit == 20
+    assert s_kwargs.agent_query_max_limit == 100
+    assert s_kwargs.agent_max_period_months == 36
+    assert s_kwargs.chat_max_doc_chars == 12000
+    assert s_kwargs.chat_max_history_messages == 20
+    assert s_kwargs.chat_compact_trigger_messages == 24
+    assert s_kwargs.chat_compact_keep_recent == 12
+    assert s_kwargs.chat_manual_compact_keep_recent == 6
+    assert s_kwargs.chat_manual_compact_min_slice == 2
+    assert s_kwargs.chat_max_memory_summary_chars == 1200
+    assert s_kwargs.chat_timeout_s == 120.0
+    assert s_kwargs.chat_summary_timeout_s == 60.0
+    assert s_kwargs.gateway_mode == "mock"
+    assert s_kwargs.gateway_xml_style == "java"
+    assert s_kwargs.gateway_connect_timeout_s == 5.0
+    assert s_kwargs.gateway_max_concurrency == 32
+    assert s_kwargs.admin_token_ttl_s == 12 * 3600
+    assert s_kwargs.admin_cookie_secure is False
+    # 可空字段保持 None
+    assert s_kwargs.llm_max_tokens is None
+    assert s_kwargs.llm_parallel_tool_calls is None
+    assert s_kwargs.llm_strict_tools is None
+    assert s_kwargs.llm_tool_choice_required is None
+
+    # 通过环境变量注入空串，验证 Settings 同样自动回退默认值且可空字段为空时为 None
+    for env_k in (
+        "RELEASES_KEEP",
+        "RUNS_KEEP_DAYS",
+        "GATEWAY_MAX_CONCURRENCY",
+        "AGENT_QUERY_DEFAULT_LIMIT",
+        "AGENT_QUERY_MAX_LIMIT",
+        "AGENT_MAX_PERIOD_MONTHS",
+        "CHAT_COMPACT_TRIGGER_MESSAGES",
+        "CHAT_MANUAL_COMPACT_KEEP_RECENT",
+        "LLM_TEMPERATURE",
+        "ADMIN_COOKIE_SECURE",
+    ):
+        monkeypatch.setenv(env_k, "   ")
+    s_env = Settings(_env_file=None, data_dir=tmp_path / "data_env", llm_max_tokens=None, llm_strict_tools=None)
+    assert s_env.releases_keep == 50
+    assert s_env.runs_keep_days == 90
+    assert s_env.gateway_max_concurrency == 32
+    assert s_env.agent_query_default_limit == 20
+    assert s_env.chat_compact_trigger_messages == 24
+    assert s_env.llm_max_tokens is None
+    assert s_env.llm_strict_tools is None
+
+    # 2. 构造缺失全部 22 个新增键且部分非可空键为 null / "" 的历史配置
+    legacy_storage = {
+        "llmBaseUrl": "https://api.openai.com/v1",
+        "llmApiKey": "sk-legacy-123456",
+        "llmModel": "deepseek-v4-flash",
+        "llmTemperature": None,
+        "llmMaxTokens": None,
+        "llmTimeoutS": "",
+        "llmHttpRetries": None,
+        "llmParallelToolCalls": None,
+        "llmStrictTools": None,
+        "llmToolChoiceRequired": None,
+        "agentOutputMode": "",
+        "agentNativeStrict": None,
+        "agentOutputRetries": "",
+        "agentToolRetries": None,
+        "agentRequestLimit": "",
+        "agentToolCallsLimit": None,
+        "agentRunTimeoutS": "",
+        "agentMaxConcurrentRuns": None,
+        "agentPreviewRows": "",
+        "gatewayMode": None,
+        "gatewayUrl": "",
+        "gatewayAppId": "",
+        "gatewayAccessToken": "",
+        "gatewayXmlStyle": "",
+        "gatewayConnectTimeoutS": None,
+        "reportApiKeys": "legacy-k1",
+    }
+    for new_k in _NEW_22_KEYS:
+        assert new_k not in legacy_storage
+
+    parsed_legacy = RuntimeConfig.from_storage_dict(legacy_storage)
+    assert parsed_legacy.llmTemperature == 0.0
+    assert parsed_legacy.llmTimeoutS == 120.0
+    assert parsed_legacy.llmHttpRetries == 2
+    assert parsed_legacy.agentOutputMode == "tool"
+    assert parsed_legacy.agentNativeStrict is True
+    assert parsed_legacy.gatewayMode == "mock"
+    assert parsed_legacy.gatewayXmlStyle == "java"
+    assert parsed_legacy.gatewayConnectTimeoutS == 5.0
+    assert parsed_legacy.llmMaxTokens is None
+    assert parsed_legacy.llmParallelToolCalls is None
+    assert parsed_legacy.gatewayMaxConcurrency == 32
+    assert parsed_legacy.releasesKeep == 50
+    assert parsed_legacy.runsKeepDays == 90
+    assert parsed_legacy.agentQueryDefaultLimit == 20
+    assert parsed_legacy.agentQueryMaxLimit == 100
+    assert parsed_legacy.agentMaxPeriodMonths == 36
+    assert parsed_legacy.chatCompactTriggerMessages == 24
+    assert parsed_legacy.chatSummaryTimeoutS == 60.0
+
+    # 将历史格式直接写入 current.json 与 revisions/c1.json，验证 bootstrap_or_load 与 rollback 零报错自动兜底
+    boot_env = Settings(
+        _env_file=None,
+        data_dir=tmp_path / "data_legacy_disk",
+        gateway_mode="mock",
+        llm_api_key="sk-legacy-123456",
+        admin_token_secret="test-secret",
+        report_api_keys="legacy-k1",
+    )
+    c = build_container(boot_env, model=scripted_model())
+    assert c.runtime_config is not None
+    write_json(
+        c.runtime_config.current_path,
+        {"activeRev": "c1", "n": 1, "time": "2026-11-01T00:00:00+08:00", "config": legacy_storage},
+        mode=0o600,
+    )
+    write_json(
+        c.runtime_config.revisions_dir / "c1.json",
+        {"rev": "c1", "n": 1, "time": "2026-11-01T00:00:00+08:00", "config": legacy_storage},
+        mode=0o600,
+    )
+    snap = c.runtime_config.bootstrap_or_load(boot_env)
+    assert snap.rev == "c1"
+    for new_k in _NEW_22_KEYS:
+        assert getattr(snap.config, new_k) == getattr(RuntimeConfig(), new_k)
+    normalized_disk = json.loads(c.runtime_config.current_path.read_text(encoding="utf-8"))
+    for new_k in _NEW_22_KEYS:
+        assert new_k in normalized_disk["config"]
+
+    # 3. PUT /api/v1/settings/runtime 传局部补丁及对新增数值键传 null / "" 自动沿用当前值/默认值
+    with _make_client(c) as client:
+        h = _login(client)
+        r_partial = client.put(
+            "/api/v1/settings/runtime",
+            headers=h,
+            json={"releasesKeep": 35, "note": "局部更新发布保留数"},
+        )
+        assert r_partial.status_code == 200, r_partial.text
+        assert r_partial.json()["activeRev"] == "c2"
+        assert r_partial.json()["config"]["releasesKeep"] == 35
+        assert r_partial.json()["config"]["gatewayMaxConcurrency"] == 32
+
+        r_null_blank = client.put(
+            "/api/v1/settings/runtime",
+            headers=h,
+            json={
+                "gatewayMaxConcurrency": None,
+                "releasesKeep": "",
+                "runsKeepDays": None,
+                "agentQueryDefaultLimit": "",
+                "agentQueryMaxLimit": None,
+                "agentMaxPeriodMonths": "",
+                "chatMaxDocChars": None,
+                "chatCompactTriggerMessages": "",
+                "chatCompactKeepRecent": None,
+                "chatManualCompactKeepRecent": "",
+                "chatManualCompactMinSlice": None,
+                "chatTimeoutS": "",
+                "chatSummaryTimeoutS": None,
+            },
+        )
+        assert r_null_blank.status_code == 200, r_null_blank.text
+        assert r_null_blank.json()["activeRev"] == "c2"
+        assert r_null_blank.json()["config"]["releasesKeep"] == 35
+        assert r_null_blank.json()["config"]["gatewayMaxConcurrency"] == 32
+        assert r_null_blank.json()["config"]["runsKeepDays"] == 90
+
+        # 非法非空字符串仍然报错 400
+        r_bad_str = client.put("/api/v1/settings/runtime", headers=h, json={"gatewayMaxConcurrency": "not-an-int"})
+        assert r_bad_str.status_code == 400 and r_bad_str.json()["code"] == "INVALID_RUNTIME_CONFIG"
+
+
+def test_runtime_config_22_new_keys_hot_reload_tools_and_rollback(tmp_path: Path) -> None:
+    """验证 22 项新增配置热更新、工具配额/并发/留存免重启生效、/settings/model 摘要及回滚恢复。"""
+    boot_env = Settings(
+        _env_file=None,
+        data_dir=tmp_path / "data",
+        gateway_mode="mock",
+        llm_api_key="sk-test-key",
+        admin_token_secret="test-secret",
+    )
+    c = build_container(boot_env, model=scripted_model())
+
+    with _make_client(c) as client:
+        h = _login(client)
+
+        # 基线工具调用：默认 default_limit=20, max_limit=100, max_period_months=36
+        base_qr_default = asyncio.run(query_result(_make_tool_ctx(c.runner.settings, c.gateway), resultId="r1"))
+        assert base_qr_default["total"] == 60
+        assert len(base_qr_default["rows"]) == 20
+
+        base_qr_large = asyncio.run(query_result(_make_tool_ctx(c.runner.settings, c.gateway), resultId="r1", limit=50))
+        assert len(base_qr_large["rows"]) == 50
+
+        base_ep = asyncio.run(expand_period(_make_tool_ctx(c.runner.settings, c.gateway), period="202601$202607"))
+        assert base_ep["ok"] is True and len(base_ep["months"]) == 7
+
+        # 一次性热更新全部 22 项新配置 + 校验并发/留存/工具配额免重启生效
+        payload_22 = {
+            "gatewayMaxConcurrency": 64,
+            "releasesKeep": 15,
+            "runsKeepDays": 0,
+            "agentQueryDefaultLimit": 5,
+            "agentQueryMaxLimit": 12,
+            "agentMaxPeriodMonths": 6,
+            "chatMaxDocChars": 5000,
+            "chatMaxHistoryMessages": 10,
+            "chatMaxRunCards": 4,
+            "chatMaxMarkdownPreviewChars": 800,
+            "chatCompactTriggerMessages": 10,
+            "chatCompactKeepRecent": 4,
+            "chatManualCompactKeepRecent": 3,
+            "chatManualCompactMinSlice": 1,
+            "chatMaxMemorySummaryChars": 600,
+            "chatMaxSummaryMsgChars": 400,
+            "chatRequestLimit": 5,
+            "chatToolCallsLimit": 9,
+            "chatTimeoutS": 45.0,
+            "chatSummaryRequestLimit": 2,
+            "chatSummaryToolCallsLimit": 3,
+            "chatSummaryTimeoutS": 25.0,
+            "note": "全量调整 22 项新增运行参数",
+        }
+        r_put = client.put("/api/v1/settings/runtime", headers=h, json=payload_22)
+        assert r_put.status_code == 200, r_put.text
+        st2 = r_put.json()
+        assert st2["activeRev"] == "c2"
+        for k in _NEW_22_KEYS:
+            assert st2["config"][k] == payload_22[k]
+
+        # 立即生效到内存中的 releases.keep 与 settings
+        assert c.releases.keep == 15
+        assert c.settings.releases_keep == 15
+        assert c.settings.runs_keep_days == 0
+        assert c.runs.cleanup(0) == 0
+        assert c.chat is not None and c.chat.store.cleanup(0) == 0
+        assert c.settings.gateway_max_concurrency == 64
+
+        # 验证 GET /api/v1/settings/model 返回新补充的摘要字段
+        m_info = client.get("/api/v1/settings/model", headers=h).json()
+        assert m_info["queryDefaultLimit"] == 5
+        assert m_info["queryMaxLimit"] == 12
+        assert m_info["maxPeriodMonths"] == 6
+        assert m_info["gatewayMaxConcurrency"] == 64
+        assert m_info["releasesKeep"] == 15
+        assert m_info["runsKeepDays"] == 0
+        assert m_info["chatMaxHistoryMessages"] == 10
+        assert m_info["chatCompactTriggerMessages"] == 10
+        assert m_info["chatCompactKeepRecent"] == 4
+        assert m_info["activeRev"] == "c2"
+
+        # 真实调用 query_result 与 expand_period 验证工具限额免重启热生效
+        hot_qr_default = asyncio.run(query_result(_make_tool_ctx(c.runner.settings, c.gateway), resultId="r1"))
+        assert hot_qr_default["total"] == 60
+        assert len(hot_qr_default["rows"]) == 5
+
+        hot_qr_clamped = asyncio.run(
+            query_result(_make_tool_ctx(c.runner.settings, c.gateway), resultId="r1", limit=999)
+        )
+        assert hot_qr_clamped["total"] == 60
+        assert len(hot_qr_clamped["rows"]) == 12
+
+        hot_ep_ok = asyncio.run(expand_period(_make_tool_ctx(c.runner.settings, c.gateway), period="202601$202606"))
+        assert hot_ep_ok["ok"] is True and len(hot_ep_ok["months"]) == 6
+
+        with pytest.raises(ModelRetry, match="6 个月"):
+            asyncio.run(
+                expand_period(
+                    _make_tool_ctx(c.runner.settings, c.gateway, retry=0, max_retries=1),
+                    period="202601$202607",
+                )
+            )
+        hot_ep_err = asyncio.run(
+            expand_period(
+                _make_tool_ctx(c.runner.settings, c.gateway, retry=1, max_retries=1),
+                period="202601$202607",
+            )
+        )
+        assert hot_ep_err["ok"] is False and "6 个月" in hot_ep_err["error"]
+
+        # 切换为 live 网关模式，验证 gatewayMaxConcurrency=64 同步到连接池实例
+        r_live = client.put(
+            "/api/v1/settings/runtime",
+            headers=h,
+            json={"gatewayMode": "live", "gatewayUrl": "https://gw-hot.internal:8443", "note": "切换实时网关"},
+        )
+        assert r_live.status_code == 200, r_live.text
+        assert isinstance(c.gateway.current, UnifiedGatewayXmlClient)
+        assert c.gateway.current.max_concurrency == 64
+
+        # 回退至 c1，验证全部恢复默认值，工具限额与 releases.keep 同步回滚
+        r_rb = client.post(
+            "/api/v1/settings/runtime/rollback",
+            headers=h,
+            json={"targetRev": "c1", "reason": "恢复默认配额与并发"},
+        )
+        assert r_rb.status_code == 200, r_rb.text
+        rb_cfg = r_rb.json()["config"]
+        defaults = RuntimeConfig()
+        for k in _NEW_22_KEYS:
+            assert rb_cfg[k] == getattr(defaults, k)
+        assert c.releases.keep == 50
+        assert c.settings.runs_keep_days == 90
+        assert c.settings.gateway_max_concurrency == 32
+        assert isinstance(c.gateway.current, MockGatewayClient)
+
+        rb_m_info = client.get("/api/v1/settings/model", headers=h).json()
+        assert rb_m_info["queryDefaultLimit"] == 20
+        assert rb_m_info["queryMaxLimit"] == 100
+        assert rb_m_info["maxPeriodMonths"] == 36
+        assert rb_m_info["gatewayMaxConcurrency"] == 32
+        assert rb_m_info["releasesKeep"] == 50
+        assert rb_m_info["runsKeepDays"] == 90
+
+        rb_qr_default = asyncio.run(query_result(_make_tool_ctx(c.runner.settings, c.gateway), resultId="r1"))
+        assert len(rb_qr_default["rows"]) == 20
+        rb_qr_large = asyncio.run(query_result(_make_tool_ctx(c.runner.settings, c.gateway), resultId="r1", limit=50))
+        assert len(rb_qr_large["rows"]) == 50
+        rb_ep_ok = asyncio.run(expand_period(_make_tool_ctx(c.runner.settings, c.gateway), period="202601$202607"))
+        assert rb_ep_ok["ok"] is True and len(rb_ep_ok["months"]) == 7
+
+
+def test_runtime_config_boundary_and_cross_field_validation(tmp_path: Path) -> None:
+    """校验新增参数的边界约束与跨字段联动约束，违规均返回 400 INVALID_RUNTIME_CONFIG 且不破坏当前配置。"""
+    env = Settings(
+        _env_file=None,
+        data_dir=tmp_path / "data",
+        gateway_mode="mock",
+        llm_api_key="sk-test",
+        admin_token_secret="test-secret",
+    )
+    c = build_container(env, model=scripted_model())
+
+    with _make_client(c) as client:
+        h = _login(client)
+        bad_cases: list[dict[str, Any]] = [
+            # 跨字段：自动压缩触发数必须严格大于保留数
+            {"chatCompactTriggerMessages": 12, "chatCompactKeepRecent": 12},
+            {"chatCompactTriggerMessages": 8, "chatCompactKeepRecent": 12},
+            # 跨字段：默认筛选行数不能大于最大筛选行数
+            {"agentQueryDefaultLimit": 50, "agentQueryMaxLimit": 40},
+            {"agentQueryDefaultLimit": 101},
+            # 单字段边界
+            {"runsKeepDays": -1},
+            {"runsKeepDays": 3651},
+            {"releasesKeep": 0},
+            {"releasesKeep": 501},
+            {"gatewayMaxConcurrency": 0},
+            {"gatewayMaxConcurrency": 513},
+            {"agentQueryDefaultLimit": 0},
+            {"agentQueryMaxLimit": 1001},
+            {"agentMaxPeriodMonths": 0},
+            {"agentMaxPeriodMonths": 121},
+            {"chatManualCompactMinSlice": 0},
+            {"chatManualCompactMinSlice": 101},
+            {"chatManualCompactKeepRecent": 0},
+            {"chatMaxDocChars": 499},
+            {"chatMaxHistoryMessages": 0},
+            {"chatMaxRunCards": 0},
+            {"chatMaxMarkdownPreviewChars": 99},
+            {"chatMaxMemorySummaryChars": 199},
+            {"chatMaxSummaryMsgChars": 99},
+            {"chatRequestLimit": 0},
+            {"chatToolCallsLimit": 0},
+            {"chatTimeoutS": 0},
+            {"chatSummaryRequestLimit": 0},
+            {"chatSummaryToolCallsLimit": 0},
+            {"chatSummaryTimeoutS": -5},
+        ]
+        for bad in bad_cases:
+            resp = client.put("/api/v1/settings/runtime", headers=h, json=bad)
+            assert resp.status_code == 400, f"expected 400 for {bad}, got {resp.status_code}: {resp.text}"
+            assert resp.json()["code"] == "INVALID_RUNTIME_CONFIG"
+
+        assert c.runtime_config is not None
+        assert c.runtime_config.active_rev() == "c1"
+        assert c.settings.agent_query_default_limit == 20
+        assert c.settings.agent_query_max_limit == 100
+        assert c.settings.chat_compact_trigger_messages == 24
+        assert c.settings.chat_compact_keep_recent == 12
+        assert c.settings.runs_keep_days == 90

@@ -44,6 +44,22 @@ export interface ChatSession {
   created?: boolean
   /** 仅 POST /sessions 返回 */
   inputsChanged?: boolean
+  /** 已压缩归档的早期对话记忆摘要 */
+  memorySummary?: string
+  /** 已压缩归档的 messages 前缀条数 */
+  summarizedUpTo?: number
+  /** 手动压缩保留最近原文消息条数 */
+  manualCompactKeepRecent?: number
+  /** 手动压缩最小未归档消息数门槛 */
+  manualCompactMinMessages?: number
+}
+
+export interface CompactSessionResponse {
+  compacted: boolean
+  summarizedCount: number
+  summarizedUpTo: number
+  memorySummary: string
+  session: ChatSession
 }
 
 export interface BaseMessage {

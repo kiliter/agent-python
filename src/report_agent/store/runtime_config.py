@@ -68,7 +68,61 @@ _ORDERED_FIELDS: tuple[str, ...] = (
     "gatewayXmlStyle",
     "gatewayConnectTimeoutS",
     "reportApiKeys",
+    "gatewayMaxConcurrency",
+    "releasesKeep",
+    "runsKeepDays",
+    "agentQueryDefaultLimit",
+    "agentQueryMaxLimit",
+    "agentMaxPeriodMonths",
+    "chatMaxDocChars",
+    "chatMaxHistoryMessages",
+    "chatMaxRunCards",
+    "chatMaxMarkdownPreviewChars",
+    "chatCompactTriggerMessages",
+    "chatCompactKeepRecent",
+    "chatManualCompactKeepRecent",
+    "chatManualCompactMinSlice",
+    "chatMaxMemorySummaryChars",
+    "chatMaxSummaryMsgChars",
+    "chatRequestLimit",
+    "chatToolCallsLimit",
+    "chatTimeoutS",
+    "chatSummaryRequestLimit",
+    "chatSummaryToolCallsLimit",
+    "chatSummaryTimeoutS",
 )
+
+_NULLABLE_FIELDS: frozenset[str] = frozenset({
+    "llmMaxTokens",
+    "llmParallelToolCalls",
+    "llmStrictTools",
+    "llmToolChoiceRequired",
+})
+
+_STRING_FIELDS: frozenset[str] = frozenset({
+    "llmBaseUrl",
+    "llmApiKey",
+    "llmModel",
+    "gatewayUrl",
+    "gatewayAppId",
+    "gatewayAccessToken",
+    "reportApiKeys",
+})
+
+
+def _read_int(s: Any, attr: str, default: int) -> int:
+    val = getattr(s, attr, None)
+    return default if val is None else int(val)
+
+
+def _read_float(s: Any, attr: str, default: float) -> float:
+    val = getattr(s, attr, None)
+    return default if val is None else float(val)
+
+
+def _read_bool(s: Any, attr: str, default: bool) -> bool:
+    val = getattr(s, attr, None)
+    return default if val is None else bool(val)
 
 
 class RuntimeConfigValidationError(InvalidResource):
@@ -259,77 +313,137 @@ class RuntimeConfig:
     """受版本化热更新管理的全部运行参数。"""
 
     # LLM
-    llmBaseUrl: str
-    llmApiKey: str
-    llmModel: str
-    llmTemperature: float
-    llmMaxTokens: int | None
-    llmTimeoutS: float
-    llmHttpRetries: int
-    llmParallelToolCalls: bool | None
-    llmStrictTools: bool | None
-    llmToolChoiceRequired: bool | None
-    # Agent
-    agentOutputMode: OutputMode
-    agentNativeStrict: bool
-    agentOutputRetries: int
-    agentToolRetries: int
-    agentRequestLimit: int
-    agentToolCallsLimit: int
-    agentRunTimeoutS: float
-    agentMaxConcurrentRuns: int
-    agentPreviewRows: int
+    llmBaseUrl: str = "https://api.openai.com/v1"
+    llmApiKey: str = ""
+    llmModel: str = "deepseek-v4-flash"
+    llmTemperature: float = 0.0
+    llmMaxTokens: int | None = None
+    llmTimeoutS: float = 120.0
+    llmHttpRetries: int = 2
+    llmParallelToolCalls: bool | None = True
+    llmStrictTools: bool | None = None
+    llmToolChoiceRequired: bool | None = None
+    # Agent & Tools
+    agentOutputMode: OutputMode = "tool"
+    agentNativeStrict: bool = True
+    agentOutputRetries: int = 3
+    agentToolRetries: int = 2
+    agentRequestLimit: int = 25
+    agentToolCallsLimit: int = 120
+    agentRunTimeoutS: float = 600.0
+    agentMaxConcurrentRuns: int = 8
+    agentPreviewRows: int = 10
     # Gateway
-    gatewayMode: GatewayMode
-    gatewayUrl: str
-    gatewayAppId: str
-    gatewayAccessToken: str
-    gatewayXmlStyle: XmlStyle
-    gatewayConnectTimeoutS: float
+    gatewayMode: GatewayMode = "mock"
+    gatewayUrl: str = ""
+    gatewayAppId: str = ""
+    gatewayAccessToken: str = ""
+    gatewayXmlStyle: XmlStyle = "java"
+    gatewayConnectTimeoutS: float = 5.0
     # Upstream & Embed Auth
     reportApiKeys: str = ""
+    # Gateway concurrency & Retention
+    gatewayMaxConcurrency: int = 32
+    releasesKeep: int = 50
+    runsKeepDays: int = 90
+    # Platform Tools Limits
+    agentQueryDefaultLimit: int = 20
+    agentQueryMaxLimit: int = 100
+    agentMaxPeriodMonths: int = 36
+    # Chat & Compaction
+    chatMaxDocChars: int = 12000
+    chatMaxHistoryMessages: int = 20
+    chatMaxRunCards: int = 8
+    chatMaxMarkdownPreviewChars: int = 1500
+    chatCompactTriggerMessages: int = 24
+    chatCompactKeepRecent: int = 12
+    chatManualCompactKeepRecent: int = 6
+    chatManualCompactMinSlice: int = 2
+    chatMaxMemorySummaryChars: int = 1200
+    chatMaxSummaryMsgChars: int = 800
+    chatRequestLimit: int = 8
+    chatToolCallsLimit: int = 16
+    chatTimeoutS: float = 120.0
+    chatSummaryRequestLimit: int = 3
+    chatSummaryToolCallsLimit: int = 4
+    chatSummaryTimeoutS: float = 60.0
 
     @classmethod
     def from_settings(cls, s: Settings) -> RuntimeConfig:
         """从 Settings（环境变量 / .env）提取初始运行配置。"""
+        llm_api_key_obj = getattr(s, "llm_api_key", None)
+        gw_app_id_obj = getattr(s, "gateway_app_id", None)
+        gw_token_obj = getattr(s, "gateway_access_token", None)
+        raw_out_mode = getattr(s, "agent_output_mode", None)
+        raw_gw_mode = getattr(s, "gateway_mode", None)
+        raw_xml_style = getattr(s, "gateway_xml_style", None)
+        raw_max_tokens = getattr(s, "llm_max_tokens", None)
         return cls(
-            llmBaseUrl=(s.llm_base_url or "").strip(),
-            llmApiKey=s.llm_api_key.get_secret_value() if s.llm_api_key else "",
-            llmModel=(s.llm_model or "").strip(),
-            llmTemperature=float(s.llm_temperature),
-            llmMaxTokens=int(s.llm_max_tokens) if s.llm_max_tokens is not None else None,
-            llmTimeoutS=float(s.llm_timeout_s),
-            llmHttpRetries=int(s.llm_http_retries),
-            llmParallelToolCalls=s.llm_parallel_tool_calls,
-            llmStrictTools=s.llm_strict_tools,
-            llmToolChoiceRequired=s.llm_tool_choice_required,
-            agentOutputMode=s.agent_output_mode,
-            agentNativeStrict=bool(s.agent_native_strict),
-            agentOutputRetries=int(s.agent_output_retries),
-            agentToolRetries=int(s.agent_tool_retries),
-            agentRequestLimit=int(s.agent_request_limit),
-            agentToolCallsLimit=int(s.agent_tool_calls_limit),
-            agentRunTimeoutS=float(s.agent_run_timeout_s),
-            agentMaxConcurrentRuns=int(s.agent_max_concurrent_runs),
-            agentPreviewRows=int(s.agent_preview_rows),
-            gatewayMode=s.gateway_mode,
-            gatewayUrl=(s.gateway_url or "").strip(),
-            gatewayAppId=s.gateway_app_id.get_secret_value() if s.gateway_app_id else "",
-            gatewayAccessToken=s.gateway_access_token.get_secret_value() if s.gateway_access_token else "",
-            gatewayXmlStyle=s.gateway_xml_style,
-            gatewayConnectTimeoutS=float(s.gateway_connect_timeout_s),
-            reportApiKeys=",".join(split_api_keys(s.report_api_keys)),
+            llmBaseUrl=str(getattr(s, "llm_base_url", None) or "").strip(),
+            llmApiKey=llm_api_key_obj.get_secret_value() if llm_api_key_obj else "",
+            llmModel=str(getattr(s, "llm_model", None) or "").strip(),
+            llmTemperature=_read_float(s, "llm_temperature", 0.0),
+            llmMaxTokens=int(raw_max_tokens) if raw_max_tokens is not None else None,
+            llmTimeoutS=_read_float(s, "llm_timeout_s", 120.0),
+            llmHttpRetries=_read_int(s, "llm_http_retries", 2),
+            llmParallelToolCalls=getattr(s, "llm_parallel_tool_calls", True),
+            llmStrictTools=getattr(s, "llm_strict_tools", None),
+            llmToolChoiceRequired=getattr(s, "llm_tool_choice_required", None),
+            agentOutputMode=raw_out_mode if raw_out_mode in _VALID_OUTPUT_MODES else "tool",
+            agentNativeStrict=_read_bool(s, "agent_native_strict", True),
+            agentOutputRetries=_read_int(s, "agent_output_retries", 3),
+            agentToolRetries=_read_int(s, "agent_tool_retries", 2),
+            agentRequestLimit=_read_int(s, "agent_request_limit", 25),
+            agentToolCallsLimit=_read_int(s, "agent_tool_calls_limit", 120),
+            agentRunTimeoutS=_read_float(s, "agent_run_timeout_s", 600.0),
+            agentMaxConcurrentRuns=_read_int(s, "agent_max_concurrent_runs", 8),
+            agentPreviewRows=_read_int(s, "agent_preview_rows", 10),
+            gatewayMode=raw_gw_mode if raw_gw_mode in _VALID_GATEWAY_MODES else "mock",
+            gatewayUrl=str(getattr(s, "gateway_url", None) or "").strip(),
+            gatewayAppId=gw_app_id_obj.get_secret_value() if gw_app_id_obj else "",
+            gatewayAccessToken=gw_token_obj.get_secret_value() if gw_token_obj else "",
+            gatewayXmlStyle=raw_xml_style if raw_xml_style in _VALID_XML_STYLES else "java",
+            gatewayConnectTimeoutS=_read_float(s, "gateway_connect_timeout_s", 5.0),
+            reportApiKeys=",".join(split_api_keys(getattr(s, "report_api_keys", "") or "")),
+            gatewayMaxConcurrency=_read_int(s, "gateway_max_concurrency", 32),
+            releasesKeep=_read_int(s, "releases_keep", 50),
+            runsKeepDays=_read_int(s, "runs_keep_days", 90),
+            agentQueryDefaultLimit=_read_int(s, "agent_query_default_limit", 20),
+            agentQueryMaxLimit=_read_int(s, "agent_query_max_limit", 100),
+            agentMaxPeriodMonths=_read_int(s, "agent_max_period_months", 36),
+            chatMaxDocChars=_read_int(s, "chat_max_doc_chars", 12000),
+            chatMaxHistoryMessages=_read_int(s, "chat_max_history_messages", 20),
+            chatMaxRunCards=_read_int(s, "chat_max_run_cards", 8),
+            chatMaxMarkdownPreviewChars=_read_int(s, "chat_max_markdown_preview_chars", 1500),
+            chatCompactTriggerMessages=_read_int(s, "chat_compact_trigger_messages", 24),
+            chatCompactKeepRecent=_read_int(s, "chat_compact_keep_recent", 12),
+            chatManualCompactKeepRecent=_read_int(s, "chat_manual_compact_keep_recent", 6),
+            chatManualCompactMinSlice=_read_int(s, "chat_manual_compact_min_slice", 2),
+            chatMaxMemorySummaryChars=_read_int(s, "chat_max_memory_summary_chars", 1200),
+            chatMaxSummaryMsgChars=_read_int(s, "chat_max_summary_msg_chars", 800),
+            chatRequestLimit=_read_int(s, "chat_request_limit", 8),
+            chatToolCallsLimit=_read_int(s, "chat_tool_calls_limit", 16),
+            chatTimeoutS=_read_float(s, "chat_timeout_s", 120.0),
+            chatSummaryRequestLimit=_read_int(s, "chat_summary_request_limit", 3),
+            chatSummaryToolCallsLimit=_read_int(s, "chat_summary_tool_calls_limit", 4),
+            chatSummaryTimeoutS=_read_float(s, "chat_summary_timeout_s", 60.0),
         )
 
     @classmethod
     def from_storage_dict(cls, data: dict[str, Any], fallback_settings: Settings | None = None) -> RuntimeConfig:
-        """从磁盘字典恢复，缺失的新增字段自动回退到 fallback_settings。"""
+        """从磁盘字典恢复，缺失或非可空字段为空时自动回退到 fallback_settings。"""
         base = cls.from_settings(fallback_settings or _DEFAULT_FALLBACK_SETTINGS)
         merged = base.to_storage_dict()
         if isinstance(data, dict):
             for k in _ORDERED_FIELDS:
-                if k in data:
-                    merged[k] = data[k]
+                if k not in data:
+                    continue
+                val = data[k]
+                if k not in _NULLABLE_FIELDS and val is None:
+                    continue
+                if k not in _NULLABLE_FIELDS and k not in _STRING_FIELDS and isinstance(val, str) and val.strip() == "":
+                    continue
+                merged[k] = val
         return cls(
             llmBaseUrl=str(merged["llmBaseUrl"] or "").strip(),
             llmApiKey=str(merged["llmApiKey"] or ""),
@@ -357,6 +471,28 @@ class RuntimeConfig:
             gatewayXmlStyle=merged["gatewayXmlStyle"] if merged["gatewayXmlStyle"] in _VALID_XML_STYLES else base.gatewayXmlStyle,
             gatewayConnectTimeoutS=float(merged["gatewayConnectTimeoutS"]),
             reportApiKeys=",".join(split_api_keys(str(merged["reportApiKeys"] or ""))),
+            gatewayMaxConcurrency=int(merged["gatewayMaxConcurrency"]),
+            releasesKeep=int(merged["releasesKeep"]),
+            runsKeepDays=int(merged["runsKeepDays"]),
+            agentQueryDefaultLimit=int(merged["agentQueryDefaultLimit"]),
+            agentQueryMaxLimit=int(merged["agentQueryMaxLimit"]),
+            agentMaxPeriodMonths=int(merged["agentMaxPeriodMonths"]),
+            chatMaxDocChars=int(merged["chatMaxDocChars"]),
+            chatMaxHistoryMessages=int(merged["chatMaxHistoryMessages"]),
+            chatMaxRunCards=int(merged["chatMaxRunCards"]),
+            chatMaxMarkdownPreviewChars=int(merged["chatMaxMarkdownPreviewChars"]),
+            chatCompactTriggerMessages=int(merged["chatCompactTriggerMessages"]),
+            chatCompactKeepRecent=int(merged["chatCompactKeepRecent"]),
+            chatManualCompactKeepRecent=int(merged["chatManualCompactKeepRecent"]),
+            chatManualCompactMinSlice=int(merged["chatManualCompactMinSlice"]),
+            chatMaxMemorySummaryChars=int(merged["chatMaxMemorySummaryChars"]),
+            chatMaxSummaryMsgChars=int(merged["chatMaxSummaryMsgChars"]),
+            chatRequestLimit=int(merged["chatRequestLimit"]),
+            chatToolCallsLimit=int(merged["chatToolCallsLimit"]),
+            chatTimeoutS=float(merged["chatTimeoutS"]),
+            chatSummaryRequestLimit=int(merged["chatSummaryRequestLimit"]),
+            chatSummaryToolCallsLimit=int(merged["chatSummaryToolCallsLimit"]),
+            chatSummaryTimeoutS=float(merged["chatSummaryTimeoutS"]),
         )
 
     def to_storage_dict(self) -> dict[str, Any]:
@@ -398,6 +534,28 @@ class RuntimeConfig:
             "hasReportApiKeys": bool(keys),
             "reportApiKeysMasked": mask_api_keys(self.reportApiKeys),
             "reportApiKeyCount": len(keys),
+            "gatewayMaxConcurrency": self.gatewayMaxConcurrency,
+            "releasesKeep": self.releasesKeep,
+            "runsKeepDays": self.runsKeepDays,
+            "agentQueryDefaultLimit": self.agentQueryDefaultLimit,
+            "agentQueryMaxLimit": self.agentQueryMaxLimit,
+            "agentMaxPeriodMonths": self.agentMaxPeriodMonths,
+            "chatMaxDocChars": self.chatMaxDocChars,
+            "chatMaxHistoryMessages": self.chatMaxHistoryMessages,
+            "chatMaxRunCards": self.chatMaxRunCards,
+            "chatMaxMarkdownPreviewChars": self.chatMaxMarkdownPreviewChars,
+            "chatCompactTriggerMessages": self.chatCompactTriggerMessages,
+            "chatCompactKeepRecent": self.chatCompactKeepRecent,
+            "chatManualCompactKeepRecent": self.chatManualCompactKeepRecent,
+            "chatManualCompactMinSlice": self.chatManualCompactMinSlice,
+            "chatMaxMemorySummaryChars": self.chatMaxMemorySummaryChars,
+            "chatMaxSummaryMsgChars": self.chatMaxSummaryMsgChars,
+            "chatRequestLimit": self.chatRequestLimit,
+            "chatToolCallsLimit": self.chatToolCallsLimit,
+            "chatTimeoutS": self.chatTimeoutS,
+            "chatSummaryRequestLimit": self.chatSummaryRequestLimit,
+            "chatSummaryToolCallsLimit": self.chatSummaryToolCallsLimit,
+            "chatSummaryTimeoutS": self.chatSummaryTimeoutS,
         }
 
     def to_effective_settings(self, base_settings: Settings) -> Settings:
@@ -430,6 +588,28 @@ class RuntimeConfig:
                 "gateway_xml_style": self.gatewayXmlStyle,
                 "gateway_connect_timeout_s": self.gatewayConnectTimeoutS,
                 "report_api_keys": self.reportApiKeys,
+                "gateway_max_concurrency": self.gatewayMaxConcurrency,
+                "releases_keep": self.releasesKeep,
+                "runs_keep_days": self.runsKeepDays,
+                "agent_query_default_limit": self.agentQueryDefaultLimit,
+                "agent_query_max_limit": self.agentQueryMaxLimit,
+                "agent_max_period_months": self.agentMaxPeriodMonths,
+                "chat_max_doc_chars": self.chatMaxDocChars,
+                "chat_max_history_messages": self.chatMaxHistoryMessages,
+                "chat_max_run_cards": self.chatMaxRunCards,
+                "chat_max_markdown_preview_chars": self.chatMaxMarkdownPreviewChars,
+                "chat_compact_trigger_messages": self.chatCompactTriggerMessages,
+                "chat_compact_keep_recent": self.chatCompactKeepRecent,
+                "chat_manual_compact_keep_recent": self.chatManualCompactKeepRecent,
+                "chat_manual_compact_min_slice": self.chatManualCompactMinSlice,
+                "chat_max_memory_summary_chars": self.chatMaxMemorySummaryChars,
+                "chat_max_summary_msg_chars": self.chatMaxSummaryMsgChars,
+                "chat_request_limit": self.chatRequestLimit,
+                "chat_tool_calls_limit": self.chatToolCallsLimit,
+                "chat_timeout_s": self.chatTimeoutS,
+                "chat_summary_request_limit": self.chatSummaryRequestLimit,
+                "chat_summary_tool_calls_limit": self.chatSummaryToolCallsLimit,
+                "chat_summary_timeout_s": self.chatSummaryTimeoutS,
             }
         )
 
@@ -478,6 +658,15 @@ class RuntimeConfig:
         if not (1 <= self.agentPreviewRows <= 200):
             errors.append("接口预览行数 agentPreviewRows 必须在 1~200 之间")
 
+        if not (1 <= self.agentQueryDefaultLimit <= 500):
+            errors.append("结果筛选默认行数 agentQueryDefaultLimit 必须在 1~500 之间")
+        if not (1 <= self.agentQueryMaxLimit <= 1000):
+            errors.append("结果筛选最大行数 agentQueryMaxLimit 必须在 1~1000 之间")
+        if self.agentQueryDefaultLimit > self.agentQueryMaxLimit:
+            errors.append("结果筛选默认行数 agentQueryDefaultLimit 不能大于最大行数 agentQueryMaxLimit")
+        if not (1 <= self.agentMaxPeriodMonths <= 120):
+            errors.append("多账期展开跨度上限 agentMaxPeriodMonths 必须在 1~120 之间")
+
         if self.gatewayMode not in _VALID_GATEWAY_MODES:
             errors.append(f"统一网关模式 gatewayMode 不合法：{self.gatewayMode}")
         if self.gatewayMode == "live" and not self.gatewayUrl:
@@ -494,6 +683,48 @@ class RuntimeConfig:
             or self.gatewayConnectTimeoutS <= 0
         ):
             errors.append("网关连接超时 gatewayConnectTimeoutS 必须大于 0")
+        if not (1 <= self.gatewayMaxConcurrency <= 512):
+            errors.append("网关最大并发数 gatewayMaxConcurrency 必须在 1~512 之间")
+
+        if not (1 <= self.releasesKeep <= 500):
+            errors.append("发布快照保留数 releasesKeep 必须在 1~500 之间")
+        if not (0 <= self.runsKeepDays <= 3650):
+            errors.append("运行与会话留存天数 runsKeepDays 必须在 0~3650 之间")
+
+        if not (500 <= self.chatMaxDocChars <= 200000):
+            errors.append("聊天单据最大字符数 chatMaxDocChars 必须在 500~200000 之间")
+        if not (1 <= self.chatMaxHistoryMessages <= 200):
+            errors.append("聊天最近原文消息数 chatMaxHistoryMessages 必须在 1~200 之间")
+        if not (1 <= self.chatMaxRunCards <= 50):
+            errors.append("聊天运行卡片注入上限 chatMaxRunCards 必须在 1~50 之间")
+        if not (100 <= self.chatMaxMarkdownPreviewChars <= 20000):
+            errors.append("聊天报告预览截断字数 chatMaxMarkdownPreviewChars 必须在 100~20000 之间")
+        if not (2 <= self.chatCompactTriggerMessages <= 500):
+            errors.append("自动压缩触发消息数 chatCompactTriggerMessages 必须在 2~500 之间")
+        if not (1 <= self.chatCompactKeepRecent <= 200):
+            errors.append("自动压缩保留消息数 chatCompactKeepRecent 必须在 1~200 之间")
+        if self.chatCompactTriggerMessages <= self.chatCompactKeepRecent:
+            errors.append("自动压缩触发消息数 chatCompactTriggerMessages 必须大于保留消息数 chatCompactKeepRecent")
+        if not (1 <= self.chatManualCompactKeepRecent <= 200):
+            errors.append("手动压缩保留消息数 chatManualCompactKeepRecent 必须在 1~200 之间")
+        if not (1 <= self.chatManualCompactMinSlice <= 100):
+            errors.append("手动压缩最小归档条数 chatManualCompactMinSlice 必须在 1~100 之间")
+        if not (200 <= self.chatMaxMemorySummaryChars <= 10000):
+            errors.append("滚动记忆摘要上限 chatMaxMemorySummaryChars 必须在 200~10000 之间")
+        if not (100 <= self.chatMaxSummaryMsgChars <= 10000):
+            errors.append("待压缩消息单条截取上限 chatMaxSummaryMsgChars 必须在 100~10000 之间")
+        if not (1 <= self.chatRequestLimit <= 50):
+            errors.append("聊天单轮最大请求轮数 chatRequestLimit 必须在 1~50 之间")
+        if not (1 <= self.chatToolCallsLimit <= 100):
+            errors.append("聊天单轮最大工具调用数 chatToolCallsLimit 必须在 1~100 之间")
+        if math.isnan(self.chatTimeoutS) or math.isinf(self.chatTimeoutS) or self.chatTimeoutS <= 0:
+            errors.append("聊天单轮超时 chatTimeoutS 必须大于 0")
+        if not (1 <= self.chatSummaryRequestLimit <= 20):
+            errors.append("压缩摘要最大请求轮数 chatSummaryRequestLimit 必须在 1~20 之间")
+        if not (1 <= self.chatSummaryToolCallsLimit <= 30):
+            errors.append("压缩摘要最大工具调用数 chatSummaryToolCallsLimit 必须在 1~30 之间")
+        if math.isnan(self.chatSummaryTimeoutS) or math.isinf(self.chatSummaryTimeoutS) or self.chatSummaryTimeoutS <= 0:
+            errors.append("压缩摘要超时 chatSummaryTimeoutS 必须大于 0")
 
         for k in split_api_keys(self.reportApiKeys):
             if _WHITESPACE_OR_CTRL_RE.search(k):
@@ -523,28 +754,35 @@ class RuntimeConfig:
                 return default
             return patch[key].strip()
 
+        def _num_int(key: str, label: str, *, min_val: int, max_val: int) -> int:
+            raw = patch.get(key)
+            if key not in patch or raw is None or (isinstance(raw, str) and raw.strip() == ""):
+                return int(getattr(self, key))
+            return _coerce_int(raw, label, errors, min_val=min_val, max_val=max_val)
+
+        def _num_float(
+            key: str,
+            label: str,
+            *,
+            min_val: float | None = None,
+            max_val: float | None = None,
+            gt_zero: bool = False,
+        ) -> float:
+            raw = patch.get(key)
+            if key not in patch or raw is None or (isinstance(raw, str) and raw.strip() == ""):
+                return float(getattr(self, key))
+            return _coerce_float(raw, label, errors, min_val=min_val, max_val=max_val, gt_zero=gt_zero)
+
         llm_base_url = _str_field("llmBaseUrl", self.llmBaseUrl, "llmBaseUrl")
         llm_model = _str_field("llmModel", self.llmModel, "llmModel")
-        llm_temperature = (
-            _coerce_float(patch["llmTemperature"], "采样温度 llmTemperature", errors, min_val=0.0, max_val=2.0)
-            if "llmTemperature" in patch and patch["llmTemperature"] is not None
-            else self.llmTemperature
-        )
+        llm_temperature = _num_float("llmTemperature", "采样温度 llmTemperature", min_val=0.0, max_val=2.0)
         llm_max_tokens = (
             _coerce_optional_int(patch["llmMaxTokens"], "最大输出 Token 数 llmMaxTokens", errors, min_val=1)
             if "llmMaxTokens" in patch
             else self.llmMaxTokens
         )
-        llm_timeout_s = (
-            _coerce_float(patch["llmTimeoutS"], "模型请求超时 llmTimeoutS", errors, gt_zero=True)
-            if "llmTimeoutS" in patch and patch["llmTimeoutS"] is not None
-            else self.llmTimeoutS
-        )
-        llm_http_retries = (
-            _coerce_int(patch["llmHttpRetries"], "模型 HTTP 重试次数 llmHttpRetries", errors, min_val=0, max_val=10)
-            if "llmHttpRetries" in patch and patch["llmHttpRetries"] is not None
-            else self.llmHttpRetries
-        )
+        llm_timeout_s = _num_float("llmTimeoutS", "模型请求超时 llmTimeoutS", gt_zero=True)
+        llm_http_retries = _num_int("llmHttpRetries", "模型 HTTP 重试次数 llmHttpRetries", min_val=0, max_val=10)
         llm_parallel = (
             _coerce_optional_bool(patch["llmParallelToolCalls"], "llmParallelToolCalls", errors)
             if "llmParallelToolCalls" in patch
@@ -574,49 +812,16 @@ class RuntimeConfig:
             if "agentNativeStrict" in patch and patch["agentNativeStrict"] is not None
             else self.agentNativeStrict
         )
-        output_retries = (
-            _coerce_int(patch["agentOutputRetries"], "证据校验重试次数 agentOutputRetries", errors, min_val=0, max_val=10)
-            if "agentOutputRetries" in patch and patch["agentOutputRetries"] is not None
-            else self.agentOutputRetries
-        )
-        tool_retries = (
-            _coerce_int(patch["agentToolRetries"], "工具参数重试次数 agentToolRetries", errors, min_val=0, max_val=10)
-            if "agentToolRetries" in patch and patch["agentToolRetries"] is not None
-            else self.agentToolRetries
-        )
-        request_limit = (
-            _coerce_int(patch["agentRequestLimit"], "单次最大轮数 agentRequestLimit", errors, min_val=1, max_val=200)
-            if "agentRequestLimit" in patch and patch["agentRequestLimit"] is not None
-            else self.agentRequestLimit
-        )
-        tool_calls_limit = (
-            _coerce_int(
-                patch["agentToolCallsLimit"], "单次最大工具调用数 agentToolCallsLimit", errors, min_val=1, max_val=500
-            )
-            if "agentToolCallsLimit" in patch and patch["agentToolCallsLimit"] is not None
-            else self.agentToolCallsLimit
-        )
-        run_timeout_s = (
-            _coerce_float(patch["agentRunTimeoutS"], "单次运行总超时 agentRunTimeoutS", errors, gt_zero=True)
-            if "agentRunTimeoutS" in patch and patch["agentRunTimeoutS"] is not None
-            else self.agentRunTimeoutS
-        )
-        max_concurrent = (
-            _coerce_int(
-                patch["agentMaxConcurrentRuns"],
-                "最大并发运行数 agentMaxConcurrentRuns",
-                errors,
-                min_val=1,
-                max_val=128,
-            )
-            if "agentMaxConcurrentRuns" in patch and patch["agentMaxConcurrentRuns"] is not None
-            else self.agentMaxConcurrentRuns
-        )
-        preview_rows = (
-            _coerce_int(patch["agentPreviewRows"], "接口预览行数 agentPreviewRows", errors, min_val=1, max_val=200)
-            if "agentPreviewRows" in patch and patch["agentPreviewRows"] is not None
-            else self.agentPreviewRows
-        )
+        output_retries = _num_int("agentOutputRetries", "证据校验重试次数 agentOutputRetries", min_val=0, max_val=10)
+        tool_retries = _num_int("agentToolRetries", "工具参数重试次数 agentToolRetries", min_val=0, max_val=10)
+        request_limit = _num_int("agentRequestLimit", "单次最大轮数 agentRequestLimit", min_val=1, max_val=200)
+        tool_calls_limit = _num_int("agentToolCallsLimit", "单次最大工具调用数 agentToolCallsLimit", min_val=1, max_val=500)
+        run_timeout_s = _num_float("agentRunTimeoutS", "单次运行总超时 agentRunTimeoutS", gt_zero=True)
+        max_concurrent = _num_int("agentMaxConcurrentRuns", "最大并发运行数 agentMaxConcurrentRuns", min_val=1, max_val=128)
+        preview_rows = _num_int("agentPreviewRows", "接口预览行数 agentPreviewRows", min_val=1, max_val=200)
+        query_default_limit = _num_int("agentQueryDefaultLimit", "结果筛选默认行数 agentQueryDefaultLimit", min_val=1, max_val=500)
+        query_max_limit = _num_int("agentQueryMaxLimit", "结果筛选最大行数 agentQueryMaxLimit", min_val=1, max_val=1000)
+        max_period_months = _num_int("agentMaxPeriodMonths", "多账期展开跨度上限 agentMaxPeriodMonths", min_val=1, max_val=120)
 
         gateway_mode: Any = self.gatewayMode
         if "gatewayMode" in patch and patch["gatewayMode"] is not None:
@@ -636,13 +841,27 @@ class RuntimeConfig:
             else:
                 xml_style = raw_style
 
-        connect_timeout_s = (
-            _coerce_float(
-                patch["gatewayConnectTimeoutS"], "网关连接超时 gatewayConnectTimeoutS", errors, gt_zero=True
-            )
-            if "gatewayConnectTimeoutS" in patch and patch["gatewayConnectTimeoutS"] is not None
-            else self.gatewayConnectTimeoutS
-        )
+        connect_timeout_s = _num_float("gatewayConnectTimeoutS", "网关连接超时 gatewayConnectTimeoutS", gt_zero=True)
+        gateway_max_concurrency = _num_int("gatewayMaxConcurrency", "网关最大并发数 gatewayMaxConcurrency", min_val=1, max_val=512)
+        releases_keep = _num_int("releasesKeep", "发布快照保留数 releasesKeep", min_val=1, max_val=500)
+        runs_keep_days = _num_int("runsKeepDays", "运行与会话留存天数 runsKeepDays", min_val=0, max_val=3650)
+
+        chat_max_doc_chars = _num_int("chatMaxDocChars", "聊天单据最大字符数 chatMaxDocChars", min_val=500, max_val=200000)
+        chat_max_history = _num_int("chatMaxHistoryMessages", "聊天最近原文消息数 chatMaxHistoryMessages", min_val=1, max_val=200)
+        chat_max_run_cards = _num_int("chatMaxRunCards", "聊天运行卡片注入上限 chatMaxRunCards", min_val=1, max_val=50)
+        chat_max_md_preview = _num_int("chatMaxMarkdownPreviewChars", "聊天报告预览截断字数 chatMaxMarkdownPreviewChars", min_val=100, max_val=20000)
+        chat_compact_trigger = _num_int("chatCompactTriggerMessages", "自动压缩触发消息数 chatCompactTriggerMessages", min_val=2, max_val=500)
+        chat_compact_keep = _num_int("chatCompactKeepRecent", "自动压缩保留消息数 chatCompactKeepRecent", min_val=1, max_val=200)
+        chat_manual_keep = _num_int("chatManualCompactKeepRecent", "手动压缩保留消息数 chatManualCompactKeepRecent", min_val=1, max_val=200)
+        chat_manual_min_slice = _num_int("chatManualCompactMinSlice", "手动压缩最小归档条数 chatManualCompactMinSlice", min_val=1, max_val=100)
+        chat_max_summary_chars = _num_int("chatMaxMemorySummaryChars", "滚动记忆摘要上限 chatMaxMemorySummaryChars", min_val=200, max_val=10000)
+        chat_max_summary_msg = _num_int("chatMaxSummaryMsgChars", "待压缩消息单条截取上限 chatMaxSummaryMsgChars", min_val=100, max_val=10000)
+        chat_req_limit = _num_int("chatRequestLimit", "聊天单轮最大请求轮数 chatRequestLimit", min_val=1, max_val=50)
+        chat_tool_limit = _num_int("chatToolCallsLimit", "聊天单轮最大工具调用数 chatToolCallsLimit", min_val=1, max_val=100)
+        chat_timeout_s = _num_float("chatTimeoutS", "聊天单轮超时 chatTimeoutS", gt_zero=True)
+        chat_sum_req_limit = _num_int("chatSummaryRequestLimit", "压缩摘要最大请求轮数 chatSummaryRequestLimit", min_val=1, max_val=20)
+        chat_sum_tool_limit = _num_int("chatSummaryToolCallsLimit", "压缩摘要最大工具调用数 chatSummaryToolCallsLimit", min_val=1, max_val=30)
+        chat_sum_timeout_s = _num_float("chatSummaryTimeoutS", "压缩摘要超时 chatSummaryTimeoutS", gt_zero=True)
 
         llm_api_key = _resolve_secret(
             patch.get("llmApiKey"), self.llmApiKey, clear_llm_api_key, "llmApiKey", errors
@@ -694,6 +913,28 @@ class RuntimeConfig:
             gatewayXmlStyle=xml_style,
             gatewayConnectTimeoutS=connect_timeout_s,
             reportApiKeys=report_api_keys,
+            gatewayMaxConcurrency=gateway_max_concurrency,
+            releasesKeep=releases_keep,
+            runsKeepDays=runs_keep_days,
+            agentQueryDefaultLimit=query_default_limit,
+            agentQueryMaxLimit=query_max_limit,
+            agentMaxPeriodMonths=max_period_months,
+            chatMaxDocChars=chat_max_doc_chars,
+            chatMaxHistoryMessages=chat_max_history,
+            chatMaxRunCards=chat_max_run_cards,
+            chatMaxMarkdownPreviewChars=chat_max_md_preview,
+            chatCompactTriggerMessages=chat_compact_trigger,
+            chatCompactKeepRecent=chat_compact_keep,
+            chatManualCompactKeepRecent=chat_manual_keep,
+            chatManualCompactMinSlice=chat_manual_min_slice,
+            chatMaxMemorySummaryChars=chat_max_summary_chars,
+            chatMaxSummaryMsgChars=chat_max_summary_msg,
+            chatRequestLimit=chat_req_limit,
+            chatToolCallsLimit=chat_tool_limit,
+            chatTimeoutS=chat_timeout_s,
+            chatSummaryRequestLimit=chat_sum_req_limit,
+            chatSummaryToolCallsLimit=chat_sum_tool_limit,
+            chatSummaryTimeoutS=chat_sum_timeout_s,
         )
         candidate.validate()
         return candidate

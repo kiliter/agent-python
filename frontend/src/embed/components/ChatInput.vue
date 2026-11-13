@@ -98,8 +98,8 @@ defineExpose({ prefill })
           title="填入快捷改写指令"
           @click="prefill('请将当前核查报告精简润色为温和清晰的客服回复口径，保留关键办理时间与渠道依据')"
         >
-          <Sparkles :size="12" />
-          <span>精简温和改写</span>
+          <Sparkles :size="11" />
+          <span>精简改写</span>
         </button>
 
         <button
@@ -109,12 +109,12 @@ defineExpose({ prefill })
           title="打开全部核查模板列表"
           @click="emit('switchTemplate')"
         >
-          <LayoutGrid :size="12" />
-          <span>换模板</span>
+          <LayoutGrid :size="11" />
+          <span>模板库</span>
         </button>
 
         <span class="composer-hint">
-          {{ hasReport ? '可直接输入改写要求，如“精简为一段话”' : 'Enter 发送 · Shift + Enter 换行' }}
+          {{ hasReport ? '输入改写要求 · Enter 发送' : 'Enter 发送 · Shift+Enter 换行' }}
         </span>
       </div>
 
@@ -137,18 +137,18 @@ defineExpose({ prefill })
 .composer-shell {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 12px 14px 10px 18px;
-  border-radius: 24px;
+  gap: 6px;
+  padding: 8px 10px 7px 12px;
+  border-radius: 12px;
   background: var(--gpt-bg-muted);
   border: 1px solid var(--gpt-border);
-  box-shadow: var(--gpt-shadow-composer);
+  box-shadow: var(--gpt-shadow-xs);
   transition: background-color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
 }
 .composer-shell:focus-within {
   background: #ffffff;
-  border-color: var(--gpt-border-strong);
-  box-shadow: var(--gpt-shadow-composer-focus);
+  border-color: var(--gpt-accent-border);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.1);
 }
 .composer-shell.is-disabled {
   opacity: 0.72;
@@ -156,15 +156,15 @@ defineExpose({ prefill })
 
 .composer-textarea {
   width: 100%;
-  min-height: 26px;
-  max-height: 168px;
+  min-height: 22px;
+  max-height: 140px;
   border: none;
   outline: none;
   resize: none;
   background: transparent;
   font: inherit;
-  font-size: 14.5px;
-  line-height: 1.6;
+  font-size: 13px;
+  line-height: 1.5;
   color: var(--gpt-ink);
   padding: 0;
   margin: 0;
@@ -178,14 +178,14 @@ defineExpose({ prefill })
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
 }
 
 .composer-left {
   display: flex;
   align-items: center;
-  gap: 7px;
-  flex-wrap: wrap;
+  gap: 6px;
+  flex-wrap: nowrap;
   min-width: 0;
 }
 
@@ -193,17 +193,19 @@ defineExpose({ prefill })
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  height: 27px;
-  padding: 0 10px;
-  border-radius: 999px;
+  height: 23px;
+  padding: 0 8px;
+  border-radius: 6px;
   border: 1px solid var(--gpt-border);
   background: #ffffff;
   color: var(--gpt-ink-secondary);
   font: inherit;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all 0.14s ease;
 }
 .chip-btn:hover:not(:disabled) {
   border-color: var(--gpt-border-strong);
@@ -216,7 +218,7 @@ defineExpose({ prefill })
 }
 
 .composer-hint {
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--gpt-ink-muted);
   white-space: nowrap;
   overflow: hidden;
@@ -229,9 +231,9 @@ defineExpose({ prefill })
 }
 
 .send-circle-btn {
-  width: 34px;
-  height: 34px;
-  border-radius: 999px;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
   border: none;
   background: #e4e4e7;
   color: #a1a1aa;

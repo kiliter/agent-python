@@ -1,18 +1,18 @@
 <!--
   #Created By AiCoding(codex)
-  全部模板检索与选用大尺寸弹窗（挂载于 .embed-stage 内部）：
-  - 默认宽敞大尺寸（width: min(980px, calc(var(--stage-w, 1280px) - 96px))，height: calc(var(--stage-h, 720px) * 0.84)）；
-  - 顶栏右侧提供「⤢ 页内全屏 / ⤡ 退出全屏」切换按钮；
-  - 顶部实时搜索框（按模板号、名称、描述过滤）+ 状态筛选胶囊 + PC 双列模板卡片网格；
-  - 每张卡片提供独立的「预览模板」（@click.stop 打开 TemplateStructureDialog）与「使用此模板」按钮。
+  全部模板检索与选用 IDE 风格大尺寸表格弹窗（挂载于 .embed-stage 内部）：
+  - 单行 42px 合并顶栏（标题 + 内联实时搜索框 + 全部/在线过滤 + 刷新 + 页内全屏/关闭）；
+  - 粘性表头紧致表格（编号 / 模板名称 / 状态与匹配 / 模板说明 / 操作），单行省略配不裁剪悬浮 Tooltip；
+  - 每行提供独立眼睛图标预览按钮（打开 TemplateStructureDialog）与「选用」按钮。
 -->
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Check, Eye, Loader2, RefreshCw, Search, X } from 'lucide-vue-next'
+import { Check, Eye, Loader2, Maximize2, Minimize2, RefreshCw, Search, X } from 'lucide-vue-next'
 import type { TemplateOption } from '../types'
 import { STATUS_LABEL } from '../types'
 import { chatErrorText, listTemplates } from '../chatApi'
 import { stageToast } from '../stageToast'
+import { useStageFloatTip } from '../useStageFloatTip'
 
 const props = defineProps<{
   visible: boolean
@@ -28,6 +28,9 @@ const emit = defineEmits<{
   (e: 'select', templateId: number): void
   (e: 'preview', templateId: number): void
 }>()
+
+const cardRef = ref<HTMLElement | null>(null)
+const { tip, showTip, hideTip } = useStageFloatTip(cardRef)
 
 const isFullscreen = ref(false)
 const keyword = ref('')
@@ -60,6 +63,7 @@ watch(
   ([vis, sid], prev) => {
     if (!vis) {
       isFullscreen.value = false
+      hideTip()
       return
     }
     if (sid && (!prev || prev[1] !== sid || !allItems.value.length)) {
@@ -107,7 +111,7 @@ const filteredItems = computed(() => {
 
 function levelLabel(level: TemplateOption['recommendLevel']): string {
   if (level === '高') return '高匹配'
-  if (level === '中') return '备选 · 中匹配'
+  if (level === '中') return '中匹配'
   return '备选'
 }
 
@@ -134,47 +138,31 @@ function onUse(it: TemplateOption) {
     aria-label="选择核查报告模板"
     @click.self="emit('close')"
   >
-    <div class="stage-modal-card switch-tpl-card" :class="{ 'is-fullscreen': isFullscreen }">
-      <!-- 1. 顶栏 -->
+    <div
+      ref="cardRef"
+      class="stage-modal-card switch-tpl-card"
+      :class="{ 'is-fullscreen': isFullscreen }"
+    >
+      <!-- 1. 单行 42px IDE 合并顶栏（标题 + 实时搜索 + 筛选 + 图标工具） -->
       <header class="st-header">
-        <div class="st-title-wrap">
-          <h3 class="st-title">浏览全部核查模板</h3>
-          <span class="st-sub mono">共 {{ onlineCount }} 个在线可用</span>
+        <div class="st-left">
+          <h3 class="st-title">模板库</h3>
+
+          <div class="search-box">
+            <Search :size="13" class="search-ic" />
+            <input
+              v-model="keyword"
+              type="text"
+              class="search-input"
+              placeholder="搜索模板号、名称或关键词…"
+            />
+            <button v-if="keyword" type="button" class="clear-btn" title="清空搜索" @click="keyword = ''">
+              <X :size="11" />
+            </button>
+          </div>
         </div>
 
-        <div class="st-head-actions">
-          <button
-            type="button"
-            class="btn-fullscreen-toggle"
-            :class="{ active: isFullscreen }"
-            :title="isFullscreen ? '退出页内全屏' : '在聊天窗口内全屏展开'"
-            @click="isFullscreen = !isFullscreen"
-          >
-            <span>{{ isFullscreen ? '⤡ 退出全屏' : '⤢ 页内全屏' }}</span>
-          </button>
-
-          <button type="button" class="btn-close-circle" title="关闭 (ESC)" aria-label="关闭弹窗" @click="emit('close')">
-            <X :size="17" />
-          </button>
-        </div>
-      </header>
-
-      <!-- 2. 搜索与筛选栏 -->
-      <div class="st-toolbar">
-        <div class="search-box">
-          <Search :size="15" class="search-ic" />
-          <input
-            v-model="keyword"
-            type="text"
-            class="search-input"
-            placeholder="实时搜索模板号（如 101）、模板名称或业务关键词…"
-          />
-          <button v-if="keyword" type="button" class="clear-btn" title="清空搜索" @click="keyword = ''">
-            <X :size="13" />
-          </button>
-        </div>
-
-        <div class="filter-group">
+        <div class="st-right">
           <div class="filter-seg" role="tablist">
             <button
               type="button"
@@ -192,26 +180,46 @@ function onUse(it: TemplateOption) {
               :class="{ active: filterMode === 'online' }"
               @click="filterMode = 'online'"
             >
-              仅在线 <span class="mono">{{ onlineCount }}</span>
+              在线 <span class="mono">{{ onlineCount }}</span>
             </button>
           </div>
 
           <button
             type="button"
-            class="btn-refresh"
+            class="eb-icon-btn is-bordered"
             :disabled="loading"
             title="刷新模板列表"
+            aria-label="刷新模板列表"
             @click="loadList(false)"
+            @mouseenter="showTip($event, '刷新模板列表')"
+            @mouseleave="hideTip"
           >
             <RefreshCw :size="13" :class="{ spin: loading }" />
           </button>
-        </div>
-      </div>
 
-      <!-- 3. PC 双列模板卡片网格 -->
-      <div class="st-body">
+          <button
+            type="button"
+            class="eb-icon-btn is-bordered"
+            :class="{ 'is-accent': isFullscreen }"
+            :aria-label="isFullscreen ? '退出全屏' : '页内全屏'"
+            @click="isFullscreen = !isFullscreen"
+            @mouseenter="showTip($event, isFullscreen ? '退出全屏' : '页内全屏')"
+            @mouseleave="hideTip"
+          >
+            <Minimize2 v-if="isFullscreen" :size="13" />
+            <Maximize2 v-else :size="13" />
+          </button>
+
+          <button type="button" class="eb-icon-btn" title="关闭 (ESC)" aria-label="关闭弹窗" @click="emit('close')">
+            <X :size="15" />
+          </button>
+        </div>
+      </header>
+
+      <!-- 2. IDE 紧致表格主体 -->
+      <div class="st-body" @scroll.passive="hideTip">
         <div v-if="loading && !allItems.length" class="st-empty">
-          <Loader2 :size="22" class="spin accent-ic" />
+          <Loader2 :size="20" class="spin accent-ic" />
           <span>正在加载在线核查模板列表…</span>
         </div>
 
@@ -227,63 +235,113 @@ function onUse(it: TemplateOption) {
           </button>
         </div>
 
-        <div v-else class="tpl-grid">
-          <div
-            v-for="it in filteredItems"
-            :key="it.templateId"
-            class="tpl-card"
-            :class="{
-              'is-current': it.templateId === currentTemplateId,
-              'is-offline': it.offline,
-            }"
-          >
-            <div class="card-head">
-              <span class="id-pill mono">#{{ it.templateId }}</span>
-              <span class="card-name" :title="it.templateName">{{ it.templateName }}</span>
-            </div>
-
-            <div
-              v-if="it.recommendLevel || it.templateId === currentTemplateId || it.lastStatus || it.offline"
-              class="card-badges"
+        <table v-else class="st-table">
+          <colgroup>
+            <col style="width: 72px" />
+            <col style="width: 240px" />
+            <col style="width: 196px" />
+            <col />
+            <col style="width: 100px" />
+          </colgroup>
+          <thead>
+            <tr>
+              <th>编号</th>
+              <th>模板名称</th>
+              <th>状态 / 匹配</th>
+              <th>模板说明</th>
+              <th class="col-act">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="it in filteredItems"
+              :key="it.templateId"
+              class="st-row"
+              :class="{
+                'is-current': it.templateId === currentTemplateId,
+                'is-offline': it.offline,
+              }"
             >
-              <span v-if="it.recommendLevel" class="badge-pill" :class="levelClass(it.recommendLevel)">
-                {{ levelLabel(it.recommendLevel) }}
-              </span>
-              <span v-if="it.templateId === currentTemplateId" class="badge-pill badge-current">
-                <Check :size="11" /> 当前模板
-              </span>
-              <span v-if="it.lastStatus" class="badge-pill badge-muted">
-                上次{{ STATUS_LABEL[it.lastStatus] }}
-              </span>
-              <span v-if="it.offline" class="badge-pill badge-muted">已下线</span>
-            </div>
+              <td>
+                <span class="id-pill mono">#{{ it.templateId }}</span>
+              </td>
 
-            <p class="card-desc">
-              {{ it.description || '自动调取接口与单据证据核验并生成结构化申告核查报告。' }}
-            </p>
+              <td>
+                <button
+                  type="button"
+                  class="tpl-name-link"
+                  @click="emit('preview', it.templateId)"
+                  @mouseenter="it.templateName.length > 14 ? showTip($event, it.templateName) : hideTip()"
+                  @mouseleave="hideTip"
+                >
+                  {{ it.templateName }}
+                </button>
+              </td>
 
-            <div class="card-actions">
-              <button
-                type="button"
-                class="btn-card-preview"
-                @click.stop="emit('preview', it.templateId)"
-              >
-                <Eye :size="13" />
-                <span>预览模板</span>
-              </button>
+              <td class="badges-cell">
+                <div class="row-badges">
+                  <span v-if="it.recommendLevel" class="badge-pill" :class="levelClass(it.recommendLevel)">
+                    {{ levelLabel(it.recommendLevel) }}
+                  </span>
+                  <span v-if="it.templateId === currentTemplateId" class="badge-pill badge-current">
+                    <Check :size="10" /> 当前
+                  </span>
+                  <span v-if="it.lastStatus" class="badge-pill badge-muted">
+                    上次{{ STATUS_LABEL[it.lastStatus] }}
+                  </span>
+                  <span v-if="it.offline" class="badge-pill badge-muted">已下线</span>
+                  <span
+                    v-if="!it.recommendLevel && it.templateId !== currentTemplateId && !it.lastStatus && !it.offline"
+                    class="badge-pill badge-online"
+                  >
+                    在线
+                  </span>
+                </div>
+              </td>
 
-              <button
-                type="button"
-                class="btn-card-use"
-                :disabled="it.offline || busy || actionPending"
-                :title="it.offline ? '已下线模板不可运行' : busy ? '当前有运行中的核查任务' : '使用此模板开始核查'"
-                @click.stop="onUse(it)"
-              >
-                <span>{{ it.offline ? '已下线' : '使用此模板' }}</span>
-              </button>
-            </div>
-          </div>
-        </div>
+              <td>
+                <span
+                  class="desc-ellipsis"
+                  @mouseenter="showTip($event, it.description, `#${it.templateId} ${it.templateName}`)"
+                  @mouseleave="hideTip"
+                >
+                  {{ it.description || '—' }}
+                </span>
+              </td>
+
+              <td class="col-act">
+                <div class="row-actions">
+                  <button
+                    type="button"
+                    class="eb-icon-btn is-bordered"
+                    aria-label="预览模板"
+                    @click.stop="emit('preview', it.templateId)"
+                    @mouseenter="showTip($event, '预览模板结构与填充样例')"
+                    @mouseleave="hideTip"
+                  >
+                    <Eye :size="13" />
+                  </button>
+
+                  <button
+                    type="button"
+                    class="btn-row-use"
+                    :disabled="it.offline || busy || actionPending"
+                    :title="it.offline ? '已下线模板不可运行' : busy ? '当前有运行中的核查任务' : '使用此模板开始核查'"
+                    @click.stop="onUse(it)"
+                  >
+                    {{ it.offline ? '已下线' : '选用' }}
+                  </button>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- 舞台弹窗内零依赖悬浮提示 -->
+      <div v-if="tip.visible" class="eb-float-tip" :style="tip.style">
+        <div v-if="tip.title" class="eb-float-tip-title">{{ tip.title }}</div>
+        <div>{{ tip.text }}</div>
       </div>
     </div>
   </div>
@@ -307,112 +365,57 @@ function onUse(it: TemplateOption) {
 }
 
 .switch-tpl-card {
-  width: min(980px, calc(var(--stage-w, 1280px) - 96px));
-  height: calc(var(--stage-h, 720px) * 0.84);
+  width: min(1020px, calc(var(--stage-w, 1280px) - 72px));
+  height: calc(var(--stage-h, 720px) * 0.86);
 }
 
+/* ==================== 单行 42px IDE 合并顶栏 ==================== */
 .st-header {
   flex-shrink: 0;
-  padding: 14px 20px;
+  height: 42px;
+  padding: 0 12px 0 14px;
   border-bottom: 1px solid var(--gpt-border);
-  background: #ffffff;
+  background: var(--gpt-bg-subtle);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
+  flex-wrap: nowrap;
 }
 
-.st-title-wrap {
+.st-left {
+  min-width: 0;
+  flex: 1;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 10px;
 }
+
 .st-title {
   margin: 0;
-  font-size: 15.5px;
+  font-size: 13.5px;
   font-weight: 650;
   color: var(--gpt-ink);
-}
-.st-sub {
-  font-size: 12px;
-  color: var(--gpt-ink-muted);
-}
-
-.st-head-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.btn-fullscreen-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 32px;
-  padding: 0 13px;
-  border-radius: 9px;
-  border: 1px solid var(--gpt-border);
-  background: var(--gpt-bg-subtle);
-  color: var(--gpt-ink);
-  font: inherit;
-  font-size: 12.5px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-.btn-fullscreen-toggle:hover,
-.btn-fullscreen-toggle.active {
-  border-color: var(--gpt-accent-border);
-  background: var(--gpt-accent-soft);
-  color: var(--gpt-accent);
-}
-
-.btn-close-circle {
-  width: 32px;
-  height: 32px;
-  border-radius: 999px;
-  border: none;
-  background: transparent;
-  color: var(--gpt-ink-muted);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-}
-.btn-close-circle:hover {
-  background: var(--gpt-bg-muted);
-  color: var(--gpt-ink);
-}
-
-/* 搜索栏 */
-.st-toolbar {
+  white-space: nowrap;
   flex-shrink: 0;
-  padding: 11px 20px;
-  border-bottom: 1px solid var(--gpt-border);
-  background: var(--gpt-bg-subtle);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
 }
 
 .search-box {
-  flex: 1;
-  min-width: 240px;
-  height: 36px;
-  padding: 0 12px;
-  border-radius: 10px;
+  width: min(340px, 46vw);
+  min-width: 180px;
+  height: 27px;
+  padding: 0 8px;
+  border-radius: 6px;
   border: 1px solid var(--gpt-border);
   background: #ffffff;
   display: flex;
   align-items: center;
-  gap: 8px;
-  transition: border-color 0.15s, box-shadow 0.15s;
+  gap: 6px;
+  transition: border-color 0.14s, box-shadow 0.14s;
 }
 .search-box:focus-within {
   border-color: var(--gpt-accent);
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
 }
 .search-ic {
   color: var(--gpt-ink-muted);
@@ -425,15 +428,16 @@ function onUse(it: TemplateOption) {
   outline: none;
   background: transparent;
   font: inherit;
-  font-size: 13.5px;
+  font-size: 12px;
   color: var(--gpt-ink);
 }
 .search-input::placeholder {
   color: var(--gpt-ink-subtle);
 }
 .clear-btn {
-  width: 20px;
-  height: 20px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
   border-radius: 50%;
   border: none;
   background: var(--gpt-bg-muted);
@@ -442,32 +446,41 @@ function onUse(it: TemplateOption) {
   align-items: center;
   justify-content: center;
   cursor: pointer;
+  flex-shrink: 0;
+}
+.clear-btn:hover {
+  background: var(--gpt-border);
+  color: var(--gpt-ink);
 }
 
-.filter-group {
+.st-right {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  flex-shrink: 0;
 }
+
 .filter-seg {
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  padding: 3px;
-  border-radius: 10px;
+  height: 26px;
+  padding: 2px;
+  border-radius: 7px;
   background: #e4e4e7;
 }
 .f-btn {
-  height: 28px;
-  padding: 0 11px;
+  height: 22px;
+  padding: 0 8px;
   border: none;
-  border-radius: 7px;
+  border-radius: 5px;
   background: transparent;
   color: var(--gpt-ink-secondary);
   font: inherit;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 500;
   cursor: pointer;
+  white-space: nowrap;
 }
 .f-btn.active {
   background: #ffffff;
@@ -476,30 +489,13 @@ function onUse(it: TemplateOption) {
   box-shadow: var(--gpt-shadow-xs);
 }
 
-.btn-refresh {
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
-  border: 1px solid var(--gpt-border);
-  background: #ffffff;
-  color: var(--gpt-ink-secondary);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-}
-.btn-refresh:hover:not(:disabled) {
-  background: var(--gpt-bg-muted);
-  color: var(--gpt-ink);
-}
-
-/* 主体双列网格 */
+/* ==================== 表格主体（粘性表头 + 紧凑 36px 行高） ==================== */
 .st-body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 18px 20px;
-  background: #f8fafc;
+  padding: 0;
+  background: #ffffff;
 }
 
 .st-empty {
@@ -511,94 +507,132 @@ function onUse(it: TemplateOption) {
   justify-content: center;
   gap: 10px;
   color: var(--gpt-ink-muted);
-  font-size: 13.5px;
+  font-size: 13px;
 }
 .accent-ic {
   color: var(--gpt-accent);
 }
 .btn-reset {
-  height: 32px;
-  padding: 0 14px;
-  border-radius: 999px;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 6px;
   border: 1px solid var(--gpt-border-strong);
   background: #ffffff;
   color: var(--gpt-ink);
   font: inherit;
-  font-size: 12.5px;
+  font-size: 12px;
   cursor: pointer;
 }
 
-.tpl-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-@media (max-width: 680px) {
-  .tpl-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
+.st-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 12.5px;
 }
 
-.tpl-card {
-  border-radius: 14px;
-  border: 1px solid var(--gpt-border);
-  background: #ffffff;
-  padding: 14px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+.st-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: 30px;
+  padding: 0 12px;
+  background: #f8fafc;
+  color: var(--gpt-ink-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+  box-shadow: inset 0 -1px 0 var(--gpt-border);
 }
-.tpl-card:hover:not(.is-offline) {
-  border-color: var(--gpt-border-strong);
-  box-shadow: var(--gpt-shadow-sm);
-}
-.tpl-card.is-current {
-  border-color: var(--gpt-accent-border);
-  background: #fcfdff;
-}
-.tpl-card.is-offline {
-  opacity: 0.72;
+.st-table thead th.col-act {
+  text-align: right;
 }
 
-.card-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.st-row {
+  height: 36px;
+  border-bottom: 1px solid var(--gpt-border);
+  transition: background-color 0.12s ease;
+}
+.st-row:last-child {
+  border-bottom: none;
+}
+.st-row:hover {
+  background: #f8fafc;
+}
+.st-row.is-current {
+  background: #f5f9ff;
+}
+.st-row.is-current:hover {
+  background: #eef5ff;
+}
+.st-row.is-offline {
+  opacity: 0.68;
+}
+
+.st-table tbody td {
+  padding: 4px 12px;
+  vertical-align: middle;
   min-width: 0;
 }
+.st-table tbody td.col-act {
+  text-align: right;
+}
+
 .id-pill {
-  padding: 1.5px 7px;
-  border-radius: 6px;
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 5px;
   background: var(--gpt-bg-muted);
   color: var(--gpt-ink-secondary);
   font-size: 11.5px;
   font-weight: 600;
-  flex-shrink: 0;
-}
-.card-name {
-  font-size: 14px;
-  font-weight: 650;
-  color: var(--gpt-ink);
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.card-badges {
+.tpl-name-link {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--gpt-ink);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.tpl-name-link:hover {
+  color: var(--gpt-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.badges-cell {
+  white-space: nowrap;
+}
+.row-badges {
   display: flex;
   align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
+  gap: 4px;
+  flex-wrap: nowrap;
+  overflow: hidden;
 }
 .badge-pill {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  padding: 1px 8px;
-  border-radius: 999px;
+  gap: 2px;
+  padding: 0 6px;
+  height: 18px;
+  border-radius: 5px;
   font-size: 11px;
   font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .lv-high {
   background: var(--gpt-emerald-bg);
@@ -621,70 +655,53 @@ function onUse(it: TemplateOption) {
   border: 1px solid var(--gpt-accent-border);
   color: var(--gpt-accent);
 }
-
-.card-desc {
-  margin: 0;
-  flex: 1;
-  font-size: 12.5px;
-  line-height: 1.55;
+.badge-online {
+  background: #f8fafc;
+  border: 1px solid var(--gpt-border);
   color: var(--gpt-ink-secondary);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  font-weight: 500;
+}
+
+.desc-ellipsis {
+  display: block;
+  width: 100%;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--gpt-ink-secondary);
+  font-size: 12px;
+  cursor: default;
 }
 
-.card-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  padding-top: 4px;
-}
-
-.btn-card-preview {
+.row-actions {
   display: inline-flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 5px;
-  height: 30px;
-  padding: 0 12px;
-  border-radius: 999px;
-  border: 1px solid var(--gpt-border);
-  background: #ffffff;
-  color: var(--gpt-ink-secondary);
-  font: inherit;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-.btn-card-preview:hover {
-  border-color: var(--gpt-border-strong);
-  background: var(--gpt-bg-muted);
-  color: var(--gpt-ink);
+  white-space: nowrap;
 }
 
-.btn-card-use {
+.btn-row-use {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  height: 30px;
-  padding: 0 14px;
-  border-radius: 999px;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 5px;
   border: 1px solid var(--gpt-btn-dark);
   background: var(--gpt-btn-dark);
   color: #ffffff;
   font: inherit;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: background-color 0.14s, border-color 0.14s;
 }
-.btn-card-use:hover:not(:disabled) {
+.btn-row-use:hover:not(:disabled) {
   background: var(--gpt-btn-dark-hover);
   border-color: var(--gpt-btn-dark-hover);
 }
-.btn-card-use:disabled {
+.btn-row-use:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }

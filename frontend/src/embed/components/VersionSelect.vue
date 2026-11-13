@@ -10,6 +10,8 @@ import { Check, ChevronDown } from 'lucide-vue-next'
 export interface VersionSelectOption {
   value: number
   label: string
+  /** 触发器按钮内展示的紧凑短文案（下拉菜单仍展示完整 label） */
+  shortLabel?: string
 }
 
 const props = defineProps<{
@@ -25,10 +27,11 @@ const emit = defineEmits<{
 const rootRef = ref<HTMLElement | null>(null)
 const open = ref(false)
 
-const currentLabel = computed(() => {
-  const hit = props.options.find(o => o.value === props.modelValue)
-  return hit?.label || props.options[0]?.label || ''
-})
+const currentOption = computed(
+  () => props.options.find(o => o.value === props.modelValue) || props.options[0] || null,
+)
+const currentLabel = computed(() => currentOption.value?.shortLabel || currentOption.value?.label || '')
+const currentFullLabel = computed(() => currentOption.value?.label || '')
 
 function toggleOpen() {
   if (props.disabled || !props.options.length) return
@@ -83,7 +86,7 @@ onBeforeUnmount(() => {
       type="button"
       class="vs-trigger"
       :disabled="disabled"
-      :title="currentLabel"
+      :title="currentFullLabel"
       aria-haspopup="listbox"
       :aria-expanded="open"
       @click="toggleOpen"
@@ -118,9 +121,9 @@ onBeforeUnmount(() => {
 
 .vs-trigger {
   width: 100%;
-  height: 30px;
-  padding: 0 9px 0 11px;
-  border-radius: 8px;
+  height: 25px;
+  padding: 0 7px 0 9px;
+  border-radius: 6px;
   border: 1px solid var(--gpt-border);
   background: #ffffff;
   color: var(--gpt-ink);
@@ -130,7 +133,7 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
+  gap: 5px;
   cursor: pointer;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }

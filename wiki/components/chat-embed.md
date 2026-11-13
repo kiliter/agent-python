@@ -9,11 +9,18 @@ sources:
   - src/report_agent/chat/manager.py
   - src/report_agent/chat/agent.py
   - src/report_agent/chat/service.py
+  - src/report_agent/config.py
+  - src/report_agent/store/runtime_config.py
   - src/report_agent/api/routes_chat.py
   - frontend/embed.html
+  - frontend/src/embed/embed.css
+  - frontend/src/embed/types.ts
   - frontend/src/embed/ChatEmbedApp.vue
   - frontend/src/embed/chatApi.ts
   - frontend/src/embed/stageToast.ts
+  - frontend/src/embed/useStageFloatTip.ts
+  - frontend/src/embed/components/ChatInput.vue
+  - frontend/src/embed/components/RecommendCard.vue
   - frontend/src/embed/components/AskParamsCard.vue
   - frontend/src/embed/components/RunCard.vue
   - frontend/src/embed/components/ReportInlineCard.vue
@@ -68,7 +75,7 @@ flowchart LR
 | iframe → 父 | `report-confirmed` | `{userId, orderId, templateId, templateName, runId, status, markdown, edited, rewritten}`：`POST /runs/{runId}/confirm` 成功后以锁定的 `targetOrigin` 精确回传 |
 | iframe → 父 | `chat-close-request` | 紧随 `report-confirmed` 发送，交由宿主页面关闭对应页内 Tab 页签或隐藏 iframe |
 
-- **管理端全局多页签动态聊天窗口与双栏模拟联调（`WorkspaceTabsBar.vue` + `ChatIframeTabPane.vue` + `ChatSimView.vue`）**：管理端右侧顶栏采用基于 Element Plus `ElTabs` 与 `SortableJS` 的全局工作区多页签栏；`/#/chat-sim` 采用清爽的 PC 左右双栏卡片布局（左栏配置父页面参数与单据，右栏可切换或上下分栏查看 `postMessage` 实时报文流与确认回传报告）。点击「在顶部新页签打开聊天窗口」时，在全局页签栏新增并激活 `智能填报 · <orderId>` 页签，由 `ChatIframeTabPane.vue` 以 `100% × 100%` 占满主内容区承载 `/embed.html` `<iframe>`（`v-show` 保活，切换业务模块页签不中断会话或 SSE 流），收到 `chat-close-request` 后自动关闭该聊天页签并切回 `聊天窗口模拟` 展示确认报告。
+- **管理端全局多页签保活与右侧全屏模拟联调（`WorkspaceTabsBar.vue` + `ChatIframeTabPane.vue` + `ChatSimView.vue`）**：管理端右侧顶栏采用基于 Element Plus `ElTabs` 与 `SortableJS` 的全局工作区多页签栏；`/#/chat-sim` 采用清爽的 PC 左右双栏卡片布局（左栏配置父页面参数与单据，右栏查看 `postMessage` 实时报文流与确认回传报告）。点击「打开聊天窗口」时激活 `ChatIframeTabPane.vue` 并触发 `App.vue` `.main-wrapper.is-chat-fullscreen` 隐藏 `.topbar` 与全局页签栏，使 `/embed.html` `<iframe>` 占满右侧全屏（`v-show` 保活，点击左侧导航可切出且不中断会话与 SSE 流，收到 `chat-close-request` 后自动关闭聊天页签并返回 `聊天窗口模拟`）。
 
 ## 3. 会话存储、入参指纹演进与中断自愈（`chat/store.py` + `chat/service.py`）
 
@@ -77,6 +84,7 @@ flowchart LR
   - 指纹不变：`inputsChanged=False`，无损恢复历史消息、推荐列表与确认状态；
   - 指纹变化：`inputsVersion += 1`、`inputsChanged=True`；入参合并遵循**「上层本次非空键值覆盖同名键并标为『上层』；上层此前传过但本次置空/移除的『上层』键同步移除；用户此前在对话或表单中补充过（`inputSources[k] == '用户补充'`）且上层本次未提供非空值的键予以保留」**（在 `start_run` 补参时亦支持传入空串清空此前误填的「用户补充」可选参数，同时保护「上层」入参不被空串冲掉）；同时将所有历史 `run` 卡片标记 `stale=True`（「旧入参」角标），并追加一条 `kind="divider"` 系统分隔消息。
 - **进程重启中断恢复**：在 `open_session`、`get_session_view` 或 `stream_events` 读取会话时，若发现某张 `run` 卡片持久化状态仍为 `RUNNING` 但不在当前进程 `ChatRunManager` 活跃任务中，自动将其修正为 `INTERRUPTED`（附错误说明）并写回磁盘，避免前端永久卡死在运行态。
+- **增量滚动记忆状态持久化**：会话记录持久化 `memorySummary`（早期对话记忆摘要，默认 `""`）与 `summarizedUpTo`（已归档前缀消息条数，默认 `0`），并由 `src/report_agent/chat/service.py#ChatService._effective_memory_state` 在视图构建与压缩切片前统一清洗异常类型（拦截 `bool` 伪造正整数、负数及空摘要脏数据）并将游标夹紧至当前消息总长度。
 
 ## 4. 聊天路由智能体与 `output_validator` 自愈（`chat/agent.py`）
 
@@ -94,6 +102,19 @@ flowchart LR
 1. **只读受限工具集**：仅注册 `load_skill`（锁死仅允许加载 `template-router`）、`list_templates`、`get_template`、`get_run_result`（强制校验 `runId` 属于当前会话），不暴露任何外部网关工具；
 2. **`CHAT_SYSTEM_PROMPT` 改写动作强约束**：明确要求当用户请求改写、润色、精简或调整已生成报告口径时（包括此前已点击确认的报告），必须使用 `action="rewrite"` 并在 `markdown` 提交完整报告正文、`text` 仅写简短说明，严禁使用 `action="reply"` 只口头声称已改写而不输出 `markdown`；
 3. **`@agent.output_validator` 自愈**：若模型幻觉输出不存在或已下线的 `templateId`，或 `rewrite` 指向非本会话/无正文的运行，校验器直接抛出 `ModelRetry` 附带合法在线模板列表让模型当场修正。
+
+### 增量滚动上下文压缩（Rolling Summary）与运行期热更新
+
+为解决长对话超出滑窗（默认 `MAX_HISTORY_MESSAGES = 20`）后早期用户补充诉求、排除模板与改写口径偏好丢失问题，同时保持短对话零额外 LLM 开销与零提示词漂移，平台在 `chat/agent.py` 与 `chat/service.py` 实现了阈值触发的增量滚动记忆摘要与手动归档机制，并将全部 **16 项**聊天会话与上下文压缩参数接入 `RuntimeConfig` 实现免重启热更新：
+
+- **只读摘要智能体、16 项热更新配置与安全默认值兜底（`src/report_agent/chat/agent.py`）**：
+  - **16 项运行期可配阈值与超时**：涵盖上下文截断（`chatMaxDocChars` 默认 `12000`、`chatMaxHistoryMessages` 默认 `20`、`chatMaxRunCards` 默认 `8`、`chatMaxMarkdownPreviewChars` 默认 `1500`）、自动/手动压缩窗口（`chatCompactTriggerMessages` 默认 `24`、`chatCompactKeepRecent` 默认 `12`、`chatManualCompactKeepRecent` 默认 `6`、`chatManualCompactMinSlice` 默认 `2`、`chatMaxMemorySummaryChars` 默认 `1200`、`chatMaxSummaryMsgChars` 默认 `800`）与聊天/摘要推理限额（`chatRequestLimit` 默认 `8`、`chatToolCallsLimit` 默认 `16`、`chatTimeoutS` 默认 `120`、`chatSummaryRequestLimit` 默认 `3`、`chatSummaryToolCallsLimit` 默认 `4`、`chatSummaryTimeoutS` 默认 `60`）；`ChatAgent` 与 `ChatService` 通过 `cfg_int` / `cfg_float` 实时读取当前生效 `Settings`，缺失、置空或越界时自动安全回退模块内置默认常量。
+  - **结构化摘要契约与热更新缓存键**：定义 `ChatSummaryOutput(summary: str)`（`extra="forbid"`），由独立的只读摘要 Agent（按 `agent_output_mode` 绑定 `submit_chat_summary` 工具或结构化输出，并由 `ChatAgent._cached_summarizer` 与 `_cached_agent` 将相关运行参数及 `build_summary_system_prompt(max_summary_chars)` 纳入缓存键实现配置变更后零重启即时切换）将「已有早期对话记忆摘要」与「本批新增待归档对话切片」（由 `format_messages_for_summary` 按当前 `chatMaxSummaryMsgChars` 格式化）增量合并为精炼中文要点；`output_validator` 拦截空串并自动将超长摘要截断至当前 `chatMaxMemorySummaryChars` 以内，单次调用受 `UsageLimits(request_limit=..., tool_calls_limit=...)` 与 `chatSummaryTimeoutS` 超时保护。
+  - **上下文注入与证据域绝对隔离**：仅当有效 `memory_summary` 非空时，`src/report_agent/chat/agent.py#build_chat_user_prompt` 才在 `## 最近对话历史` 之前前置 `## 早期对话记忆摘要（前序消息已压缩归档；仅供理解对话背景与改写口径偏好，严禁作为填报字段证据）` 段落；短会话零摘要时提示词逐字保持不变。**`memorySummary` 与聊天消息严格限制在 `ChatAgent` 对话上下文内，绝不注入 `AgentRunner` 的 `<document>` 或 `RunRequest.inputs`，确保后台填报引擎的 `quote` / `input` / `derive` 强证据核验边界保持绝对隔离**。
+- **锁外调模型、单调锚点落盘与视图联动（`src/report_agent/chat/service.py`）**：
+  - **自动阈值压缩与无感降级（`ChatService.send_message`）**：追加本轮用户消息后在锁外判断未归档消息数是否达到当前 `chatCompactTriggerMessages`（默认 `24`）；触发时先通过 SSE 下发 `status` 事件 `正在压缩早期对话上下文…`，随后**在释放 `ChatStore` 会话锁后**异步调用 `ChatAgent.summarize_history` 仅对 `[summarized_up_to : len(history_before) - keep_recent]` 增量切片合并摘要，避免长时间阻塞同会话并发读或取消操作。若压缩超时或失败，除 `CancelledError` 外仅经 `sanitize_error_text` 脱敏记日志并自动无感回退原始滑窗，**绝不阻断用户正常发送消息**。
+  - **并发安全的单调锚点落盘（`ChatService._persist_compaction_if_monotonic`）**：摘要生成后重新获取 `store.lock_for(sid)`，核验目标 `cutoff > cur_up_to`、`len(cur_msgs) >= cutoff` 且 `cur_msgs[cutoff - 1]["id"] == anchor_msg_id` 后才原子提交 `memorySummary` 与 `summarizedUpTo`，防止并发发送/入参更新分隔消息写入导致游标倒退或切片错位。
+  - **手动压缩端点与动态视图阈值下发（`ChatService.compact_session` / `_build_view`）**：按当前 `chatManualCompactKeepRecent`（默认 `6`）与 `chatManualCompactMinSlice`（默认 `2`）计算切分点，未归档不足 `keep_manual + min_slice`（默认 `8` 条）时幂等返回 `compacted: false` 且零模型调用；否则调用摘要 Agent 并返回 `{compacted, summarizedCount, summarizedUpTo, memorySummary, session}`，超时映射为 HTTP 504 `CHAT_COMPACT_TIMEOUT`，模型失败经 `sanitize_error_text` 脱敏后映射为 HTTP 502 `CHAT_COMPACT_ERROR`。同时 `ChatService._build_view` 在每次返回的 `ChatSession` 视图中动态下发 `manualCompactKeepRecent` 与 `manualCompactMinMessages`（`= keep_manual + min_slice`），供前端精准联动触发条件与提示文案。
 
 ## 5. 模板结构与样例预览（`chat/service.py#ChatService.get_template_preview`）
 
@@ -123,12 +144,14 @@ flowchart LR
   - 精确标记 `edited = (markdown != versions[-1].markdown)` 与 `rewritten = (versions[-1].kind == "rewrite")`。
 - **幂等与审计留痕**：仅当目标运行卡片当前已处于 `card["confirmed"] == True` 且 `markdown` 与最近一次确认快照一致时才按幂等跳过落盘（若用户在确认 `v1` 后经 AI `rewrite` 生成 `v2` 复位了 `card["confirmed"]`，再切回 `v1` 确认仍会准确重算 `edited`/`rewritten` 并记录审计）；每次有效确认均记录会话内 `confirmRecords` 并通过 `audit("chat-confirm", ...)` 写入 `DATA_DIR/audit.jsonl`。
 - **模板下线兼容**：当某模板在工作台被下线后，`get_session_view` 动态标记历史卡片 `templateOffline=True`——**允许用户继续预览和确认已生成的历史报告，但拦截新发起或重跑该模板（返回 HTTP 404 `TEMPLATE_UNAVAILABLE`）**。
-- **ChatGPT Web 风格纯亮色单栏界面、独立轻量分包与页内全屏弹窗（`ChatEmbedApp.vue`）**：
-  - **纯亮色单栏等比缩放舞台与零重型依赖分包**：页面固定为清爽明亮的纯亮色（`color-scheme: light`），默认启用桌面宽屏基准 `BASE_WIDTH = 1280`、`MIN_STAGE_HEIGHT = 640` 的等比缩放舞台（动态计算 `stageW = Math.max(BASE_WIDTH, vw / s)` 与 `stageH = vh / s` 100% 铺满视口而无灰边）；`embed.html` 构建彻底剥离 `ElementPlus` 与 `CodeMirror` 重型依赖（首屏体积缩减约 80%），以挂载于 `.embed-stage` 内同屏缩放的 `VersionSelect.vue`、`StageConfirmDialog.vue` 与零依赖 `stageToast.ts` 提供原生丝滑交互，并复用 `src/utils/sse.ts#readSseStream` 保证流提前结束或 `AbortController.abort()` 时可靠执行 `reader.cancel()`。
-  - **居中对话流 + 内联卡片 + 三大页内全屏弹窗**：中央 `max-width: 840px` 消息流内联承载 `RecommendCard.vue`（推荐卡片）、`AskParamsCard.vue`（双列补参卡片）与 `RunCard.vue`（可折叠「精简步骤 ↔ 原样运行记录」+ 内联报告正文卡片），底部配备 24px 大圆角悬浮输入舱（`ChatInput.vue`）；同时提供 `PreviewDialog.vue`（渲染预览 / 源码编辑 / 左右分栏对比）、`TemplateStructureDialog.vue`（按 `${sessionId}:${inputsVersion}:${templateId}` 隔离预览缓存，`draft` 模式每次拉取最新模板样例 / Jinja2 原稿 / 入参与核查字段清单）与 `SwitchTemplateDialog.vue`（双列检索全部模板）三大居中详情弹窗，全部内置一键「⤢ 页内全屏 / ⤡ 退出全屏」切换。
+- **IDE 级紧凑流式界面、独立轻量分包与零文本冗余图标操作（`ChatEmbedApp.vue` + `embed.css` + `useStageFloatTip.ts`）**：
+  - **等比上限收敛与零重型依赖分包**：页面固定纯亮色（`color-scheme: light`），基础字号与正文排版收敛至 IDE 紧凑尺度（`13px` 基础字号），等比缩放舞台 `scaleFactor` 封顶为 `1`（避免宽屏桌面被放大导致卡片和文字虚胖）；`embed.html` 构建彻底剥离 `ElementPlus` 与 `CodeMirror` 重型依赖（首屏体积缩减约 80%），通过 `.eb-tip`（`data-tip` 纯 CSS 悬浮提示）、`useStageFloatTip`（挂载于 `.stage-modal-card` 顶层的零依赖防裁剪悬浮提示，自动换算 `transform: scale` 坐标）、`.eb-icon-btn`、`VersionSelect.vue`（支持 `shortLabel` 紧凑展示）、`StageConfirmDialog.vue` 与 `stageToast.ts` 提供高精度交互，并复用 `src/utils/sse.ts#readSseStream` 保证流提前结束或 `AbortController.abort()` 时可靠执行 `reader.cancel()`。
+  - **标准蓝用户气泡、紧凑居中对话流与渐进式记忆归档交互**：对话流扩宽至 `max-width: 920px`，顶栏压缩至单行 `40px`（`入参 (N)` + 缩放图标 + `模板库`），用户消息气泡（`.user-capsule`）采用标准蓝 `#2563eb` 配白字；仅当未归档会话消息达到 `manualCompactMinMessages`（默认 `8` 条，`ChatEmbedApp.vue` 通过 `manualCompactKeep` / `manualCompactMin` / `canManualCompact` 实时读取会话视图返回值并与 `sending`/`compacting`/`actionPending` 联动控制按钮显示、禁用态与「保留最近 N 条原文」悬浮提示）或已存在归档记忆（`summarizedUpTo > 0`）时，顶栏右侧按需展示紧凑「`记忆 (N)`」胶囊按钮或手动压缩图标按钮（短会话保持零占位），点击可打开挂载于 `.embed-stage` 内的 `.memory-popover-card` 轻量浮层（与 `inputsPanelOpen` 互斥，支持查看只读摘要、复制全文与手动继续压缩），并在对话流第 `summarizedUpTo` 条消息后紧跟一行极简归档水位分隔线（含「查看摘要」快捷入口）。内联卡片包括：`RecommendCard.vue`（单张外框容器内展示多列紧凑子卡、内置实时搜索框及每卡独立眼睛预览图标与「选用」按钮）、`AskParamsCard.vue`（紧凑双列补参卡片与图标预览）、`RunCard.vue`（单行不换行运行状态条 + 可折叠「精简步骤 ↔ 原样运行记录」）与 `ReportInlineCard.vue`（单行 `36px` 不换行头部、移除整行提示横幅改为顶部状态 Tag + 悬浮 Tooltip、全图标化工具栏按钮与紧凑 `12.5px` 报告正文以便单卡一屏预览）；底部配备紧凑悬浮输入舱（`ChatInput.vue`）。
+  - **三大 IDE 风格舞台内全屏弹窗**：`PreviewDialog.vue`（单行 `40px` 合并顶栏，集成版本、预览/源码/分栏切换与全图标操作）、`SwitchTemplateDialog.vue`（合并 `42px` 单行搜索筛选顶栏 + 粘性表头紧致表格 `编号 / 模板名称 / 状态与匹配 / 模板说明 / 操作`，单行说明配 `useStageFloatTip` 悬浮查看全文与每行眼睛预览+选用）与 `TemplateStructureDialog.vue`（单行 `40px` 合并顶栏 + 三栏分段器 + `38px` 紧凑底栏；Tab 3 改为上下全宽独立滚动粘性表头检查器——上方所需入参表、下方核查字段表，字段名不换行且规则默认单行省略悬浮看全文 + 点击行内展开，按 `${sessionId}:${inputsVersion}:${templateId}` 隔离缓存）统一使用 Lucide `Maximize2`/`Minimize2` 纯图标全屏切换。
 
 ## 相关页面
 
+- [环境变量与运行期配置参考](../reference/configuration.md)
 - [FastAPI 路由与鉴权组件剖析](api-and-auth.md)
 - [Vue 3 资源工作台前端剖析](workbench-frontend.md)
 - [AgentRunner 运行时组件剖析](agent-runner.md)

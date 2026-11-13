@@ -41,6 +41,10 @@ interface ChatSession {
   activeRunId: string | null
   confirmed: { runId: string; templateId: number; templateName: string; confirmedAt: string;
                edited: boolean; rewritten: boolean } | null
+  memorySummary: string            // 已压缩归档的早期对话记忆摘要（无归档时为空串）
+  summarizedUpTo: number           // 已压缩归档的 messages 前缀条数（短会话为 0）
+  manualCompactKeepRecent?: number // 手动压缩保留的最近原文条数（默认 6，随系统设置热更新）
+  manualCompactMinMessages?: number // 触发手动压缩的未归档消息总数下限（默认 8，即 keepRecent + minSlice）
   messages: ChatMessage[]
   created?: boolean                // 仅 POST /sessions 返回
   inputsChanged?: boolean          // 仅 POST /sessions 返回
@@ -106,7 +110,8 @@ interface TemplatePreview {
 |------|------|------|
 | `POST /sessions` | `{userId, orderId, inputs, document, target?}` | `ChatSession`（同一 userId+orderId 恢复原会话；入参指纹变化时 `inputsChanged=true`，并追加 divider 消息，旧 run 卡片 `stale=true`） |
 | `GET /sessions/{sid}` | — | `ChatSession` |
-| `POST /sessions/{sid}/messages` | `{text, auto?}` | **SSE**：`status` `{text}`；`message` `ChatMessage`（**按 id upsert**：同 id 表示更新，例如改写后的 run 卡片；动作为 `rewrite` 时还会追加携带 `rewriteRunId` 与 `rewriteVersionNo` 的助手 `text` 消息）；`error` `{code, message}`；最后 `done` `{session}`。`auto=true` 表示打开时的自动推荐（不产生用户消息）。动作为运行时会返回一条 `RUNNING` 的 run 消息，前端随后订阅其 events |
+| `POST /sessions/{sid}/messages` | `{text, auto?}` | **SSE**：`status` `{text}`；`message` `ChatMessage`（**按 id upsert**：同 id 表示更新，例如改写后的 run 卡片；动作为 `rewrite` 时还会追加携带 `rewriteRunId` 与 `rewriteVersionNo` 的助手 `text` 消息）；`error` `{code, message}`；最后 `done` `{session}`。`auto=true` 表示打开时的自动推荐（不产生用户消息）；`auto=false` 且未归档历史消息数达到阈值（默认 24 条，支持运行期热更新）时，SSE 会先下发 `status` 事件 `正在压缩早期对话上下文…` 执行增量滚动摘要后再进入智能体推理（压缩失败时自动无感回退滑窗，不阻断对话）。动作为运行时会返回一条 `RUNNING` 的 run 消息，前端随后订阅其 events |
+| `POST /sessions/{sid}/compact` | `{}`（空请求体） | `{compacted: boolean, summarizedCount: number, summarizedUpTo: number, memorySummary: string, session: ChatSession}`：手动将当前未归档早期对话压缩合并为记忆摘要（保留最近原文条数默认 6 条）；未归档不足触发下限（默认 8 条，即 `manualCompactMinMessages`）时幂等返回 `compacted: false` 且不调用模型。模型超时返回 `504 CHAT_COMPACT_TIMEOUT`，失败返回 `502 CHAT_COMPACT_ERROR` |
 | `GET /sessions/{sid}/templates?q=` | — | `[{templateId, templateName, description, offline, recommendLevel, lastStatus}]`（换模板弹窗用：本次推荐结果排在前面，`lastStatus` 为本会话最近一次运行状态） |
 | `GET /sessions/{sid}/templates/{templateId}` | — | `TemplatePreview`（模板结构详情、入参当前值、可见字段说明与样例填充预览；已下线模板仍允许预览并标记 `offline=true`；不存在返回 `404 TEMPLATE_UNAVAILABLE`） |
 | `POST /sessions/{sid}/runs` | `{templateId, inputs?}` | `{message: ChatMessage, session: ChatSession}`：缺少必填参数或格式不对时返回 `ask_params` 消息，否则返回 `RUNNING` 的 run 消息。`inputs` 合并到会话并标记来源为「用户补充」。错误：`409 RUN_IN_PROGRESS`、`404 TEMPLATE_UNAVAILABLE` |
@@ -117,6 +122,8 @@ interface TemplatePreview {
 
 `edited` = 提交的 markdown 与最新版本不同；`rewritten` = 最新版本是 rewrite。
 
+> **运行期热更新**：压缩阈值、滑窗条数、单据预览截断与推理超限等参数现已接入平台「引擎与系统设置」在线热更新，未配置或置空时自动使用内置默认值。
+
 ## 5. 交互要点
 
 - **纯亮色单栏全幅等比缩放舞台与自适应回退**：嵌入页锁定明亮清爽的纯亮色（`color-scheme: light`，不受管理端暗色主题影响），默认启用基于桌面宽屏基准 `BASE_WIDTH = 1280`、`MIN_STAGE_HEIGHT = 640` 的全幅等比例缩放（动态计算 `stageW = Math.max(BASE_WIDTH, vw / s)` 与 `stageH = vh / s` 100% 铺满整个浏览器窗口，消除两侧留白灰边；全部详情弹窗、确认框与轻提示挂载在 `.embed-stage` 内同屏等比缩放），52px 极简毛玻璃顶栏提供「工单入参」页内浮层、「等比缩放 / 自适应」回退按钮、「浏览全部模板」与「关闭窗口」入口
@@ -126,6 +133,7 @@ interface TemplatePreview {
   3. `三大页内居中弹窗（均支持 ⤢ 页内全屏 / ⤡ 退出全屏）`：`PreviewDialog.vue`（`渲染预览 | Markdown 源码编辑 | 左右分栏实时对比` 三态报告审阅与确认回传）、`TemplateStructureDialog.vue`（填充效果样例、Jinja2 原稿、入参当前值与可见核查字段清单）及 `SwitchTemplateDialog.vue`（双列卡片检索全部模板，支持查看结构或立即运行）
 - **管理端右侧全局多页签栏 + 模拟联调双栏工作台**：管理端壳层（`App.vue` + `WorkspaceTabsBar.vue`）基于 Element Plus `ElTabs` 与 `SortableJS` 提供统一的右侧顶部全局多页签导航（路由页签 `<KeepAlive>` 保活 + 未保存草稿拦截 + 拖拽重排 + 快捷关闭菜单）。`/#/chat-sim`（`ChatSimView.vue`）采用清爽的 PC 左右双栏卡片布局（左栏配置父页面参数与单据，右栏支持页签切换或上下分栏查看 `postMessage` 实时报文流与 `report-confirmed` 回传报告）；点击「在顶部新页签打开聊天窗口」即在全局页签栏新增并激活 `智能填报 · <orderId>` 页签，由 `ChatIframeTabPane.vue` 以 `100% × 100%` 全幅承载无边框 `/embed.html` `<iframe>`（`v-show` 保活不重载），收到 `chat-close-request` 自动关闭该聊天页签并切回模拟页展示确认报告
 - 每个会话同时只能有一个运行；运行中禁用「换模板 / 重跑 / 确认」，并显示「停止」
+- **渐进式对话上下文压缩与归档水位指示**：仅当未归档会话消息达到 `manualCompactMinMessages`（默认 8 条）或已有归档记忆（`summarizedUpTo > 0`）时，在顶栏右侧出现紧凑「记忆 (N)」胶囊按钮或手动压缩图标按钮，以及在对话流第 `summarizedUpTo` 条消息后渲染极简归档水位分隔线（点击可打开 `.embed-stage` 内 `.memory-popover-card` 记忆摘要轻量浮层查看全文、复制或继续压缩；按钮禁用态与提示文案随会话返回的 `manualCompactKeepRecent` / `manualCompactMinMessages` 动态联动）；短会话保持完全零占位
 - PARTIAL 确认前弹窗列出 `missingShown` 二次确认；FAILED 不允许确认
 - `stale` 卡片显示「旧入参」角标；`templateOffline` 卡片提示「该模板已下线」并禁止重跑
 - 断线或刷新后：加载 session，存在 `activeRunId` 时用 `after=<已有最大 seq>`（及 `includeRaw=1&rawAfter=<已有最大 raw seq>`）续接 events；历史运行切换到「原样运行记录」时按需请求 `GET /runs/{runId}/raw`

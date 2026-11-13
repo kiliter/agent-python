@@ -99,14 +99,24 @@ async def test_gateway_concurrency_wiring_mock_fallback_and_closed_invoke(tmp_pa
         assert c.gateway.current is live_gw
         assert live_gw._client.is_closed is False
 
-        # 修改 env_settings 的并发度后触发 apply_runtime_config，网关签名变化应重建实例
-        assert c.env_settings is not None
-        c.env_settings = c.env_settings.model_copy(update={"gateway_max_concurrency": 64})
+        # 修改 runtime_config 的 gatewayMaxConcurrency 后触发 apply_runtime_config，网关签名变化应平滑重建实例
+        c.runtime_config.update({"gatewayMaxConcurrency": 64}, "admin", note="adjust gateway concurrency")
         c.apply_runtime_config()
         swapped_gw = c.gateway.current
         assert isinstance(swapped_gw, UnifiedGatewayXmlClient)
         assert swapped_gw is not live_gw
         assert swapped_gw.max_concurrency == 64
+
+        # 顺带验证 sync_from_env 同步新环境变量并发度后亦能重建连接池
+        assert c.env_settings is not None
+        c.env_settings = c.env_settings.model_copy(update={"gateway_max_concurrency": 96})
+        _, did_sync = c.runtime_config.sync_from_env(c.env_settings, "admin", note="sync concurrency from env")
+        assert did_sync is True
+        c.apply_runtime_config()
+        synced_gw = c.gateway.current
+        assert isinstance(synced_gw, UnifiedGatewayXmlClient)
+        assert synced_gw is not swapped_gw
+        assert synced_gw.max_concurrency == 96
     finally:
         await c.gateway.aclose()
 

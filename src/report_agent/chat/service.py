@@ -27,7 +27,16 @@ from ..store.publisher import Publisher
 from ..store.releases import ReleaseNotFound, ReleaseStore
 from ..store.runs import RunStore, new_run_id
 from ..store.service import ResourceService
-from .agent import ChatAgent, ChatDeps, strip_java_rule_note
+from .agent import (
+    COMPACT_KEEP_RECENT,
+    COMPACT_TRIGGER_MESSAGES,
+    MANUAL_COMPACT_KEEP_RECENT,
+    MANUAL_COMPACT_MIN_SLICE,
+    ChatAgent,
+    ChatDeps,
+    cfg_int,
+    strip_java_rule_note,
+)
 from .manager import ChatRunManager, RunCompletion
 from .steps import sanitize_error_text
 from .store import SESSION_ID_RE, ChatStore, inputs_fingerprint, session_id_for
@@ -260,6 +269,9 @@ class ChatService:
         await self.manager.aclose()
 
     # ------------------------------------------------------------------ 内部工具
+    def _runtime_settings(self) -> Any:
+        return getattr(self.runner, "settings", None)
+
     def _remember_run(self, run_id: str, session_id: str) -> None:
         if not run_id or not session_id:
             return
@@ -285,6 +297,25 @@ class ChatService:
     def _ensure_caller_allowed(target: str, caller: ChatCaller | None) -> None:
         if target == "draft" and (caller is None or caller.kind != "user"):
             raise ChatError(403, "DRAFT_FORBIDDEN", "仅管理端登录用户可使用草稿模式（target='draft'）")
+
+    @staticmethod
+    def _effective_memory_state(session: dict[str, Any], total_msgs: int) -> tuple[str, int]:
+        """读取并清洗会话滚动记忆摘要与归档水位线，损坏或不一致状态自动自愈为 ('', 0)。"""
+        raw_summary = session.get("memorySummary")
+        summary = raw_summary.strip() if isinstance(raw_summary, str) else ""
+        raw_up_to = session.get("summarizedUpTo")
+        if (
+            not summary
+            or not isinstance(raw_up_to, int)
+            or isinstance(raw_up_to, bool)
+            or raw_up_to <= 0
+        ):
+            return "", 0
+        safe_total = max(0, total_msgs) if isinstance(total_msgs, int) and not isinstance(total_msgs, bool) else 0
+        clamped = min(raw_up_to, safe_total)
+        if clamped <= 0:
+            return "", 0
+        return summary, clamped
 
     async def _capture_snapshot(self, target: str, *, allow_empty: bool = False) -> tuple[str, ResourceSet]:
         """按会话目标捕获当前资源快照。"""
@@ -379,8 +410,12 @@ class ChatService:
             if isinstance(m, dict)
         ]
         _backfill_legacy_rewrite_links(out_messages)
+        eff_summary, eff_up_to = self._effective_memory_state(session, len(out_messages))
         active_run_id = self.manager.has_active_run(sid)
         raw_confirmed = session.get("confirmed")
+        rt_settings = self._runtime_settings()
+        keep_manual = cfg_int(rt_settings, "chat_manual_compact_keep_recent", MANUAL_COMPACT_KEEP_RECENT)
+        min_slice = cfg_int(rt_settings, "chat_manual_compact_min_slice", MANUAL_COMPACT_MIN_SLICE)
         view: dict[str, Any] = {
             "sessionId": sid,
             "userId": str(session["userId"]),
@@ -394,6 +429,10 @@ class ChatService:
             "documentChars": len(session.get("document") or ""),
             "activeRunId": active_run_id,
             "confirmed": dict(raw_confirmed) if isinstance(raw_confirmed, dict) else None,
+            "memorySummary": eff_summary,
+            "summarizedUpTo": eff_up_to,
+            "manualCompactKeepRecent": keep_manual,
+            "manualCompactMinMessages": keep_manual + min_slice,
             "messages": out_messages,
         }
         if created is not None:
@@ -467,6 +506,8 @@ class ChatService:
                     "recommended": {},
                     "confirmed": None,
                     "confirmRecords": [],
+                    "memorySummary": "",
+                    "summarizedUpTo": 0,
                     "messages": [],
                 }
                 saved = await self.store.asave(session)
@@ -911,7 +952,96 @@ class ChatService:
         _, rs = await self._capture_snapshot(target, allow_empty=True)
         return self._format_message_view(card, rs, cur_inputs)
 
-    # ------------------------------------------------------------------ 聊天对话流
+    # ------------------------------------------------------------------ 聊天对话流与上下文压缩
+    async def _persist_compaction_if_monotonic(
+        self,
+        sid: str,
+        *,
+        cutoff: int,
+        anchor_msg_id: str,
+        new_summary: str,
+    ) -> dict[str, Any] | None:
+        """在会话锁内按单调水位线与边界消息 ID 锚点原子落盘压缩摘要，防止并发乱序回退。"""
+        clean_summary = (new_summary or "").strip()
+        if not clean_summary or cutoff <= 0:
+            return None
+        async with self.store.lock_for(sid):
+            cur = await self.store.aget(sid)
+            if cur is None:
+                return None
+            cur_msgs = [m for m in (cur.get("messages") or []) if isinstance(m, dict)]
+            _, cur_up_to = self._effective_memory_state(cur, len(cur_msgs))
+            if (
+                cutoff > cur_up_to
+                and len(cur_msgs) >= cutoff
+                and str(cur_msgs[cutoff - 1].get("id") or "") == anchor_msg_id
+            ):
+                cur["memorySummary"] = clean_summary
+                cur["summarizedUpTo"] = cutoff
+                return await self.store.asave(cur)
+            return cur
+
+    async def compact_session(self, sid: str, *, caller: ChatCaller) -> dict[str, Any]:
+        """手动触发会话早期对话滚动压缩，归档前序消息至记忆摘要并保留最近原文消息。"""
+        sid = self._check_sid_format(sid)
+        async with self.store.lock_for(sid):
+            session = await self.store.aget(sid)
+            if session is None:
+                raise ChatError(404, "SESSION_NOT_FOUND", f"会话 {sid} 不存在")
+            target = str(session.get("target") or "online")
+            self._ensure_caller_allowed(target, caller)
+            if self._heal_interrupted_in_place(session):
+                session = await self.store.asave(session)
+            _, rs = await self._capture_snapshot(target, allow_empty=True)
+            history = [m for m in (session.get("messages") or []) if isinstance(m, dict)]
+            memory_summary, prev_up_to = self._effective_memory_state(session, len(history))
+
+        rt_settings = self._runtime_settings()
+        keep_manual = cfg_int(rt_settings, "chat_manual_compact_keep_recent", MANUAL_COMPACT_KEEP_RECENT)
+        min_slice = cfg_int(rt_settings, "chat_manual_compact_min_slice", MANUAL_COMPACT_MIN_SLICE)
+        cutoff = len(history) - keep_manual
+        if cutoff - prev_up_to < min_slice:
+            return {
+                "compacted": False,
+                "summarizedCount": 0,
+                "summarizedUpTo": prev_up_to,
+                "memorySummary": memory_summary,
+                "session": self._build_view(session, rs),
+            }
+
+        slice_to_compact = history[prev_up_to:cutoff]
+        anchor_msg_id = str(history[cutoff - 1].get("id") or "")
+        try:
+            new_summary = await self.chat_agent.summarize_history(memory_summary, slice_to_compact)
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError as exc:
+            log.warning("手动压缩聊天上下文超时 sid=%s", sid)
+            raise ChatError(504, "CHAT_COMPACT_TIMEOUT", "压缩对话上下文超时，请稍后重试") from exc
+        except Exception as exc:  # noqa: BLE001
+            safe_reason = sanitize_error_text(exc, fallback=type(exc).__name__)
+            log.warning("手动压缩聊天上下文失败 sid=%s：%s", sid, safe_reason)
+            raise ChatError(502, "CHAT_COMPACT_ERROR", f"压缩对话上下文失败：{safe_reason}") from exc
+
+        saved_session = await self._persist_compaction_if_monotonic(
+            sid,
+            cutoff=cutoff,
+            anchor_msg_id=anchor_msg_id,
+            new_summary=new_summary,
+        )
+        if saved_session is None:
+            raise ChatError(404, "SESSION_NOT_FOUND", f"会话 {sid} 不存在")
+        saved_msgs = [m for m in (saved_session.get("messages") or []) if isinstance(m, dict)]
+        eff_summary, eff_up_to = self._effective_memory_state(saved_session, len(saved_msgs))
+        actual_count = max(0, eff_up_to - prev_up_to)
+        return {
+            "compacted": actual_count > 0,
+            "summarizedCount": actual_count,
+            "summarizedUpTo": eff_up_to,
+            "memorySummary": eff_summary,
+            "session": self._build_view(saved_session, rs),
+        }
+
     async def precheck_message(
         self,
         sid: str,
@@ -969,8 +1099,48 @@ class ChatService:
         if user_msg is not None:
             yield ("message", dict(user_msg))
 
+        memory_summary, summarized_up_to = self._effective_memory_state(
+            session_snapshot,
+            len(history_before),
+        )
+        rt_settings = self._runtime_settings()
+        trigger_msgs = cfg_int(rt_settings, "chat_compact_trigger_messages", COMPACT_TRIGGER_MESSAGES, min_val=2)
+        keep_recent = cfg_int(rt_settings, "chat_compact_keep_recent", COMPACT_KEEP_RECENT)
+        if keep_recent >= trigger_msgs:
+            keep_recent = max(1, trigger_msgs - 1)
+        if not auto and (len(history_before) - summarized_up_to) >= trigger_msgs:
+            cutoff = len(history_before) - keep_recent
+            if cutoff > summarized_up_to:
+                yield ("status", {"text": "正在压缩早期对话上下文…"})
+                slice_to_compact = history_before[summarized_up_to:cutoff]
+                anchor_msg_id = str(history_before[cutoff - 1].get("id") or "")
+                try:
+                    new_summary = await self.chat_agent.summarize_history(
+                        memory_summary,
+                        slice_to_compact,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - 自动压缩异常时无感回退滑窗，绝不中断对话
+                    safe_reason = sanitize_error_text(exc, fallback=type(exc).__name__)
+                    log.warning("聊天上下文自动压缩失败，回退滑动窗口继续推理 sid=%s：%s", sid, safe_reason)
+                else:
+                    persisted = await self._persist_compaction_if_monotonic(
+                        sid,
+                        cutoff=cutoff,
+                        anchor_msg_id=anchor_msg_id,
+                        new_summary=new_summary,
+                    )
+                    if persisted is not None:
+                        session_snapshot = persisted
+                        memory_summary, summarized_up_to = self._effective_memory_state(
+                            session_snapshot,
+                            len(history_before),
+                        )
+
         yield ("status", {"text": "正在分析单据并匹配模板…" if auto else "正在思考…"})
 
+        recent_history = history_before[summarized_up_to:] if memory_summary else history_before
         rev, rs = await self._capture_snapshot(target, allow_empty=True)
         deps = ChatDeps(
             rev=rev,
@@ -980,7 +1150,13 @@ class ChatService:
         )
 
         try:
-            action = await self.chat_agent.run(deps, history_before, clean_text, auto=auto)
+            action = await self.chat_agent.run(
+                deps,
+                recent_history,
+                clean_text,
+                auto=auto,
+                memory_summary=memory_summary,
+            )
         except asyncio.CancelledError:
             raise
         except TimeoutError:

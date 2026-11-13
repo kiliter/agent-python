@@ -462,7 +462,18 @@ function refTemplateStatus(tplLabel: string) {
                 <div class="row-primary-name">{{ s.name }}</div>
                 <div class="mono row-sub-id">{{ s.id }}</div>
               </td>
-              <td class="desc-cell">{{ s.description || '—' }}</td>
+              <td class="desc-cell">
+                <el-tooltip
+                  v-if="s.description"
+                  :content="s.description"
+                  placement="top-start"
+                  :show-after="180"
+                  popper-style="max-width: 400px; line-height: 1.55"
+                >
+                  <div class="desc-ellipsis">{{ s.description }}</div>
+                </el-tooltip>
+                <span v-else class="muted-text">—</span>
+              </td>
               <td><StatusTag :status="s.status" /></td>
               <td @click.stop>
                 <div v-if="s.apis && s.apis.length > 0" class="chip-wrap">
@@ -482,29 +493,29 @@ function refTemplateStatus(tplLabel: string) {
                 <span v-if="s.refTemplates.length === 0" class="muted-text">
                   未被引用
                 </span>
-                <el-popover v-else placement="bottom-start" :width="270" trigger="hover">
+                <el-popover v-else placement="bottom-start" :width="290" trigger="hover">
                   <template #reference>
                     <span
-                      class="chip-tag clickable ref-tpl-pill"
+                      class="chip-tag clickable ref-count-pill"
                       @click.stop
                     >
                       {{ s.refsCount }} 个核查模板 ▾
                     </span>
                   </template>
-                  <div>
-                    <div class="popover-head">
+                  <div class="ref-popover-panel">
+                    <div class="ref-popover-head">
                       引用此规程的核查模板 ({{ s.refsCount }})
                     </div>
-                    <div style="display: flex; flex-direction: column; gap: 4px">
-                      <div
+                    <div class="ref-popover-list">
+                      <button
                         v-for="t in s.refTemplates"
                         :key="t"
-                        class="btn-link"
-                        style="text-align: left; padding: 2px 0"
+                        type="button"
+                        class="ref-popover-item"
                         @click="jumpToRefTemplate(t)"
                       >
-                        {{ t }}
-                      </div>
+                        <span class="ref-popover-item-title">{{ t }}</span>
+                      </button>
                     </div>
                   </div>
                 </el-popover>
@@ -1042,8 +1053,18 @@ function refTemplateStatus(tplLabel: string) {
 }
 
 .desc-cell {
+  max-width: 280px;
   color: var(--text-regular);
   line-height: 1.45;
+}
+
+.desc-ellipsis {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: var(--text-regular);
 }
 
 .chip-wrap {

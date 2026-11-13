@@ -38,6 +38,20 @@ from .workspace import ApiResult
 log = logging.getLogger(__name__)
 
 
+def _setting_int(settings: Any, attr: str, default: int) -> int:
+    """安全读取运行配置中的正整数参数，缺失、空值或非正数时回退默认值。#Created By AiCoding(codex)"""
+    if settings is None:
+        return default
+    raw = getattr(settings, attr, None)
+    if raw is None or isinstance(raw, bool):
+        return default
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return val if val >= 1 else default
+
+
 def _record(ctx: RunContext[RunDeps], tool: str, args: dict[str, Any], output: Any, ok: bool = True,
             summary: Any = None) -> str:
     """登记工具调用并推送过程事件，返回 callId。"""
@@ -436,7 +450,7 @@ async def query_result(
     resultId: str = "",
     where: list[Condition] | None = None,
     orderBy: OrderBy | None = None,
-    limit: int = 20,
+    limit: int | None = None,
     columns: list[str] | None = None,
     *,
     anyOf: list[Condition] | None = None,
@@ -451,7 +465,7 @@ async def query_result(
         resultId: 单个 call_api 返回的 resultId（与 resultIds 二选一）。
         where: AND 筛选条件列表。
         orderBy: 排序列，默认倒序。
-        limit: 最多返回多少行（1~100）。
+        limit: 最多返回多少行（未传时取系统配置的默认行数，上限受系统配置限制）。
         columns: 只返回这些列；不填返回全部列。
         anyOf: 可选 OR 筛选条件列表，行需满足至少一项。
         resultIds: 可选多结果合并模式的 resultId 列表。
@@ -468,7 +482,9 @@ async def query_result(
         bad_args["limit"] = limit
         fallback = {**({"resultIds": rids} if multi_mode else {"resultId": resultId}), "ok": False, "error": msg, "total": 0, "rows": []}
         return _fail_or_retry(ctx, "query_result", bad_args, msg, fallback)
-    limit = max(1, min(int(limit if limit is not None else 20), 100))
+    max_limit = _setting_int(getattr(deps, "settings", None), "agent_query_max_limit", 100)
+    default_limit = min(_setting_int(getattr(deps, "settings", None), "agent_query_default_limit", 20), max_limit)
+    limit = max(1, min(int(limit if limit is not None else default_limit), max_limit))
 
     args: dict[str, Any] = {
         "where": [c.model_dump(exclude_none=True) for c in where_list],
@@ -708,8 +724,9 @@ async def expand_period(ctx: RunContext[RunDeps], period: str) -> dict[str, Any]
         period: 账期、日期或区间文本。
     """
     args = {"period": period}
+    max_months = _setting_int(getattr(ctx.deps, "settings", None), "agent_max_period_months", 36)
     try:
-        out = _expand_period(period)
+        out = _expand_period(period, max_months=max_months)
     except ValueError as exc:
         return _fail_or_retry(ctx, "expand_period", args, str(exc), {"ok": False, "error": str(exc)})
     call_id = _record(ctx, "expand_period", args, out)
