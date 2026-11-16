@@ -6,7 +6,7 @@ apis:
   - querySMSSendInfo
 ---
 
-<!-- #Created By AiCoding(codex) 迁移自 Java skills/number-portability-sms（SKILL.md + scripts/assembly.groovy + scripts/extract.groovy） -->
+<!-- #Created By AiCoding(codex) -->
 
 # 携号转网告知提醒短信
 

@@ -1,7 +1,7 @@
 <!--
   #Created By AiCoding(codex)
-  5.3 核查模板专业 IDE 工作台总装壳层（TemplateWorkbenchView）
-  组装左侧双列资源浏览器、中间上方模板编辑与预览舞台、中间下方调试与轨迹核验面板、右侧常驻属性与溯源检查器，以及底部 24px 专业 IDE 状态栏
+  5.3 模板专业 IDE 工作台总装壳层（TemplateWorkbenchView）
+  组装左侧双列资源浏览器、中间上方模板编辑与预览区、中间下方调试与轨迹核验面板、右侧常驻属性与溯源检查器，以及底部 24px 专业 IDE 状态栏
 -->
 <script setup lang="ts">
 import { ref, computed, onBeforeUnmount } from 'vue'
@@ -17,7 +17,7 @@ const store = usePlatformStore()
 const tpl = computed(() => store.currentTemplate)
 const hasOnline = computed(() => Boolean(tpl.value.onlineRev) && tpl.value.onlineRev !== '—')
 
-/** 草稿基于的历史版本与当前线上基线不一致时提示版本漂移 */
+/** 草稿基于的历史版本与当前线上版本不一致时提示版本漂移 */
 const hasVersionDrift = computed(() => {
   const t = tpl.value
   return (
@@ -136,7 +136,7 @@ function startDragRight(ev: MouseEvent) {
   }
 }
 
-/** 拖拽中间横向分隔条（动态约束上方模板舞台至少保留 160px） */
+/** 拖拽中间横向分隔条（动态约束上方模板区域至少保留 160px） */
 function startDragDebug(ev: MouseEvent) {
   if (store.ideDebugCollapsed || store.ideDebugMaximized) return
   stopActiveDrag()
@@ -241,7 +241,7 @@ const draftSyncMeta = computed(() => {
   if (t.status === 'OFFLINE') {
     return {
       dot: 'muted',
-      label: `已下线归档${hasOnline.value ? ` · 原基线 ${t.onlineRev}` : ''}`,
+      label: `已下线归档${hasOnline.value ? ` · 原版本 ${t.onlineRev}` : ''}`,
     }
   }
   if (t.status === 'DRAFT' || t.status === 'PUBLISHED_DRAFT' || Boolean(store.templateDetail?.draft)) {
@@ -283,24 +283,24 @@ function handleStatusSyntaxClick() {
     <!-- 未加载模板详情时的安全引导空态 -->
     <div v-if="!store.templateDetail" class="ide-empty-guard">
       <div class="ide-empty-card">
-        <div class="ide-empty-title">当前尚未载入核查模板</div>
+        <div class="ide-empty-title">当前尚未载入模板</div>
         <div class="ide-empty-desc">
-          请返回核查模板资产列表，选择需要编排规则或试运行取证的核查模板。
+          请返回模板列表，选择要编辑或试运行的模板。
         </div>
         <button type="button" class="ide-guard-btn" @click="handleBackToTemplates">
           <ArrowLeft :size="14" />
-          <span>返回核查模板列表</span>
+          <span>返回模板列表</span>
         </button>
       </div>
     </div>
 
     <template v-else>
-      <!-- 版本基线漂移紧凑告警条 -->
+      <!-- 版本漂移紧凑告警条 -->
       <div v-if="hasVersionDrift" class="ide-drift-banner" role="status">
         <div class="ide-drift-copy">
           <AlertTriangle :size="13" class="ide-drift-icon" />
           <span>
-            版本漂移提示：当前草稿基于 <strong class="mono">{{ tpl.baseRev }}</strong> 编辑，线上已发布新基线
+            版本漂移提示：当前草稿基于 <strong class="mono">{{ tpl.baseRev }}</strong> 编辑，线上已发布新版本
             <strong class="mono">{{ tpl.onlineRev }}</strong>，建议发布前先对比差异。
           </span>
         </div>
@@ -309,7 +309,7 @@ function handleStatusSyntaxClick() {
         </button>
       </div>
 
-      <!-- 四大功能分区主体（左资源双列 + 中间上下舞台/调试 + 右常驻属性/溯源） -->
+      <!-- 四大功能分区主体（左资源双列 + 中间上下区域/调试 + 右常驻属性/溯源） -->
       <div class="ide-main-body">
         <!-- 1. 左侧双列资源浏览器（50px 切换栏 + 可折叠列表） -->
         <div
@@ -332,7 +332,7 @@ function handleStatusSyntaxClick() {
           @dblclick="leftWidth = LEFT_DEFAULT_W"
         ></div>
 
-        <!-- 2 & 3. 中间核心工作纵列（上：模板编辑/预览舞台 + 下：调试与轨迹核验面板） -->
+        <!-- 2 & 3. 中间核心工作纵列（上：模板编辑/预览区 + 下：调试与轨迹核验面板） -->
         <main ref="centerColRef" class="ide-center-col">
           <WorkbenchTemplateStage v-show="!store.ideDebugMaximized" />
 
@@ -396,7 +396,7 @@ function handleStatusSyntaxClick() {
           <span class="sb-sep" aria-hidden="true"></span>
 
           <span class="sb-item mono">
-            字段 {{ store.templateFields.length }} · 入参 {{ store.templateInputs.length }} · 规程
+            字段 {{ store.templateFields.length }} · 入参 {{ store.templateInputs.length }} · 技能
             {{ store.templateSkills.length }} · 用例 {{ store.templateCases.length }}
           </span>
 
@@ -473,7 +473,7 @@ function handleStatusSyntaxClick() {
   color: var(--text-primary);
 }
 
-/* ==================== 版本基线漂移紧凑提示条 ==================== */
+/* ==================== 版本漂移紧凑提示条 ==================== */
 .ide-drift-banner {
   min-height: 28px;
   padding: 3px 12px;

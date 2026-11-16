@@ -362,7 +362,7 @@ export const platformApi = {
     signal?: AbortSignal,
   ) => streamRun<RunDetail>(`/templates/${id}/dryrun/stream`, payload, onEvent, signal),
 
-  // ==================== Skill 库 ====================
+  // ==================== 技能库 ====================
   fetchSkills: () => request<SkillItem[]>('GET', '/skills'),
   createSkill: (payload: { id: string; name: string; description: string; apis?: string[] }) =>
     request<SkillItem>('POST', '/skills', payload),
@@ -379,7 +379,7 @@ export const platformApi = {
     request<{ rev: string; item: SkillItem; markdown: string }>('POST', `/skills/${enc(id)}/rollback`,
       { targetRev, mode, reason }),
 
-  // ==================== API 调用（统一网关 XML / JSON 契约） ====================
+  // ==================== API（统一网关 XML / JSON 配置） ====================
   fetchApis: () => request<ApiItem[]>('GET', '/apis'),
   createApi: (payload: {
     name: string

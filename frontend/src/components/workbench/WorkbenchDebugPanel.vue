@@ -1,7 +1,7 @@
 <!--
   #Created By AiCoding(codex)
-  核查模板专业 IDE 工作台 · 中间下方调试与轨迹核验面板（WorkbenchDebugPanel）
-  支持入参与单据双栏填报、实时/历史调试运行记录点击预览快照、智能体流式轨迹、字段核验明细及页内全屏/折叠
+  模板专业 IDE 工作台 · 中间下方调试与轨迹核验面板（WorkbenchDebugPanel）
+  支持入参与单据双栏填报、实时/历史调试运行记录点击预览结果、智能体流式轨迹、字段核验明细及页内全屏/折叠
 -->
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
@@ -28,7 +28,7 @@ const validationTriggered = ref(false)
 const refreshingRuns = ref(false)
 const selectingRunId = ref('')
 
-// 模板尚无线上基线时，调试目标自动锁定为当前草稿
+// 模板尚无线上版本时，调试目标自动锁定为当前草稿
 watch(
   hasOnline,
   onlineAvailable => {
@@ -49,7 +49,7 @@ watch(
   },
 )
 
-/** 基准用例下拉绑定：手工填写 + store.templateCases */
+/** 回归用例下拉绑定：手工填写 + store.templateCases */
 const selectedCaseId = computed({
   get: () => {
     const cid = store.dryRunPreset.caseId
@@ -89,7 +89,7 @@ function fillInputSample(inp: TemplateInput) {
   setInputValue(inp.key, inp.sample)
 }
 
-/** 校验单个契约入参：返回错误提示文本，合法返回 null（锚定整串匹配，对齐后端 fullmatch + strip） */
+/** 校验单个入参：返回错误提示文本，合法返回 null（锚定整串匹配，对齐后端 fullmatch + strip） */
 function getInputError(inp: TemplateInput): string | null {
   const val = getInputValue(inp.key).trim()
   if (!val) {
@@ -123,7 +123,7 @@ function describeEvent(ev: ProcessEvent | undefined): string {
   if (!ev) return '准备执行…'
   switch (ev.type) {
     case 'run_started':
-      return '装载规程启动核查'
+      return '开始调试'
     case 'model_request':
       return '请求大模型推理'
     case 'model_text':
@@ -267,7 +267,7 @@ async function handleSelectDebugRun(rec: RunRecord) {
   }
 }
 
-/** 判断某条调试记录是否为当前激活快照 */
+/** 判断某条调试记录是否为当前激活版本 */
 function isDebugRunActive(runId: string): boolean {
   if (store.selectedDebugRunId) {
     return store.selectedDebugRunId === runId
@@ -353,7 +353,7 @@ function statusDotClass(status: RunRecord['status']): string {
           v-model="selectedCaseId"
           class="dbg-select dbg-case-select"
           :title="selectedCaseId === 'manual' ? '手工填写调试输入' : `当前载入用例：${selectedCaseId}`"
-          aria-label="基准用例快速带入"
+          aria-label="回归用例快速带入"
         >
           <option value="manual">手工填写</option>
           <option v-for="c in store.templateCases" :key="c.id" :value="c.id">
@@ -376,7 +376,7 @@ function statusDotClass(status: RunRecord['status']): string {
           type="button"
           class="dbg-btn dbg-btn-run"
           :disabled="store.isDryRunning"
-          title="校验契约入参并执行智能体取证调试"
+          title="校验入参并执行调试"
           @click="handleRunDebug"
         >
           <Play :size="10" />
@@ -387,7 +387,7 @@ function statusDotClass(status: RunRecord['status']): string {
           type="button"
           class="dbg-btn"
           :disabled="store.isDryRunning"
-          title="将当前调试输入与运行结果沉淀为基准回归用例"
+          title="将当前调试输入与运行结果保存为回归用例"
           @click="store.openModal('save-case')"
         >
           <span>存为用例</span>
@@ -464,7 +464,7 @@ function statusDotClass(status: RunRecord['status']): string {
             type="button"
             class="dbg-run-item"
             :class="{ active: isDebugRunActive(r.runId) }"
-            :title="`流水号：${r.runId}\n时间：${r.startTime}\n点击在上方模板区预览该次核查报告`"
+            :title="`编号：${r.runId}\n时间：${r.startTime}\n点击在上方模板区预览该次核查报告`"
             @click="handleSelectDebugRun(r)"
           >
             <div class="dbg-run-top">
@@ -506,10 +506,10 @@ function statusDotClass(status: RunRecord['status']): string {
 
         <!-- 子视图 1：入参与单据（紧凑左右双栏） -->
         <div v-if="store.ideDebugTab === 'inputs'" class="dbg-inputs-split">
-          <!-- 左栏：契约入参表单 -->
+          <!-- 左栏：入参表单 -->
           <div class="dbg-inputs-pane">
             <div class="dbg-subpane-head">
-              <span class="dbg-subpane-title">契约入参（{{ store.templateInputs.length }} 项）</span>
+              <span class="dbg-subpane-title">入参（{{ store.templateInputs.length }} 项）</span>
               <span class="dbg-subpane-hint">带 * 为必填项，执行前自动校验正则</span>
             </div>
 
@@ -579,7 +579,7 @@ function statusDotClass(status: RunRecord['status']): string {
               v-model="store.dryRunPreset.docText"
               class="dbg-doc-textarea mono"
               spellcheck="false"
-              placeholder="粘贴上游业务受理工单或电子免填单原文（可留空，仅通过 API 接口取证）…"
+              placeholder="粘贴上游业务受理工单或电子免填单原文（可留空，仅通过 API 取数）…"
             ></textarea>
           </div>
         </div>
@@ -590,22 +590,22 @@ function statusDotClass(status: RunRecord['status']): string {
             <template v-if="store.isDryRunning">
               <span class="status-dot running"></span>
               <span class="mono" style="color: var(--primary); font-weight: 600">
-                实时取证推理中 · 第 {{ liveRound }} 轮
+                实时推理中 · 第 {{ liveRound }} 轮
               </span>
               <span style="color: var(--text-secondary)">{{ liveSummary }}</span>
             </template>
             <template v-else-if="store.dryRunResult">
               <StatusTag kind="run" :status="store.dryRunResult.status" />
-              <span class="mono">流水：<strong>{{ store.dryRunResult.runId }}</strong></span>
+              <span class="mono">运行编号：<strong>{{ store.dryRunResult.runId }}</strong></span>
               <span class="dbg-dot-sep">·</span>
               <span class="mono">
-                命中 <strong>{{ store.dryRunResult.foundCount }}/{{ store.dryRunResult.totalCount }}</strong>
+                已找到 <strong>{{ store.dryRunResult.foundCount }}/{{ store.dryRunResult.totalCount }}</strong>
               </span>
               <span class="dbg-dot-sep">·</span>
               <span class="mono">{{ store.dryRunResult.durationSec }}s</span>
               <span class="dbg-dot-sep">·</span>
               <span class="mono">
-                {{ store.dryRunResult.rounds }} 轮 / {{ store.dryRunResult.apiCallCount }} 次 API 调用
+                {{ store.dryRunResult.rounds }} 轮 / {{ store.dryRunResult.apiCallCount }} 次 API
               </span>
               <span
                 v-if="store.dryRunResult.validationRounds.length > 0"
@@ -675,7 +675,7 @@ function statusDotClass(status: RunRecord['status']): string {
           <div v-else class="dbg-pane-empty" style="flex: 1">
             {{
               store.isDryRunning
-                ? '正在执行智能体取证核查，可切换至「智能体轨迹」查看实时推理进度…'
+                ? '正在执行智能体核查，可切换至「智能体轨迹」查看实时推理进度…'
                 : '尚未生成或选择调试结果，点击右上角「▶ 运行调试」或点击左侧调试运行记录查看明细'
             }}
           </div>

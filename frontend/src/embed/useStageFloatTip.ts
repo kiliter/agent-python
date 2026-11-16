@@ -1,5 +1,5 @@
 // #Created By AiCoding(codex)
-// 舞台弹窗内零依赖悬浮提示（挂载于 .stage-modal-card 内部，避免被滚动表格 overflow 裁剪并自动换算 transform: scale）
+// 窗口弹窗内零依赖悬浮提示（挂载于 .stage-modal-card 内部，避免被滚动表格 overflow 裁剪并自动换算 transform: scale）
 import { ref, type Ref } from 'vue'
 
 export interface StageFloatTipState {

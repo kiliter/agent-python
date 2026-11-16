@@ -1,6 +1,6 @@
 // #Created By AiCoding(codex)
 // Pinia 全局业务状态仓库：所有数据都来自后端 /api/v1，没有任何本地 Mock 或写死的演示数据。
-// 模板工作台中的编辑（正文、字段、入参、Skill）先改本地状态，点“保存草稿”时整包提交。
+// 模板工作台中的编辑（正文、字段、入参、技能）先改本地状态，点“保存草稿”时整包提交。
 
 import { defineStore } from 'pinia'
 import { computed, markRaw, ref, watch } from 'vue'
@@ -44,7 +44,7 @@ import type {
 
 export type { NavKey, ApiConnector, ApiEditMode }
 export type WorkbenchTabKey = 'body' | 'fields' | 'inputs' | 'skills' | 'cases' | 'dryrun' | 'history'
-export type IdeLeftSection = 'fields' | 'inputs' | 'skills' | 'cases' | 'history'
+export type IdeLeftSection = 'info' | 'fields' | 'inputs' | 'skills' | 'cases' | 'history'
 export type IdeCenterMode = 'code' | 'preview' | 'split' | 'diff'
 export type IdeRightMode = 'inspector' | 'evidence'
 export type IdeDebugTab = 'inputs' | 'timeline' | 'fields'
@@ -160,7 +160,7 @@ export const usePlatformStore = defineStore('platform', () => {
   const historyVerB = ref<string>('online')
   const expandedTexts = ref<Record<string, boolean>>({})
 
-  // ---------------- 核查模板专业 IDE 工作台布局与联动状态
+  // ---------------- 模板专业 IDE 工作台布局与联动状态
   const ideLeftSection = ref<IdeLeftSection>('fields')
   const ideLeftCollapsed = ref<boolean>(false)
   const ideCenterMode = ref<IdeCenterMode>('code')
@@ -213,8 +213,11 @@ export const usePlatformStore = defineStore('platform', () => {
   const templateFields = ref<TemplateField[]>([])
   const otherTemplateFields = ref<TemplateField[]>([])
   const templateInputs = ref<TemplateInput[]>([])
-  /** 当前模板允许加载的 Skill（标识） */
+  /** 当前模板允许加载的技能（标识） */
   const templateSkills = ref<string[]>([])
+  /** 当前模板名称与说明（工作台可编辑，随“保存草稿”一起提交） */
+  const templateName = ref<string>('')
+  const templateDescription = ref<string>('')
   const templateCases = ref<RegressionCase[]>([])
   const templateDraftRevision = ref<number | null>(null)
   const templateValidation = ref<ValidationResult | null>(null)
@@ -260,7 +263,7 @@ export const usePlatformStore = defineStore('platform', () => {
   const runtimeState = ref<RuntimeConfigState | null>(null)
   const runtimeRevisions = ref<RuntimeConfigRevision[]>([])
   const runtimeFormDirty = ref<boolean>(false)
-  /** 每次发布/回退/下线/恢复/切换版本后递增，驱动各工作台立即刷新线上基线快照与 Diff */
+  /** 每次发布/回退/下线/恢复/切换版本后递增，驱动各工作台立即刷新线上版本与 Diff */
   const onlineBaselineSeq = ref<number>(0)
   let loadTemplateReqSeq = 0
   let debugRunReqSeq = 0
@@ -483,6 +486,8 @@ export const usePlatformStore = defineStore('platform', () => {
     otherTemplateFields.value = []
     templateInputs.value = []
     templateSkills.value = []
+    templateName.value = ''
+    templateDescription.value = ''
     templateCases.value = []
     templateDraftRevision.value = null
     templateValidation.value = null
@@ -588,7 +593,7 @@ export const usePlatformStore = defineStore('platform', () => {
   }
 
   async function refreshSkills() {
-    const list = await guard(() => platformApi.fetchSkills(), '加载 Skill 列表失败')
+    const list = await guard(() => platformApi.fetchSkills(), '加载技能列表失败')
     if (list) skills.value = list
   }
 
@@ -662,17 +667,17 @@ export const usePlatformStore = defineStore('platform', () => {
   }): string | null {
     if (currentNav.value === 'workbench' && hasUnsavedChanges.value) {
       if (target?.nav !== 'workbench' || (target.tplId !== undefined && target.tplId !== currentTemplateId.value)) {
-        return '当前核查模板草稿有未保存的修改'
+        return '当前模板草稿有未保存的修改'
       }
     }
     if (currentNav.value === 'skills' && skillsSubView.value === 'detail' && skillDirty.value) {
       if (target?.nav !== 'skills' || !target.skillId || target.skillId !== selectedSkillId.value) {
-        return '当前 Skill 规程有未保存的修改'
+        return '当前技能有未保存的修改'
       }
     }
     if (currentNav.value === 'apis' && apisSubView.value === 'detail' && apiDirty.value) {
       if (target?.nav !== 'apis' || !target.apiName || target.apiName !== selectedApiName.value) {
-        return '当前 API 调用契约有未保存的修改'
+        return '当前 API 有未保存的修改'
       }
     }
     if (currentNav.value === 'settings' && target?.nav !== 'settings') {
@@ -795,8 +800,8 @@ export const usePlatformStore = defineStore('platform', () => {
   }
 
   // ======================================================================== 10. 模板列表与生命周期
-  async function createNewTemplate(id: number, name: string) {
-    const item = await guard(() => platformApi.createTemplate({ id, name }), '创建模板失败')
+  async function createNewTemplate(id: number, name: string, description = '') {
+    const item = await guard(() => platformApi.createTemplate({ id, name, description }), '创建模板失败')
     if (!item) return
     closeModal()
     await Promise.all([refreshTemplates(), refreshSkills()])
@@ -844,6 +849,8 @@ export const usePlatformStore = defineStore('platform', () => {
     templateFields.value = detail.fields
     templateInputs.value = detail.inputs
     templateSkills.value = [...detail.skills]
+    templateName.value = detail.name || ''
+    templateDescription.value = detail.description || ''
     templateDraftRevision.value = detail.draft?.revision ?? null
     const idx = templates.value.findIndex(t => t.id === detail.id)
     if (idx >= 0) templates.value.splice(idx, 1, detail.item)
@@ -885,7 +892,7 @@ export const usePlatformStore = defineStore('platform', () => {
     ideLocateRequest.value = { fieldName, seq: ideLocateSeq }
   }
 
-  /** IDE 选中字段联动：命中已有字段则选中编辑，未定义变量则预填新建字段草稿 */
+  /** IDE 选中字段联动：匹配到已有字段则选中编辑，未定义变量则预填新建字段草稿 */
   function selectIdeFieldByName(fieldName: string) {
     const idx = templateFields.value.findIndex(f => f.name === fieldName)
     ideLeftSection.value = 'fields'
@@ -899,7 +906,7 @@ export const usePlatformStore = defineStore('platform', () => {
     ideRightMode.value = 'inspector'
   }
 
-  /** 刷新指定模板最近的调试/试运行流水记录 */
+  /** 刷新指定模板最近的调试/试运行记录 */
   async function refreshTemplateDebugRuns(tplId?: number): Promise<void> {
     const targetId = tplId || currentTemplateId.value
     const seq = ++debugRunsListReqSeq
@@ -913,7 +920,7 @@ export const usePlatformStore = defineStore('platform', () => {
     if (list) templateDebugRuns.value = list
   }
 
-  /** 选中某条调试运行记录并在模板区预览该次快照报告 */
+  /** 选中某条调试运行记录并在模板区预览该次版本报告 */
   async function selectTemplateDebugRun(runId: string): Promise<RunDetail | undefined> {
     if (!runId) {
       clearSelectedDebugRun()
@@ -968,7 +975,7 @@ export const usePlatformStore = defineStore('platform', () => {
     }
   }
 
-  /** 加载模板工作台需要的全部数据（工作副本：草稿优先，原子同步线上基线与修订台账） */
+  /** 加载模板工作台需要的全部数据（工作副本：草稿优先，原子同步线上版本与修改历史） */
   async function loadTemplate(id: number) {
     abortActiveDryRun()
     const reqSeq = ++loadTemplateReqSeq
@@ -1070,6 +1077,8 @@ export const usePlatformStore = defineStore('platform', () => {
 
   function draftPayload() {
     return {
+      name: templateName.value.trim(),
+      description: templateDescription.value.trim(),
       bodyText: bodyText.value,
       fields: templateFields.value,
       inputs: templateInputs.value,
@@ -1106,6 +1115,10 @@ export const usePlatformStore = defineStore('platform', () => {
   async function handleSaveDraft(): Promise<boolean> {
     const id = currentTemplateId.value
     if (!id) return false
+    if (!templateName.value.trim()) {
+      showToast('模板名称不能为空', 'warning')
+      return false
+    }
     try {
       const res = await platformApi.saveTemplateDraft(id, { ...draftPayload(), revision: templateDraftRevision.value })
       syncTemplateDraftMeta(res)
@@ -1187,7 +1200,7 @@ export const usePlatformStore = defineStore('platform', () => {
     }
   }
 
-  /** 409 冲突弹窗点击“查看版本差异”：保留本地未保存修改，拉取服务端最新草稿（若已发布/丢弃则回退线上基线）对比 */
+  /** 409 冲突弹窗点击“查看版本差异”：保留本地未保存修改，拉取服务端最新草稿（若已发布/丢弃则回退线上版本）对比 */
   async function openConflictDraftDiff() {
     const serverHasDraft = conflictInfo.value?.status !== 'NO_DRAFT'
     const fallbackRev =
@@ -1444,7 +1457,7 @@ export const usePlatformStore = defineStore('platform', () => {
     }
   }
 
-  /** 细粒度接口更新模板关联 Skill（携带并同步草稿 revision） */
+  /** 细粒度接口更新模板关联技能（携带并同步草稿 revision） */
   async function updateTemplateSkillsRemote(skillIds: string[]): Promise<boolean> {
     const id = currentTemplateId.value
     if (!id) return false
@@ -1454,7 +1467,7 @@ export const usePlatformStore = defineStore('platform', () => {
       templateSkills.value = [...res.skills]
       return true
     } catch (err) {
-      handleTemplateDraftError(err, '更新模板关联 Skill 失败')
+      handleTemplateDraftError(err, '更新模板关联技能失败')
       return false
     }
   }
@@ -1472,7 +1485,7 @@ export const usePlatformStore = defineStore('platform', () => {
     showToast(`已插入字段变量 {{${fieldName}}}`)
   }
 
-  // ---------------- 入参与 Skill（本地修改）
+  // ---------------- 入参与技能（本地修改）
   function addTemplateInput() {
     templateInputs.value.push({ key: `新入参_${templateInputs.value.length + 1}`, required: false,
       preset: '无格式限制', pattern: '', desc: '', sample: '' })
@@ -1495,7 +1508,7 @@ export const usePlatformStore = defineStore('platform', () => {
     }
     markCurrentTemplateDirty()
     closeModal()
-    showToast('已更新本模板可用的 Skill，保存草稿后生效')
+    showToast('已更新本模板可用的技能，保存草稿后生效')
   }
 
   function removeTemplateSkill(skillId: string) {
@@ -1667,10 +1680,10 @@ export const usePlatformStore = defineStore('platform', () => {
     reportViewMode.value = mode
   }
 
-  // ======================================================================== 12. Skill 库
+  // ======================================================================== 12. 技能库
   async function loadSkill(skillId: string) {
     const reqSeq = ++loadSkillReqSeq
-    const detail = await guard(() => platformApi.getSkill(skillId), `加载 Skill ${skillId} 失败`)
+    const detail = await guard(() => platformApi.getSkill(skillId), `加载技能 ${skillId} 失败`)
     if (!detail || reqSeq !== loadSkillReqSeq) return
     const hasOnline = detail.item.status !== 'DRAFT'
       && detail.draft?.action !== 'create'
@@ -1703,7 +1716,7 @@ export const usePlatformStore = defineStore('platform', () => {
   function openSkillByName(ref: string) {
     const found = skills.value.find(s => s.id === ref || s.name === ref)
     if (found) void openSkillDetail(found.id)
-    else showToast(`Skill「${ref}」不存在`, 'warning')
+    else showToast(`技能「${ref}」不存在`, 'warning')
   }
 
   function setSkillMarkdown(_skillId: string, md: string) {
@@ -1720,19 +1733,19 @@ export const usePlatformStore = defineStore('platform', () => {
       skillDirty.value = false
       await Promise.all([refreshSkills(), refreshApis()])
       const errors = (res.issues || []).filter(i => i.level === 'error')
-      showToast(errors.length ? `草稿已保存：${errors.map(e => e.message).join('；')}` : 'Skill 草稿已保存',
+      showToast(errors.length ? `草稿已保存：${errors.map(e => e.message).join('；')}` : '技能草稿已保存',
         errors.length ? 'warning' : 'success')
       return true
     } catch (err) {
       if (err instanceof ApiError && (err.status === 409 || err.code === 'DRAFT_CONFLICT')) {
         if (await promptDraftConflictReload(err, `Skill「${id}」`)) {
           await Promise.all([refreshSkills(), refreshApis(), loadSkill(id)])
-          showToast('已重新加载服务端最新 Skill 草稿', 'info')
+          showToast('已重新加载服务端最新技能草稿', 'info')
         }
         return false
       }
       if (!(err instanceof ApiError && err.status === 401)) {
-        showError(err, '保存 Skill 失败')
+        showError(err, '保存技能失败')
       }
       return false
     }
@@ -1747,7 +1760,7 @@ export const usePlatformStore = defineStore('platform', () => {
     if (res.deleted) {
       skillsSubView.value = 'list'
       onlineBaselineSeq.value += 1
-      showToast('草稿已删除（该 Skill 从未发布）')
+      showToast('草稿已删除（该技能从未发布）')
     } else {
       await loadSkill(id)
       onlineBaselineSeq.value += 1
@@ -1758,13 +1771,13 @@ export const usePlatformStore = defineStore('platform', () => {
   async function publishCurrentSkill(note = '') {
     const id = selectedSkillId.value
     if (skillDirty.value && !(await saveSkillDraft())) return
-    const res = await guard(() => platformApi.publishSkill(id, note), '发布 Skill 失败')
+    const res = await guard(() => platformApi.publishSkill(id, note), '发布技能失败')
     if (!res) return
     closeModal()
     await Promise.all([refreshSkills(), refreshApis(), refreshReleases()])
     await loadSkill(id)
     onlineBaselineSeq.value += 1
-    showToast(`Skill 已发布（${res.rev}）`)
+    showToast(`技能已发布（${res.rev}）`)
   }
 
   async function rollbackCurrentSkill(
@@ -1774,26 +1787,26 @@ export const usePlatformStore = defineStore('platform', () => {
   ): Promise<boolean> {
     const id = selectedSkillId.value
     if (!id) return false
-    const res = await guard(() => platformApi.rollbackSkill(id, targetRev, mode, reason), '回退 Skill 失败')
+    const res = await guard(() => platformApi.rollbackSkill(id, targetRev, mode, reason), '回退技能失败')
     if (!res) return false
     await Promise.all([refreshSkills(), refreshApis(), refreshReleases()])
     await loadSkill(id)
     onlineBaselineSeq.value += 1
     showToast(
       mode === 'publish_now'
-        ? `已将 Skill「${id}」回退至 ${targetRev} 并上线（新版本 ${res.rev}）`
+        ? `已将技能「${id}」回退至 ${targetRev} 并上线（新版本 ${res.rev}）`
         : `已将 ${targetRev} 的内容恢复至草稿，核对无误后再发布`,
     )
     return true
   }
 
   async function createNewSkill(id: string, name: string, description: string, apiNames: string[] = []) {
-    const created = await guard(() => platformApi.createSkill({ id, name, description, apis: apiNames }), '创建 Skill 失败')
+    const created = await guard(() => platformApi.createSkill({ id, name, description, apis: apiNames }), '创建技能失败')
     if (!created) return
     closeModal()
     await Promise.all([refreshSkills(), refreshApis()])
     await openSkillDetail(created.id, true)
-    showToast(`已创建 Skill 草稿「${created.name}」`)
+    showToast(`已创建技能草稿「${created.name}」`)
   }
 
   // ======================================================================== 13. 接口库
@@ -1908,7 +1921,7 @@ export const usePlatformStore = defineStore('platform', () => {
     showToast(
       mode === 'publish_now'
         ? `已将接口「${name}」回退至 ${targetRev} 并上线（新版本 ${res.rev}）`
-        : `已将 ${targetRev} 的契约恢复至草稿，核对无误后再发布`,
+        : `已将 ${targetRev} 的 API 配置恢复至草稿，核对无误后再发布`,
     )
     return true
   }
@@ -1938,7 +1951,7 @@ export const usePlatformStore = defineStore('platform', () => {
     apiEditMode.value = 'form'
     await openApiDetail(created.name, 'schema', true)
     const proto = connector === 'unified-gateway-json' ? 'JSON' : 'XML'
-    showToast(`已创建 ${proto} API 调用草稿「${created.name}」`)
+    showToast(`已创建 ${proto} API 草稿「${created.name}」`)
   }
 
   // ======================================================================== 14. 运行记录
@@ -2013,7 +2026,7 @@ export const usePlatformStore = defineStore('platform', () => {
       await Promise.all(reloadFollowups)
     }
     onlineBaselineSeq.value += 1
-    showToast(`线上版本已切换至 ${res.activeRev}，各资源线上基线已同步`, 'warning')
+    showToast(`线上版本已切换至 ${res.activeRev}，各资源线上版本已同步`, 'warning')
   }
 
   async function loadReleaseDiff(a: string, b: string) {
@@ -2027,7 +2040,7 @@ export const usePlatformStore = defineStore('platform', () => {
     releaseDiff.value = res?.changes || []
   }
 
-  // ======================================================================== 17. 系统设置（提示词版本化 + 网关/模型热更新）
+  // ======================================================================== 17. 系统设置（提示词版本化 + 网关/模型立即生效）
   function applySysPrompt(state: SystemPromptState, opts?: { preserveDirty?: boolean }) {
     const isDirty = sysPromptState.value !== null && sysPromptText.value !== sysPromptState.value.sysPromptText
     sysPromptState.value = state
@@ -2169,7 +2182,7 @@ export const usePlatformStore = defineStore('platform', () => {
     ])
     if (info) modelInfo.value = info
     if (rtRevs) runtimeRevisions.value = rtRevs
-    showToast(`网关与模型配置已热更新生效（快照 ${res.activeRev}，无需重启服务）`)
+    showToast(`网关与模型配置已立即生效（版本 ${res.activeRev}，无需重启服务）`)
     return res
   }
 
@@ -2183,7 +2196,7 @@ export const usePlatformStore = defineStore('platform', () => {
     ])
     if (info) modelInfo.value = info
     if (rtRevs) runtimeRevisions.value = rtRevs
-    showToast(`已回滚至运行配置 ${targetRev}（新快照 ${res.activeRev}，热更新立即生效）`)
+    showToast(`已回滚至运行配置 ${targetRev}（新版本 ${res.activeRev}，已立即生效）`)
     return res
   }
 
@@ -2197,7 +2210,7 @@ export const usePlatformStore = defineStore('platform', () => {
     ])
     if (info) modelInfo.value = info
     if (rtRevs) runtimeRevisions.value = rtRevs
-    showToast(`已从环境变量同步默认运行参数（快照 ${res.activeRev}，立即生效）`)
+    showToast(`已从环境变量同步默认运行参数（版本 ${res.activeRev}，立即生效）`)
     return res
   }
 
@@ -2209,7 +2222,7 @@ export const usePlatformStore = defineStore('platform', () => {
     activeDrawer, editingRegDiffIndex,
     activeModal, targetOfflineTemplateId, copySourceTemplateId, targetEmergencyRev, rollbackTargetRev, targetRollbackInfo, conflictInfo,
     reportViewMode, activeEvidenceKey, inspectorTab, historyDiffTab, historyVerA, historyVerB, expandedTexts,
-    // 核查模板专业 IDE 工作台状态
+    // 模板专业 IDE 工作台状态
     ideLeftSection, ideLeftCollapsed, ideCenterMode, ideRightMode,
     ideSelectedFieldIdx, ideCreatingFieldDraft, ideSelectedInputIdx, ideSelectedSkillId, ideSelectedCaseIdx,
     ideSelectedRev, ideDiffTargetRev, ideDebugTab, ideDebugCollapsed, ideDebugMaximized, ideCursorPos,
@@ -2220,7 +2233,7 @@ export const usePlatformStore = defineStore('platform', () => {
     loginError, loginErrorText, loginUser, loginPass, loginShowPass, loginRemember,
     currentUser, currentUserLabel, currentUserRole,
     // 数据
-    templates, templateDetail, templateFields, otherTemplateFields, templateInputs, templateSkills, templateCases,
+    templates, templateDetail, templateFields, otherTemplateFields, templateInputs, templateSkills, templateName, templateDescription, templateCases,
     templateDraftRevision, templateValidation, templateRevisions, templateDiff, bodyText, hasUnsavedChanges,
     checkedFieldIndices, undefinedBodyFields,
     skills, skillMarkdown, skillOnlineMarkdown, skillDraftRevision, skillRevisions, skillDirty,

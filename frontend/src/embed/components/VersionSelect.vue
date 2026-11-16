@@ -1,6 +1,6 @@
 <!--
   #Created By AiCoding(codex)
-  舞台内轻量下拉选择框（替代 el-select）：
+  窗口内轻量下拉选择框（替代 el-select）：
   弹出层保留在当前组件树内，确保在 .embed-stage 等比例缩放模式下坐标与字号同比例对齐。
 -->
 <script setup lang="ts">

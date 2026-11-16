@@ -1,6 +1,6 @@
 <!--
-  5.1 中国移动政企生产级门户登录页（智能申告核查平台 · 业务支撑 · 数智稽核管理中台）
-  完美适配亮色（极昼云原生）与暗色（省网指挥大屏），纯内联 SVG 工程网格与四阶取证架构图，零渐变零毛玻璃
+  5.1 中国移动政企生产级门户登录页（智能申告核查平台）
+  完美适配浅色与深色，纯内联 SVG 工程网格与报告生成流程图，零渐变零毛玻璃
   #Created By AiCoding(codex)
 -->
 <script setup lang="ts">
@@ -8,6 +8,7 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { User, Lock, Eye, EyeOff, Sun, Moon, ShieldCheck } from 'lucide-vue-next'
 import { usePlatformStore } from '@/stores/platform'
 import SvgIcon from '@/components/SvgIcon.vue'
+import BrandMark from '@/components/BrandMark.vue'
 
 const store = usePlatformStore()
 const isSubmitting = ref(false)
@@ -41,7 +42,7 @@ const filledSlotCount = computed(() => {
 /** 登录失败时展示的提示文案：优先使用后端返回的错误信息 */
 const loginErrorMessage = computed(() => store.loginErrorText || '用户名或密码错误')
 
-/** 切换浅色（极昼云原生）与深色（省网指挥大屏）主题，并与全局 Store 同步 */
+/** 切换浅色与深色主题，并与全局 Store 同步 */
 function handleToggleTheme() {
   const prev = detectCurrentTheme()
   const next: 'light' | 'dark' = prev === 'dark' ? 'light' : 'dark'
@@ -113,7 +114,7 @@ onBeforeUnmount(() => {
       <div class="portal-topbar-left">
         <span class="portal-org-badge">中国移动 · 政企生产支撑网</span>
         <span class="portal-top-sep"></span>
-        <span class="portal-top-desc">智能申告核查与证据溯源治理系统</span>
+        <span class="portal-top-desc">申告报告智能填写与核查</span>
       </div>
 
       <div class="portal-topbar-right">
@@ -124,20 +125,20 @@ onBeforeUnmount(() => {
         <button
           type="button"
           class="portal-theme-btn"
-          :title="currentTheme === 'dark' ? '切换至极昼云原生浅色模式' : '切换至省网指挥大屏深色模式'"
+          :title="currentTheme === 'dark' ? '切换至浅色模式' : '切换至深色模式'"
           @click="handleToggleTheme"
         >
           <Sun v-if="currentTheme === 'dark'" :size="14" />
           <Moon v-else :size="14" />
-          <span>{{ currentTheme === 'dark' ? '极昼云台' : '省网大屏' }}</span>
+          <span>{{ currentTheme === 'dark' ? '浅色' : '深色' }}</span>
         </button>
       </div>
     </header>
 
-    <!-- 中央双栏门户主舱：左侧政企认证登录单 + 右侧纯内联 SVG 四阶数智核查架构蓝图 -->
+    <!-- 中央双栏门户主区域：左侧政企认证登录单 + 右侧纯内联 SVG 报告生成流程图 -->
     <main class="portal-main">
       <div class="portal-container">
-        <!-- 左侧：权威政企门户登录舱 -->
+        <!-- 左侧：权威政企门户登录区 -->
         <section class="portal-login-card" aria-label="系统登录面板">
           <div class="portal-card-head">
             <span class="portal-card-code mono">CMCC · AUDIT PORTAL</span>
@@ -171,8 +172,13 @@ onBeforeUnmount(() => {
                 <ShieldCheck :size="14" />
                 <span>省级业务支撑核心生产平台</span>
               </div>
-              <h1 class="portal-title">智能申告核查平台</h1>
-              <p class="portal-subtitle">业务支撑 · 数智稽核管理中台</p>
+              <div class="portal-brand-row">
+                <BrandMark :size="38" class="portal-brand-logo" />
+                <div class="portal-brand-titles">
+                  <h1 class="portal-title">智能申告核查平台</h1>
+                  <p class="portal-subtitle">申告报告智能填写与核查</p>
+                </div>
+              </div>
             </div>
 
             <form class="portal-form" @submit.prevent="onSubmit">
@@ -277,7 +283,7 @@ onBeforeUnmount(() => {
             </form>
 
             <div class="portal-security-note">
-              所有核查模板发布、版本回切与系统提示词变更均实时记录操作人与不可变基线快照。
+              所有模板发布、版本回退与系统提示词变更均实时记录操作人与历史版本。
             </div>
           </div>
         </section>
@@ -287,7 +293,7 @@ onBeforeUnmount(() => {
           <div class="portal-arch-header">
             <div>
               <div class="portal-arch-kicker mono">DETERMINISTIC FORENSICS ARCHITECTURE</div>
-              <div class="portal-arch-title">四阶可解释 AI 申告取证与核查成稿链路</div>
+              <div class="portal-arch-title">报告生成流程</div>
             </div>
             <span class="portal-arch-tag mono">零幻觉 · 逐字段溯源</span>
           </div>
@@ -316,7 +322,7 @@ onBeforeUnmount(() => {
                 <rect x="12" y="66" width="140" height="22" rx="3" class="svg-sub-box" />
                 <text x="20" y="81" class="svg-mono-txt" font-size="10.5">业务受理单原文 (逐行号)</text>
                 <rect x="12" y="94" width="140" height="18" rx="3" class="svg-accent-soft" />
-                <text x="20" y="106" class="svg-accent-txt" font-size="10" font-weight="600">入参契约强类型校验</text>
+                <text x="20" y="106" class="svg-accent-txt" font-size="10" font-weight="600">入参强类型校验</text>
               </g>
 
               <!-- 阶段 1：左下 CRM 统一报文网关 -->
@@ -333,18 +339,18 @@ onBeforeUnmount(() => {
                 <text x="20" y="109" class="svg-mono-txt" font-size="10.5">XML 报文解析与条件筛选</text>
               </g>
 
-              <!-- 中枢：阶段 2 智能体编排与 Skill 规程中枢 -->
+              <!-- 阶段 2：智能体与技能 -->
               <g transform="translate(226, 86)">
                 <rect width="172" height="168" rx="6" class="svg-hub-card" stroke-width="1.6" />
                 <rect width="172" height="3" rx="1.5" class="svg-brand-bar" />
                 <text x="86" y="26" text-anchor="middle" class="svg-head-txt" font-size="12" font-weight="700">
-                  02 · 数智取证编排中枢
+                  02 · 按技能取数与判定
                 </text>
                 <line x1="14" y1="36" x2="158" y2="36" class="svg-border" stroke-width="1" />
 
                 <rect x="14" y="48" width="144" height="28" rx="4" class="svg-accent-soft" />
                 <text x="86" y="66" text-anchor="middle" class="svg-accent-txt" font-size="11" font-weight="600">
-                  Skill 业务核查规程调度
+                  技能调度
                 </text>
 
                 <rect x="14" y="84" width="144" height="28" rx="4" class="svg-sub-box" />
@@ -358,7 +364,7 @@ onBeforeUnmount(() => {
                 </text>
               </g>
 
-              <!-- 右侧：阶段 4 正式核查报告单与不可变基线 -->
+              <!-- 右侧：阶段 4 正式核查报告单与不可变版本 -->
               <g transform="translate(440, 48)">
                 <rect width="160" height="244" rx="5" class="svg-card" stroke-width="1.4" />
                 <rect width="160" height="3" rx="1.5" class="svg-brand-bar" />
@@ -406,12 +412,12 @@ onBeforeUnmount(() => {
               <span class="arch-metric-desc">报告每个取值直连单据行号与接口记录</span>
             </div>
             <div class="arch-metric-item">
-              <span class="arch-metric-title">确定性模板编排</span>
-              <span class="arch-metric-desc">Jinja2 分支与兜底规则杜绝自由发挥</span>
+              <span class="arch-metric-title">确定性模板渲染</span>
+              <span class="arch-metric-desc">Jinja2 分支与默认值规则杜绝自由发挥</span>
             </div>
             <div class="arch-metric-item">
-              <span class="arch-metric-title">不可变生产基线</span>
-              <span class="arch-metric-desc">Git 版本快照保障全网变更秒级回切</span>
+              <span class="arch-metric-title">不可变线上版本</span>
+              <span class="arch-metric-desc">Git 版本管理，变更可秒级回退</span>
             </div>
           </div>
         </section>
@@ -422,13 +428,13 @@ onBeforeUnmount(() => {
     <footer class="portal-footer">
       <span>中国移动通信集团江苏有限公司 · 业务支撑系统部</span>
       <span class="portal-footer-sep">|</span>
-      <span class="mono">数智申告核查中台 · 生产环境合规门户</span>
+      <span class="mono">智能申告核查平台</span>
     </footer>
   </div>
 </template>
 
 <style scoped>
-/* ==================== 双主题色板精确定义（极昼云原生 + 省网指挥大屏，零渐变） ==================== */
+/* ==================== 双主题色板精确定义（浅色 + 深色，零渐变） ==================== */
 .portal-screen {
   --p-canvas: #f2f5f9;
   --p-topbar: #ffffff;
@@ -709,7 +715,24 @@ onBeforeUnmount(() => {
 .portal-brand-header {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
+}
+
+.portal-brand-row {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+.portal-brand-logo {
+  flex-shrink: 0;
+}
+
+.portal-brand-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
 }
 
 .portal-kicker {

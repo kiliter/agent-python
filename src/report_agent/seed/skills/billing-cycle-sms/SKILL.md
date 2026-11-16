@@ -6,7 +6,7 @@ apis:
   - querySMSSendInfo
 ---
 
-<!-- #Created By AiCoding(codex) 迁移自 Java skills/billing-cycle-sms，二期升级采用 expand_period + 列表空值 found/[] 语义 -->
+<!-- #Created By AiCoding(codex) -->
 
 # 账期短信提醒列表
 
@@ -43,7 +43,7 @@ apis:
 3. 任一月份 `ok=false`（非“无短信记录”的业务失败、网络错误等）→ 整个字段提交 `status="not_found"`、`value=null` 并写明哪个月失败（不能把接口报错当作空列表）。
 4. 某月 `ok=true` 且 `count=0`（含“无短信记录”）是正常的，表示该月无短信记录。
 
-## 整理规则（与 Java 完全一致）
+## 整理规则
 
 收集全部成功月份的 `resultIds` 后合并筛选：
 

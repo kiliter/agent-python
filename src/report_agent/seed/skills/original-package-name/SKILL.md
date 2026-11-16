@@ -6,7 +6,7 @@ apis:
   - querySMSSendInfo
 ---
 
-<!-- #Created By AiCoding(codex) 迁移自 Java skills/original-package-name，二期升级采用 time_diff + regex_extract -->
+<!-- #Created By AiCoding(codex) -->
 
 # 原套餐名称
 

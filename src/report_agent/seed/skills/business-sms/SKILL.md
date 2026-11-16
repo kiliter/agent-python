@@ -6,7 +6,7 @@ apis:
   - querySMSSendInfo
 ---
 
-<!-- #Created By AiCoding(codex) 迁移自 Java skills/business-sms（SKILL.md + scripts/assembly.groovy + scripts/extract.groovy） -->
+<!-- #Created By AiCoding(codex) -->
 
 # 订购短信
 
@@ -51,7 +51,7 @@ apis:
 }
 ```
 
-规则说明（与 Java 完全一致，任何一条都不能省略或放宽）：
+规则说明（任何一条都不能省略或放宽）：
 
 1. **只比较第一个“编号”之前的部分**：短信中出现“编号”时，只用第一个“编号”之前的头部与业务名称比较；没有“编号”的短信用全文。头部没有命中时**不得**再用全文兜底（活动正文中的“业务1”“业务2”明细名称会造成误配）。
 2. 比较前两边都按 `normalize_text` 规则清洗（NFKC 归一化 + 删除固定中英文标点），清洗后的短信头部必须**包含**清洗后的业务名称；`normalizedContains` 已经做了这一步，`value` 直接传入参原文。
@@ -66,4 +66,4 @@ apis:
 
 ## 不负责的内容
 
-- Java 的 extract 会同时输出由 `smsSendTime` 转换的“受理日期”（`yyyy-MM-dd`），但服务层 `removeSmsAcceptDate` 会**丢弃**这个副产物。**本 Skill 不产出受理日期，任何情况下都不得用短信发送时间填写受理日期**；受理日期的来源规则见模板字段说明（热线/掌上营业厅取入参“业务月份”，其他渠道只取属于本次业务的单据）。
+- **本 Skill 不产出受理日期，任何情况下都不得用短信发送时间填写受理日期**；受理日期的来源规则见模板字段说明（热线/掌上营业厅取入参“业务月份”，其他渠道只取属于本次业务的单据）。

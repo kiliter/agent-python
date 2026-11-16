@@ -6,7 +6,7 @@ apis:
   - querySMSSendInfo
 ---
 
-<!-- #Created By AiCoding(codex) 迁移自 Java skills/reminder-sms，二期升级采用 extract_dates + date_shift 修复活动编号误识别为日期缺陷 -->
+<!-- #Created By AiCoding(codex) -->
 
 # 提醒短信与提醒日期
 
@@ -53,7 +53,7 @@ apis:
 }
 ```
 
-- 只要正文原文包含“提醒”即为候选（**不按业务名称过滤**，与 Java 一致）。
+- 只要正文原文包含“提醒”即为候选（**不按业务名称过滤**）。
 - 多条时按 `smsSendTime` 倒序取第一条。没有候选 → 两个字段 `not_found`。
 
 ## 提交要求

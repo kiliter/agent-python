@@ -1,8 +1,8 @@
 <!--
-  5.9 引擎与系统设置视图
-  - Tab 1（提示词与运行配置）：保留经典左编辑工作区 + 右运行参数与历史基线双栏布局；右侧支持统一网关与大模型参数热更新编辑（免重启立即生效）
-  - Tab 2（系统提示词版本回滚）：独立版本时间线 + 历史快照拉取 + 行级 Diff 对比（对比线上 / 对比工作区草稿）+ 恢复至草稿 / 直接回退上线双动作
-  - Tab 3（引擎与网关配置回滚）：c1..cN 配置快照历史、变更字段高亮对比、一键热回滚与环境变量重同步
+  5.9 系统设置视图
+  - Tab 1（提示词与运行配置）：保留经典左编辑工作区 + 右运行参数与历史版本双栏布局；右侧支持统一网关与大模型参数立即生效编辑（免重启立即生效）
+  - Tab 2（系统提示词版本回滚）：独立版本时间线 + 历史版本拉取 + 行级 Diff 对比（对比线上 / 对比工作区草稿）+ 恢复至草稿 / 直接回退上线双动作
+  - Tab 3（引擎与网关配置回滚）：c1..cN 配置版本历史、变更字段高亮对比、一键回滚与环境变量重同步
   #Created By AiCoding(codex)
 -->
 <script setup lang="ts">
@@ -290,7 +290,7 @@ function handleRollbackToDraft(rev: string) {
 function handleDirectRollbackPublish(rev: string) {
   if (!rev) return
   ElMessageBox.prompt(
-    `确认将系统提示词直接回退至 ${rev} 并立即生成新生产基线上线生效吗？下一个智能体请求将立即采用该版本提示词。请填写回退原因（必填）：`,
+    `确认将系统提示词直接回退至 ${rev} 并立即生成新线上版本上线生效吗？下一个智能体请求将立即采用该版本提示词。请填写回退原因（必填）：`,
     `直接回退上线 · ${rev}`,
     {
       confirmButtonText: '确认回退并上线',
@@ -306,12 +306,12 @@ function handleDirectRollbackPublish(rev: string) {
     .catch(() => {})
 }
 
-// ==================== 4. 统一网关与大模型运行配置热更新（Requirement #5） ====================
+// ==================== 4. 统一网关与大模型运行配置立即生效（Requirement #5） ====================
 const isEditingRuntime = ref(false)
 const savingRuntime = ref(false)
 const syncingEnv = ref(false)
 
-/** 运行期非敏感配置全量默认值（后端旧快照缺字段或表单留空时统一兜底） */
+/** 运行期非敏感配置全量默认值（后端旧版本缺字段或表单留空时统一默认） */
 const DEFAULT_RUNTIME_CONFIG = {
   gatewayMode: 'mock',
   gatewayXmlStyle: 'java',
@@ -606,7 +606,7 @@ const runtimeActiveRev = computed(
   () => store.runtimeState?.activeRev || store.modelInfo?.activeRev || 'c1',
 )
 
-// ==================== 4.1 上游与嵌入调用凭证（X-API-Key）热更新管理 ====================
+// ==================== 4.1 上游与嵌入调用凭证（X-API-Key）立即生效管理 ====================
 const apiKeySettings = ref<ApiKeySettings | null>(null)
 const apiKeyRevealed = ref(false)
 const apiKeyFetching = ref(false)
@@ -775,7 +775,7 @@ async function handleSaveCustomApiKey() {
     const res = await platformApi.updateApiKeySettings(parts.join(','), apiKeyNote.value.trim())
     await syncRuntimeAfterApiKeyChange(res)
     isEditingApiKey.value = false
-    store.showToast(`调用凭证 API Key 已热更新生效（启用 ${res.count} 把密钥）`)
+    store.showToast(`调用凭证 API Key 已立即生效（启用 ${res.count} 把密钥）`)
   } catch (err) {
     store.showError(err, '保存 API Key 失败')
   } finally {
@@ -942,7 +942,7 @@ function handleResetDefaultParams() {
   runtimeForm.chatSummaryRequestLimit = DEFAULT_RUNTIME_CONFIG.chatSummaryRequestLimit
   runtimeForm.chatSummaryToolCallsLimit = DEFAULT_RUNTIME_CONFIG.chatSummaryToolCallsLimit
   runtimeForm.chatSummaryTimeoutS = DEFAULT_RUNTIME_CONFIG.chatSummaryTimeoutS
-  store.showToast('已重置数值/配额/枚举模式为默认值（保留服务地址、模型名及密钥），点击「保存热更新」后生效', 'info')
+  store.showToast('已重置数值/配额/枚举模式为默认值（保留服务地址、模型名及密钥），点击「保存并生效」后生效', 'info')
 }
 
 watch(
@@ -1130,7 +1130,7 @@ async function handleSaveRuntimeConfig() {
   const releasesKeep = parseNumOrDefault(
     runtimeForm.releasesKeep,
     DEFAULT_RUNTIME_CONFIG.releasesKeep,
-    '发布快照保留数 (releasesKeep)',
+    '发布版本保留数 (releasesKeep)',
     { int: true, min: 1, max: 500 },
   )
   if (releasesKeep === null) return
@@ -1370,10 +1370,10 @@ async function handleSaveRuntimeConfig() {
 
 function handleSyncFromEnv() {
   ElMessageBox.prompt(
-    '将重新读取服务端启动环境变量中的默认网关与大模型参数，生成新配置版本并立即热重载生效。可填写备注（选填）：',
+    '将重新读取服务端启动环境变量中的默认网关与大模型参数，生成新配置版本并立即生效。可填写备注（选填）：',
     '从环境变量同步默认参数',
     {
-      confirmButtonText: '立即同步并热重载',
+      confirmButtonText: '立即同步并生效',
       cancelButtonText: '取消',
       type: 'warning',
       inputPlaceholder: '同步说明（选填）',
@@ -1468,7 +1468,7 @@ const engineSpecRows = computed(() => {
       value: `${cfg.agentMaxPeriodMonths ?? DEFAULT_RUNTIME_CONFIG.agentMaxPeriodMonths} 个月`,
     },
     {
-      label: '发布快照保留数',
+      label: '发布版本保留数',
       value: `最近 ${cfg.releasesKeep ?? DEFAULT_RUNTIME_CONFIG.releasesKeep} 个`,
     },
     {
@@ -1549,7 +1549,7 @@ const chatSpecRows = computed(() => {
   ]
 })
 
-// ==================== 5. 运行配置快照回滚与字段级对比（Tab 3） ====================
+// ==================== 5. 运行配置版本回滚与字段级对比（Tab 3） ====================
 const selectedRuntimeRevKey = ref<string>('')
 const runtimeShowDiffOnly = ref(false)
 
@@ -1590,7 +1590,7 @@ const RUNTIME_KEY_LABELS: Record<string, string> = {
   agentRunTimeoutS: '单次核查总超时 (秒)',
   agentMaxConcurrentRuns: '最大并发运行配额',
   agentPreviewRows: '工具结果预览行数',
-  releasesKeep: '发布快照保留数',
+  releasesKeep: '发布版本保留数',
   runsKeepDays: '运行与会话留存天数',
   agentQueryDefaultLimit: '结果筛选默认行数',
   agentQueryMaxLimit: '结果筛选最大行数',
@@ -1762,22 +1762,22 @@ const displayedRuntimeCompareRows = computed(() =>
 )
 
 function handleLoadSnapshotToForm(revItem: RuntimeConfigRevision) {
-  populateRuntimeForm(revItem.config, `基于历史快照 ${revItem.rev} 微调`)
+  populateRuntimeForm(revItem.config, `基于历史版本 ${revItem.rev} 微调`)
   isEditingRuntime.value = true
   activeSubView.value = 'workspace'
-  store.showToast(`已将 ${revItem.rev} 的非敏感参数载入编辑表单，确认后点击保存即可热更新`, 'info')
+  store.showToast(`已将 ${revItem.rev} 的非敏感参数载入编辑表单，确认后点击保存即可生效`, 'info')
 }
 
 function handleRollbackRuntime(rev: string) {
   if (!rev) return
   ElMessageBox.prompt(
-    `确认将网关与大模型运行配置热回滚至历史快照 ${rev} 吗？回滚后服务端无需重启即可立即切换连接池与模型实例。请填写回退说明（必填）：`,
-    `热回滚运行配置 · ${rev}`,
+    `确认将网关与大模型运行配置回滚至历史版本 ${rev} 吗？回滚后服务端无需重启即可立即切换连接池与模型实例。请填写回退说明（必填）：`,
+    `回滚运行配置 · ${rev}`,
     {
-      confirmButtonText: '确认热回滚生效',
+      confirmButtonText: '确认回滚生效',
       cancelButtonText: '取消',
       type: 'warning',
-      inputPlaceholder: '例如：新模型地址响应超时，回退至稳定配置快照',
+      inputPlaceholder: '例如：新模型地址响应超时，回退至稳定配置版本',
       inputValidator: val => (val && val.trim().length > 0 ? true : '请填写配置回退说明'),
     },
   )
@@ -1801,7 +1801,7 @@ onMounted(async () => {
   <div class="page-fill settings-page">
     <!-- 顶部子视图导航条（全屏专注编辑提示词时自动隐藏） -->
     <div v-show="!store.isFocusFullscreen" class="settings-top-nav">
-      <div class="settings-seg-group" role="tablist" aria-label="引擎与系统设置子视图">
+      <div class="settings-seg-group" role="tablist" aria-label="系统设置子视图">
         <button
           type="button"
           role="tab"
@@ -1842,32 +1842,32 @@ onMounted(async () => {
       <div class="settings-top-meta">
         <span class="meta-pill">
           <span class="meta-dot ok"></span>
-          <span>提示词基线</span>
+          <span>提示词版本</span>
           <strong class="mono">{{ onlinePromptRev || '未发布' }}</strong>
         </span>
         <span class="meta-pill">
           <span class="meta-dot primary"></span>
-          <span>运行配置快照</span>
+          <span>运行配置版本</span>
           <strong class="mono">{{ runtimeActiveRev }}</strong>
-          <span class="meta-sub">热更新免重启</span>
+          <span class="meta-sub">免重启立即生效</span>
         </span>
       </div>
     </div>
 
-    <!-- ==================== 子视图 1：提示词编排工作区 + 热更新网关/模型运行参数（双栏布局） ==================== -->
+    <!-- ==================== 子视图 1：提示词编辑区 + 立即生效网关/模型运行参数（双栏布局） ==================== -->
     <div
       v-if="activeSubView === 'workspace'"
       class="settings-grid"
       :class="{ 'is-fullscreen-focus': store.isFocusFullscreen }"
     >
-      <!-- 左栏：全局系统提示词编排工作区 -->
+      <!-- 左栏：全局系统提示词编辑区 -->
       <div class="card card-fill settings-prompt-card">
         <div class="card-header settings-prompt-header">
           <div class="card-title" style="flex-wrap: wrap; gap: 7px">
             <span>全局系统提示词工作区</span>
             <StatusTag :status="store.sysPromptStatus" />
             <span v-if="onlinePromptRev" class="chip-tag mono">
-              生产基线 {{ onlinePromptRev }}
+              线上版本 {{ onlinePromptRev }}
             </span>
             <span v-if="isDirty" class="settings-dirty-badge">
               未保存修改
@@ -1939,7 +1939,7 @@ onMounted(async () => {
         </div>
 
         <div class="settings-prompt-subbar">
-          <span>约束全平台智能体的证据摘录纪律、防幻觉边界与结构化交卷规程（Markdown 格式）</span>
+          <span>约束所有智能体的证据摘录要求、防幻觉边界与结构化提交规则（Markdown 格式）</span>
           <span class="mono">{{ promptLineCount }} 行 · {{ store.sysPromptText.length }} 字符</span>
         </div>
 
@@ -1954,7 +1954,7 @@ onMounted(async () => {
         </div>
       </div>
 
-      <!-- 右栏：上游与嵌入调用凭证 + API 统一网关与大模型热更新配置 + 系统提示词历史基线 -->
+      <!-- 右栏：上游与嵌入调用凭证 + API 统一网关与大模型立即生效配置 + 系统提示词历史版本 -->
       <div v-show="!store.isFocusFullscreen" class="settings-right-col">
         <!-- 顶部醒目区块：上游与嵌入调用凭证（X-API-Key） -->
         <div v-show="!isEditingRuntime" class="card settings-apikey-card">
@@ -2093,13 +2093,13 @@ onMounted(async () => {
           </div>
         </div>
 
-        <!-- 上半区：支持在线编辑、持久化与免重启热更新的网关/模型运行参数面板 -->
+        <!-- 上半区：支持在线编辑、持久化与免重启立即生效的网关/模型运行参数面板 -->
         <div class="card settings-spec-card" :class="{ 'is-editing-card': isEditingRuntime }">
           <div class="card-header settings-spec-header">
             <div class="card-title" style="flex-wrap: wrap; gap: 6px">
               <span>API 统一网关与大模型运行配置</span>
               <span class="chip-tag mono live-snap-chip">
-                生效快照 {{ runtimeActiveRev }} · 热更新免重启
+                生效版本 {{ runtimeActiveRev }} · 免重启立即生效
               </span>
             </div>
 
@@ -2156,7 +2156,7 @@ onMounted(async () => {
                   @click="handleSaveRuntimeConfig"
                 >
                   <Check :size="12" />
-                  <span>{{ savingRuntime ? '热更新中…' : '保存热更新' }}</span>
+                  <span>{{ savingRuntime ? '保存中…' : '保存并生效' }}</span>
                 </button>
               </template>
             </div>
@@ -2211,7 +2211,7 @@ onMounted(async () => {
                   </template>
                 </span>
                 <span class="hint-sep">·</span>
-                <span>修改保存后自动持久化落盘，并立即热重载网关、聊天窗口与模型实例</span>
+                <span>修改保存后自动持久化落盘，并立即重新加载网关、聊天窗口与模型实例</span>
               </div>
             </template>
 
@@ -2321,7 +2321,7 @@ onMounted(async () => {
             </div>
 
             <div class="spec-section-title" style="margin-top: 12px">
-              2. 大模型推理服务与智能体运行配额（保存后热重载 Runner）
+              2. 大模型推理服务与智能体运行配额（保存后立即生效）
             </div>
             <div class="rt-form-grid">
               <label class="rt-field">
@@ -2332,7 +2332,7 @@ onMounted(async () => {
               <label class="rt-field">
                 <span class="rt-label">结构化输出模式</span>
                 <select v-model="runtimeForm.agentOutputMode" class="select mono">
-                  <option value="tool">tool（工具函数结构化交卷）</option>
+                  <option value="tool">tool（通过工具函数提交结果）</option>
                   <option value="native">native（原生 JSON Schema）</option>
                   <option value="json_object">json_object（JSON 对象模式）</option>
                   <option value="prompted">prompted（提示词引导解析）</option>
@@ -2765,7 +2765,7 @@ onMounted(async () => {
               </label>
 
               <label class="rt-field">
-                <span class="rt-label">发布快照保留数 (1 ~ 500)</span>
+                <span class="rt-label">发布版本保留数 (1 ~ 500)</span>
                 <input
                   v-model.number="runtimeForm.releasesKeep"
                   type="number"
@@ -2789,7 +2789,7 @@ onMounted(async () => {
               </label>
 
               <label class="rt-field is-full">
-                <span class="rt-label">变更备注（记入 cN 审计台账，选填）</span>
+                <span class="rt-label">变更备注（记入 cN 审计列表，选填）</span>
                 <input
                   v-model="runtimeForm.note"
                   class="input"
@@ -2804,7 +2804,7 @@ onMounted(async () => {
         <div v-show="!isEditingRuntime" class="card card-fill">
           <div class="card-header">
             <div class="card-title">
-              <span>系统提示词历史基线</span>
+              <span>系统提示词历史版本</span>
               <span class="chip-tag mono">{{ store.sysPromptRevisions.length }}</span>
             </div>
             <button type="button" class="btn-link" @click="openPromptRollbackView()">
@@ -2828,7 +2828,7 @@ onMounted(async () => {
                   <span class="settings-rev-badge mono" :class="{ online: rev.online }">
                     {{ rev.rev }}
                   </span>
-                  <span v-if="rev.online" class="settings-online-tag">当前线上基线</span>
+                  <span v-if="rev.online" class="settings-online-tag">当前线上版本</span>
                   <span v-else-if="rev.type" class="chip-tag">{{ rev.type }}</span>
                 </div>
                 <span class="mono" style="font-size: 11px; color: var(--text-secondary)">
@@ -2875,7 +2875,7 @@ onMounted(async () => {
 
         <div class="rollback-live-banner">
           <div>
-            <span class="muted-lbl">当前线上基线：</span>
+            <span class="muted-lbl">当前线上版本：</span>
             <strong class="mono" style="color: var(--primary)">{{ onlinePromptRev || '未发布' }}</strong>
           </div>
           <StatusTag :status="store.sysPromptStatus" />
@@ -2902,7 +2902,7 @@ onMounted(async () => {
                 <span class="settings-rev-badge mono" :class="{ online: rev.online }">
                   {{ rev.rev }}
                 </span>
-                <span v-if="rev.online" class="settings-online-tag">当前线上基线</span>
+                <span v-if="rev.online" class="settings-online-tag">当前线上版本</span>
                 <span v-else-if="rev.type" class="chip-tag">{{ rev.type }}</span>
               </div>
               <span class="mono ts-time">{{ rev.time }}</span>
@@ -2919,10 +2919,10 @@ onMounted(async () => {
           <div class="card-header rollback-main-header">
             <div class="rb-head-left">
               <span class="rb-target-title">
-                历史快照 <strong class="mono">{{ selectedPromptRev }}</strong>
+                历史版本 <strong class="mono">{{ selectedPromptRev }}</strong>
               </span>
               <span v-if="selectedPromptRevMeta?.online" class="settings-online-tag">
-                当前线上生效基线
+                当前线上版本
               </span>
               <span v-else-if="selectedPromptRevMeta?.type" class="chip-tag">
                 {{ selectedPromptRevMeta.type }}
@@ -2940,7 +2940,7 @@ onMounted(async () => {
                   :class="{ active: promptInspectMode === 'diff' }"
                   @click="promptInspectMode = 'diff'"
                 >
-                  差异对比 (Diff)
+                  差异对比
                 </button>
                 <button
                   type="button"
@@ -2973,7 +2973,7 @@ onMounted(async () => {
                 type="button"
                 class="btn btn-sm btn-primary"
                 :disabled="Boolean(selectedPromptRevMeta?.online)"
-                :title="selectedPromptRevMeta?.online ? '该版本已是当前线上生效基线' : '填写回退原因并直接发布上线'"
+                :title="selectedPromptRevMeta?.online ? '该版本已是当前线上版本' : '填写回退原因并直接发布上线'"
                 @click="handleDirectRollbackPublish(selectedPromptRev)"
               >
                 直接回退上线
@@ -2985,7 +2985,7 @@ onMounted(async () => {
           <div class="rollback-subbar">
             <template v-if="promptInspectMode === 'diff'">
               <div class="rb-compare-left">
-                <span>对比基准：</span>
+                <span>对比版本：</span>
                 <select v-model="promptCompareBase" class="select select-xs mono">
                   <option value="online">
                     当前线上版本 ({{ onlinePromptRev || 'online' }})
@@ -3005,7 +3005,7 @@ onMounted(async () => {
             </template>
             <template v-else>
               <span>
-                只读预览 <strong class="mono">{{ selectedPromptRev }}</strong> 快照全文
+                只读预览 <strong class="mono">{{ selectedPromptRev }}</strong> 全文
                 <template v-if="selectedPromptRevMeta?.note">
                   · 说明：{{ selectedPromptRevMeta.note }}
                 </template>
@@ -3016,10 +3016,10 @@ onMounted(async () => {
 
           <!-- 主体内容滚动区 -->
           <div v-if="promptVersionLoading" class="card-scroll empty-inline-msg">
-            正在加载版本 {{ selectedPromptRev }} 的历史系统提示词快照…
+            正在加载版本 {{ selectedPromptRev }} 的历史系统提示词…
           </div>
           <div v-else-if="promptVersionError" class="card-scroll empty-inline-msg" style="color: var(--danger)">
-            加载历史快照失败：{{ promptVersionError }}
+            加载历史版本失败：{{ promptVersionError }}
           </div>
           <div v-else-if="promptInspectMode === 'preview'" class="settings-editor-wrap">
             <CodeMirrorEditor
@@ -3061,12 +3061,12 @@ onMounted(async () => {
       </section>
     </div>
 
-    <!-- ==================== 子视图 3：引擎与网关运行配置历史快照及热回滚（Requirement #5） ==================== -->
+    <!-- ==================== 子视图 3：引擎与网关运行配置历史版本及回滚（Requirement #5） ==================== -->
     <div v-else class="rollback-split-grid">
       <aside class="card card-fill rollback-sidebar-card">
         <div class="card-header">
           <div class="card-title">
-            <span>配置快照修订台账</span>
+            <span>配置修改历史</span>
             <span class="chip-tag mono">{{ store.runtimeRevisions.length }}</span>
           </div>
           <button
@@ -3083,10 +3083,10 @@ onMounted(async () => {
 
         <div class="rollback-live-banner">
           <div>
-            <span class="muted-lbl">当前生效快照：</span>
+            <span class="muted-lbl">当前生效版本：</span>
             <strong class="mono" style="color: var(--primary)">{{ runtimeActiveRev }}</strong>
           </div>
-          <span class="chip-tag live-snap-chip">热更新在线</span>
+          <span class="chip-tag live-snap-chip">已生效</span>
         </div>
 
         <div class="card-scroll rollback-timeline-list">
@@ -3142,12 +3142,12 @@ onMounted(async () => {
           <div class="card-header rollback-main-header">
             <div class="rb-head-left">
               <span class="rb-target-title">
-                配置快照 <strong class="mono">{{ selectedRuntimeRev.rev }}</strong>
+                配置版本 <strong class="mono">{{ selectedRuntimeRev.rev }}</strong>
               </span>
               <span v-if="selectedRuntimeRev.online" class="settings-online-tag">
-                当前生效快照
+                当前生效版本
               </span>
-              <span v-else class="chip-tag">{{ selectedRuntimeRev.type || '历史快照' }}</span>
+              <span v-else class="chip-tag">{{ selectedRuntimeRev.type || '历史版本' }}</span>
               <span class="rb-meta-sub mono">
                 {{ selectedRuntimeRev.time }} · {{ selectedRuntimeRev.operator || '—' }}
               </span>
@@ -3170,17 +3170,17 @@ onMounted(async () => {
                 type="button"
                 class="btn btn-sm btn-primary"
                 :disabled="selectedRuntimeRev.online"
-                :title="selectedRuntimeRev.online ? '该快照已是当前生效版本' : '回滚并立即热重载生效'"
+                :title="selectedRuntimeRev.online ? '该版本已是当前生效版本' : '回滚并立即生效'"
                 @click="handleRollbackRuntime(selectedRuntimeRev.rev)"
               >
-                热回滚至此版本
+                回滚至此版本
               </button>
             </div>
           </div>
 
           <div class="rollback-subbar">
             <span>
-              {{ selectedRuntimeRev.note || selectedRuntimeRev.summary || '快照参数明细对比' }}
+              {{ selectedRuntimeRev.note || selectedRuntimeRev.summary || '参数明细对比' }}
             </span>
             <span class="mono">
               与当前生效 ({{ runtimeActiveRev }}) 共 {{ runtimeChangedCount }} 项差异
@@ -3194,14 +3194,14 @@ onMounted(async () => {
                   <th style="width: 210px">参数名称</th>
                   <th style="width: 185px">配置键 (Key)</th>
                   <th>当前生效值 ({{ runtimeActiveRev }})</th>
-                  <th>快照 {{ selectedRuntimeRev.rev }} 值</th>
+                  <th>版本 {{ selectedRuntimeRev.rev }} 值</th>
                   <th style="width: 84px; text-align: center">状态</th>
                 </tr>
               </thead>
               <tbody>
                 <tr v-if="displayedRuntimeCompareRows.length === 0">
                   <td colspan="5" class="empty-inline-msg" style="padding: 28px">
-                    当前生效配置与快照 {{ selectedRuntimeRev.rev }} 无差异项
+                    当前生效配置与版本 {{ selectedRuntimeRev.rev }} 无差异项
                   </td>
                 </tr>
                 <tr
@@ -3226,7 +3226,7 @@ onMounted(async () => {
         </template>
 
         <div v-else class="card-scroll empty-inline-msg">
-          请从左侧选择一个运行配置历史快照进行查看或热回滚
+          请从左侧选择一个运行配置历史版本进行查看或回滚
         </div>
       </section>
     </div>
@@ -3663,7 +3663,7 @@ onMounted(async () => {
   color: var(--border-strong);
 }
 
-/* 在线热更新编辑表单 */
+/* 在线立即生效编辑表单 */
 .rt-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

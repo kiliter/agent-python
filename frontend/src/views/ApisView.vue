@@ -1,6 +1,6 @@
 <!--
-  5.5 API调用管理视图（政企数智概览条 + XML/JSON 双协议契约台账 + 独立详情页：可视化编排/双栏联动/YAML源码 / 报文试调用 / 关联规程 / 历史）
-  集成类 Apifox 可视化编排器与 CodeMirror 6 YAML 语法高亮编辑器；列表、契约、试调用结果、修订历史全部来自后端 /api/v1/apis。
+  5.5 API 管理视图（概览条 + XML/JSON API 列表 + 独立详情页：可视化编辑/双栏联动/YAML源码 / 报文试调用 / 关联技能 / 历史）
+  集成类 Apifox 可视化编辑器与 CodeMirror 6 YAML 语法高亮编辑器；列表、配置、试调用结果、修订历史全部来自后端 /api/v1/apis。
   #Created By AiCoding(codex)
 -->
 <script setup lang="ts">
@@ -39,7 +39,7 @@ const refreshing = ref(false)
 const api = computed(() => store.currentApi)
 const tab = computed(() => store.apiDetailTab)
 
-/** 根据 Skill id 或 name 解析可读展示名称 */
+/** 根据技能 id 或 name 解析可读展示名称 */
 function resolveSkillDisplayName(skillKey: string): string {
   const hit = store.skills.find(s => s.id === skillKey || s.name === skillKey)
   return hit?.name || skillKey
@@ -90,7 +90,7 @@ function parseFailRate(raw: string | undefined | null): number {
   return m ? Number(m[1]) : 0
 }
 
-/** 顶部 API调用数智概览指标（全部基于 store.apis 实时动态聚合） */
+/** 顶部 API 概览指标（全部基于 store.apis 实时动态聚合） */
 const apiOverview = computed(() => {
   const list = store.apis
   const total = list.length
@@ -363,7 +363,7 @@ async function handleRunTestCall() {
 
 const testResult = computed(() => store.apiTestResult)
 
-/** 当前试调用结果的实际协议标识（优先读后端返回 format/connector，否则读当前实时契约协议） */
+/** 当前试调用结果的实际协议标识（优先读后端返回 format/connector，否则读当前实时配置协议） */
 const activeResultProto = computed<'JSON' | 'XML'>(() => {
   const res = testResult.value
   if (res) {
@@ -420,7 +420,7 @@ const syncableRecordKeys = computed<string[]>(() => {
   return keys
 })
 
-/** 记录表格列：合并契约实时列声明、后端试调用 columns 与返回记录实有字段 */
+/** 记录表格列：合并配置实时列声明、后端试调用 columns 与返回记录实有字段 */
 const recordColumns = computed<Array<{ key: string; label: string }>>(() => {
   const res = testResult.value
   if (!res) return []
@@ -445,9 +445,9 @@ function handleSyncColumnsToContract() {
   if (visualEditorRef.value && typeof visualEditorRef.value.syncColumnsFromTestResult === 'function') {
     const count = visualEditorRef.value.syncColumnsFromTestResult()
     if (count > 0) {
-      store.showToast(`已同步 ${count} 个返回字段至契约列映射`)
+      store.showToast(`已同步 ${count} 个返回字段至列映射`)
     } else {
-      store.showToast('当前试调用返回字段已全部存在于契约列映射中', 'info')
+      store.showToast('当前试调用返回字段已全部存在于列映射中', 'info')
     }
     return
   }
@@ -462,12 +462,12 @@ function handleSyncColumnsToContract() {
   try {
     parsed = YAML.parse(store.apiYamlText || '')
   } catch {
-    store.showToast('当前契约 YAML 存在语法错误，请先在编辑器修复后再同步列映射', 'warning')
+    store.showToast('当前 API YAML 存在语法错误，请先在编辑器修复后再同步列映射', 'warning')
     return
   }
 
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    store.showToast('当前契约 YAML 顶层结构无效，无法同步列映射', 'warning')
+    store.showToast('当前 API YAML 顶层结构无效，无法同步列映射', 'warning')
     return
   }
 
@@ -500,10 +500,10 @@ function handleSyncColumnsToContract() {
 
   if (addedCount > 0) {
     store.showToast(
-      `已将 ${addedCount} 个返回字段同步至契约列映射（共 ${Object.keys(existingCols).length} 列），可切至「契约声明编辑」完善中文列名`,
+      `已将 ${addedCount} 个返回字段同步至列映射（共 ${Object.keys(existingCols).length} 列），可切至「配置编辑」完善中文列名`,
     )
   } else {
-    store.showToast(`返回的 ${keys.length} 个字段已全部在契约列映射中，无需重复添加`, 'info')
+    store.showToast(`返回的 ${keys.length} 个字段已全部在列映射中，无需重复添加`, 'info')
   }
 }
 
@@ -525,13 +525,13 @@ function handleRedo() {
   yamlEditorRef.value?.redoEdit()
 }
 
-/** 用线上契约 YAML 替换工作区内容（可撤销，需保存草稿后生效） */
+/** 用线上 API YAML 替换工作区内容（可撤销，需保存草稿后生效） */
 function handleRestoreOnline() {
   const online = store.apiOnlineYaml
   if (!online) return
   ElMessageBox.confirm(
-    '确认将当前 API 契约恢复为线上生效版本内容吗？替换后需保存草稿才会生效。',
-    '确认恢复线上契约',
+    '确认将当前 API 恢复为线上生效版本内容吗？替换后需保存草稿才会生效。',
+    '确认恢复线上内容',
     {
       confirmButtonText: '确认恢复',
       cancelButtonText: '取消',
@@ -541,17 +541,17 @@ function handleRestoreOnline() {
     .then(() => {
       if (yamlEditorRef.value) yamlEditorRef.value.resetEdit(online, true)
       else store.setApiYaml(online)
-      store.showToast('已载入线上生效契约内容', 'info')
+      store.showToast('已载入线上内容', 'info')
     })
     .catch(() => {})
 }
 
-/** 发布接口契约（二次确认） */
+/** 发布 API（二次确认） */
 function handleConfirmPublishApi() {
   const refLabel = api.value.refs.length > 0 ? `（被 ${api.value.refs.join('、')} 引用）` : ''
   ElMessageBox.confirm(
-    `发布后 API「${api.value.name}」契约将立即在线上生效${refLabel}，确认发布吗？`,
-    '确认发布 API 契约',
+    `发布后 API「${api.value.name}」将立即在线上生效${refLabel}，确认发布吗？`,
+    '确认发布 API',
     {
       confirmButtonText: '确认发布',
       cancelButtonText: '取消',
@@ -606,7 +606,7 @@ function handleRollbackRevision(rev: string) {
 function handleDirectRollbackApi(rev: string) {
   const name = store.selectedApiName
   ElMessageBox.prompt(
-    `将 API「${name}」契约直接回退至历史版本 ${rev} 并立即生成新线上版本生效，请填写回退原因（必填）：`,
+    `将 API「${name}」直接回退至历史版本 ${rev} 并立即生成新线上版本生效，请填写回退原因（必填）：`,
     `直接回退上线 · ${rev}`,
     {
       confirmButtonText: '回退并上线',
@@ -624,17 +624,17 @@ function handleDirectRollbackApi(rev: string) {
 </script>
 
 <template>
-  <!-- 独立列表页：API调用 -->
+  <!-- 独立列表页：API -->
   <div v-if="store.apisSubView === 'list'" class="page-fill asset-stage">
-    <!-- 紧凑型政企数智概览条 -->
-    <section class="overview-strip" aria-label="API调用数智概览">
+    <!-- 紧凑型概览条 -->
+    <section class="overview-strip" aria-label="API 概览">
       <div class="strip-brand">
         <div class="strip-title-row">
-          <span class="strip-title">API调用</span>
+          <span class="strip-title">API</span>
           <span class="strip-tag">XML / JSON 双协议网关</span>
         </div>
         <span class="strip-desc">
-          统一纳管业务查询 API 契约、XML / JSON 双协议网关组装、安全入参与响应字段映射
+          统一管理业务查询 API、XML / JSON 双协议网关组装、安全入参与响应字段映射
         </span>
       </div>
 
@@ -651,7 +651,7 @@ function handleDirectRollbackApi(rev: string) {
         <div class="strip-divider"></div>
 
         <div class="strip-metric-item">
-          <span class="metric-lbl">在网生效契约</span>
+          <span class="metric-lbl">已上线 API</span>
           <div class="metric-val-row">
             <strong class="metric-num mono">{{ apiOverview.online }}</strong>
             <span class="metric-unit">/ {{ apiOverview.total }}</span>
@@ -681,7 +681,7 @@ function handleDirectRollbackApi(rev: string) {
         <div class="strip-divider"></div>
 
         <div class="strip-metric-item">
-          <span class="metric-lbl">双协议契约分布</span>
+          <span class="metric-lbl">协议分布</span>
           <div class="metric-val-row">
             <span class="proto-summary-text mono">{{ apiOverview.protoSummary }}</span>
             <svg width="76" height="8" viewBox="0 0 76 8" fill="none" aria-hidden="true" class="mini-svg-bar">
@@ -713,7 +713,7 @@ function handleDirectRollbackApi(rev: string) {
         <div class="strip-divider"></div>
 
         <div class="strip-metric-item">
-          <span class="metric-lbl">规程引用 / 网关时延</span>
+          <span class="metric-lbl">技能引用 / 网关时延</span>
           <div class="metric-val-row">
             <strong class="metric-num mono" style="color: var(--primary)">
               {{ apiOverview.refRateText }}
@@ -726,7 +726,7 @@ function handleDirectRollbackApi(rev: string) {
       </div>
     </section>
 
-    <!-- 主台账卡片 -->
+    <!-- 主列表卡片 -->
     <div class="card card-fill asset-card">
       <div class="asset-toolbar">
         <div class="toolbar-left">
@@ -798,7 +798,7 @@ function handleDirectRollbackApi(rev: string) {
           <input
             v-model="store.apiSearch"
             class="input search-input"
-            placeholder="搜索 API 契约名称、交易编码或用途…"
+            placeholder="搜索 API 名称、交易编码或用途…"
           />
         </div>
 
@@ -807,7 +807,7 @@ function handleDirectRollbackApi(rev: string) {
             {{ refreshing ? '刷新中…' : '刷新' }}
           </button>
           <button class="btn btn-primary cta-btn" @click="store.openModal('new-api')">
-            ＋ 新建 API 调用
+            ＋ 新建 API
           </button>
         </div>
       </div>
@@ -816,11 +816,11 @@ function handleDirectRollbackApi(rev: string) {
         <table class="data-table asset-table">
           <thead>
             <tr>
-              <th style="min-width: 175px">API 契约名称</th>
-              <th style="min-width: 185px">业务用途与契约说明</th>
+              <th style="min-width: 175px">API 名称</th>
+              <th style="min-width: 185px">用途说明</th>
               <th style="width: 136px; white-space: nowrap">报文协议类型</th>
-              <th style="width: 146px; white-space: nowrap">契约状态</th>
-              <th style="min-width: 145px">关联 Skill 规程</th>
+              <th style="width: 146px; white-space: nowrap">状态</th>
+              <th style="min-width: 145px">关联技能</th>
               <th style="width: 172px; white-space: nowrap">近 7 日调用 / 失败率</th>
               <th style="width: 94px; white-space: nowrap">平均耗时</th>
               <th class="action-col">操作</th>
@@ -836,12 +836,12 @@ function handleDirectRollbackApi(rev: string) {
                   </svg>
                   <template v-if="store.apiSearch || statusFilter !== 'ALL' || protoFilter !== 'ALL'">
                     <span>
-                      未检索到匹配的 API 调用契约 ·
+                      未检索到匹配的 API ·
                       <button class="btn-link" @click="resetApiFilters">重置筛选</button>
                     </span>
                   </template>
                   <template v-else>
-                    <span>API调用列表暂无记录，点击右上角「＋ 新建 API 调用」创建</span>
+                    <span>API 列表暂无记录，点击右上角「＋ 新建 API」创建</span>
                   </template>
                 </div>
               </td>
@@ -886,12 +886,12 @@ function handleDirectRollbackApi(rev: string) {
                 <el-popover v-else placement="bottom-start" :width="280" trigger="hover">
                   <template #reference>
                     <span class="chip-tag clickable ref-count-pill" @click.stop>
-                      {{ a.refs.length }} 个 Skill 规程 ▾
+                      {{ a.refs.length }} 个技能 ▾
                     </span>
                   </template>
                   <div class="ref-popover-panel">
                     <div class="ref-popover-head">
-                      引用此接口的 Skill 规程 ({{ a.refs.length }})
+                      引用此接口的技能 ({{ a.refs.length }})
                     </div>
                     <div class="ref-popover-list">
                       <button
@@ -929,7 +929,7 @@ function handleDirectRollbackApi(rev: string) {
               <td class="action-col" @click.stop>
                 <div class="row-actions row-action-group">
                   <button class="btn-link" @click="store.openApiDetail(a.name, 'schema')">
-                    编排
+                    编辑
                   </button>
                   <button class="btn-link" @click="store.openApiDetail(a.name, 'test')">
                     试调用
@@ -943,13 +943,13 @@ function handleDirectRollbackApi(rev: string) {
 
       <div class="card-footer-bar asset-footer">
         <span>
-          共 <strong class="mono">{{ displayedApis.length }}</strong> 项 API 调用契约
+          共 <strong class="mono">{{ displayedApis.length }}</strong> 项 API
           <template v-if="statusFilter !== 'ALL' || protoFilter !== 'ALL' || store.apiSearch.trim()">
-            （全库 {{ apiOverview.total }} 项）
+            （全部 {{ apiOverview.total }} 项）
           </template>
         </span>
         <span class="footer-tip">
-          点击任意 API 行可进入可视化编排器、查看 YAML 源码或发起 XML / JSON 双协议在线试调用
+          点击任意 API 行可进入可视化编辑器、查看 YAML 源码或发起 XML / JSON 双协议在线试调用
         </span>
       </div>
     </div>
@@ -960,7 +960,7 @@ function handleDirectRollbackApi(rev: string) {
     <div class="workbench-header detail-header-card">
       <div class="workbench-top-row">
         <div class="workbench-title-group">
-          <button class="btn btn-sm" @click="handleBackToApiList">← 返回 API调用</button>
+          <button class="btn btn-sm" @click="handleBackToApiList">← 返回 API</button>
           <span class="workbench-title mono">{{ api.name }}</span>
           <span v-if="liveMeta.title || api.title" class="chip-tag id-code-chip">
             {{ liveMeta.title || api.title }}
@@ -974,7 +974,7 @@ function handleDirectRollbackApi(rev: string) {
             v-if="api.onlineRev && api.onlineRev !== '—'"
             class="chip-tag mono online-rev-chip"
           >
-            线上基线 {{ api.onlineRev }}
+            线上版本 {{ api.onlineRev }}
           </span>
           <span v-if="store.apiDirty" class="chip-tag dirty-pill">
             有未保存修改
@@ -1028,7 +1028,7 @@ function handleDirectRollbackApi(rev: string) {
           @click="store.apiDetailTab = 'schema'"
         >
           <FileCode2 :size="14" />
-          <span>契约声明编辑</span>
+          <span>配置编辑</span>
         </button>
         <button
           type="button"
@@ -1050,7 +1050,7 @@ function handleDirectRollbackApi(rev: string) {
           @click="store.apiDetailTab = 'refs'"
         >
           <Link2 :size="14" />
-          <span>关联 Skill 规程</span>
+          <span>关联技能</span>
           <span class="tab-count mono">{{ api.refs.length }}</span>
         </button>
         <button
@@ -1068,11 +1068,11 @@ function handleDirectRollbackApi(rev: string) {
       </div>
     </div>
 
-    <!-- 契约声明编辑 Tab：三态分段控件（可视化编排 / 双栏联动 / YAML 源码） -->
+    <!-- 配置编辑 Tab：三态分段控件（可视化编辑 / 双栏联动 / YAML 源码） -->
     <div v-if="tab === 'schema'" class="card card-fill pane-card">
       <div class="card-header pane-header">
         <div class="card-title pane-title">
-          <span>API 调用契约声明</span>
+          <span>API 配置</span>
           <span class="chip-tag proto-pill" :class="liveMeta.isJson ? 'is-json' : 'is-xml'">
             <span class="proto-dot"></span>
             <span>{{ liveMeta.isJson ? '统一网关 JSON' : '统一网关 XML' }}</span>
@@ -1102,13 +1102,13 @@ function handleDirectRollbackApi(rev: string) {
           <button
             v-else-if="store.apiOnlineYaml"
             class="btn btn-sm"
-            title="用线上生效契约内容覆盖当前工作区"
+            title="用线上内容覆盖当前工作区"
             @click="handleRestoreOnline"
           >
-            ↺ 恢复线上契约
+            ↺ 恢复线上内容
           </button>
 
-          <div class="segmented-control" role="tablist" aria-label="契约编辑模式">
+          <div class="segmented-control" role="tablist" aria-label="编辑模式">
             <button
               type="button"
               role="tab"
@@ -1118,7 +1118,7 @@ function handleDirectRollbackApi(rev: string) {
               @click="store.apiEditMode = 'form'"
             >
               <SlidersHorizontal :size="13" />
-              <span>可视化编排</span>
+              <span>可视化编辑</span>
             </button>
             <button
               type="button"
@@ -1146,7 +1146,7 @@ function handleDirectRollbackApi(rev: string) {
         </div>
       </div>
 
-      <!-- 可视化编排 & 双栏联动模式 -->
+      <!-- 可视化编辑 & 双栏联动模式 -->
       <div
         v-if="store.apiEditMode === 'form' || store.apiEditMode === 'split'"
         class="pane-visual-body"
@@ -1177,7 +1177,7 @@ function handleDirectRollbackApi(rev: string) {
       </div>
     </div>
 
-    <!-- 报文在线试调用 Tab（自动识别 JSON / XML 协议 + 一键同步返回字段至契约列映射） -->
+    <!-- 报文在线试调用 Tab（自动识别 JSON / XML 协议 + 一键同步返回字段至列映射） -->
     <div v-else-if="tab === 'test'" class="page-fill test-stage">
       <div class="card test-param-card">
         <div class="test-param-body">
@@ -1188,7 +1188,7 @@ function handleDirectRollbackApi(rev: string) {
             </span>
             <span class="test-param-title">试调用入参：</span>
             <span v-if="effectiveApiParams.length === 0" class="muted-text">
-              该契约未声明动态参数，可直接发起试调用
+              该 API 未声明动态参数，可直接发起试调用
             </span>
             <label
               v-for="p in effectiveApiParams"
@@ -1209,7 +1209,7 @@ function handleDirectRollbackApi(rev: string) {
           </div>
           <div class="test-param-actions">
             <span v-if="store.apiDirty" class="dirty-hint-inline">
-              未保存的契约改动将直接用于本次试调用
+              未保存的 API 改动将直接用于本次试调用
             </span>
             <button class="btn btn-primary cta-btn" :disabled="isCalling" @click="handleRunTestCall">
               <SvgIcon name="play" /> {{ isCalling ? '调用中…' : '发起调用' }}
@@ -1322,7 +1322,7 @@ function handleDirectRollbackApi(rev: string) {
           <div class="card card-fill pane-card">
             <div class="card-header pane-header">
               <div class="card-title pane-title">
-                <span>契约映射后的结构化记录表</span>
+                <span>列映射后的记录表</span>
                 <span class="chip-tag mono pane-sub-chip">{{ testResult.records.length }} 条记录</span>
               </div>
 
@@ -1332,12 +1332,12 @@ function handleDirectRollbackApi(rev: string) {
                 :disabled="syncableRecordKeys.length === 0"
                 :title="
                   syncableRecordKeys.length > 0
-                    ? `提取试调用返回的 ${syncableRecordKeys.length} 个字段并合并至契约 response.records.columns`
+                    ? `提取试调用返回的 ${syncableRecordKeys.length} 个字段并合并至 response.records.columns`
                     : '当前试调用无结构化记录字段可供同步'
                 "
                 @click="handleSyncColumnsToContract"
               >
-                ⚡ 将返回字段同步至契约列映射
+                ⚡ 将返回字段同步至列映射
               </button>
             </div>
             <div class="table-scroll asset-scroll">
@@ -1377,20 +1377,20 @@ function handleDirectRollbackApi(rev: string) {
       </template>
     </div>
 
-    <!-- 被引用的 Skill Tab -->
+    <!-- 被引用的技能 Tab -->
     <div v-else-if="tab === 'refs'" class="card card-fill asset-card">
       <div class="table-scroll asset-scroll">
         <table class="data-table asset-table">
           <thead>
             <tr>
-              <th>引用此 API 调用的 Skill 核查规程</th>
+              <th>引用此 API 的技能</th>
               <th class="action-col-wide">操作</th>
             </tr>
           </thead>
           <tbody>
             <tr v-if="api.refs.length === 0">
               <td colspan="2" class="empty-cell">
-                当前暂无 Skill 核查规程引用此 API 调用
+                当前暂无技能引用此 API
               </td>
             </tr>
             <tr v-for="r in api.refs" :key="r" class="asset-row" @click="store.openSkillByName(r)">
@@ -1399,7 +1399,7 @@ function handleDirectRollbackApi(rev: string) {
               </td>
               <td class="action-col-wide" @click.stop>
                 <div class="row-actions row-action-group">
-                  <button class="btn-link" @click="store.openSkillByName(r)">查看 Skill 规程</button>
+                  <button class="btn-link" @click="store.openSkillByName(r)">查看技能</button>
                 </div>
               </td>
             </tr>
@@ -1411,7 +1411,7 @@ function handleDirectRollbackApi(rev: string) {
     <!-- 历史 Tab：修订列表 + 线上 vs 当前编辑内容的差异 -->
     <div v-else class="card card-fill asset-card">
       <div class="card-header pane-header">
-        <div class="card-title pane-title">API 契约版本修订台账</div>
+        <div class="card-title pane-title">API 修改历史</div>
       </div>
       <div class="card-scroll history-scroll">
         <table class="data-table asset-table">
@@ -1428,7 +1428,7 @@ function handleDirectRollbackApi(rev: string) {
           <tbody>
             <tr v-if="store.apiRevisions.length === 0">
               <td colspan="6" class="empty-cell">
-                暂无修订历史（该 API 契约尚未发布过）
+                暂无修订历史（该 API 尚未发布过）
               </td>
             </tr>
             <tr v-for="r in store.apiRevisions" :key="r.rev">
@@ -1460,7 +1460,7 @@ function handleDirectRollbackApi(rev: string) {
 
         <div>
           <div class="diff-header-row">
-            <span class="diff-section-title">契约 YAML 差异对比</span>
+            <span class="diff-section-title">API YAML 差异对比</span>
             <span class="chip-tag diff-line-del">线上生效版本</span>
             <span class="muted-text">vs</span>
             <span class="chip-tag diff-line-add">当前工作区编辑内容</span>

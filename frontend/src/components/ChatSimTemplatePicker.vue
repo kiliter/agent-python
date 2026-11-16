@@ -205,7 +205,7 @@ function caseSummary(c: RegressionCase): string {
     <div class="prefill-body">
       <!-- 左：模板列表 -->
       <div class="list-col">
-        <el-input v-model="keyword" size="small" clearable placeholder="搜索编号 / 名称 / 描述 / Skill">
+        <el-input v-model="keyword" size="small" clearable placeholder="搜索编号 / 名称 / 描述 / 技能">
           <template #prefix><Search :size="13" /></template>
         </el-input>
         <div v-loading="listLoading" class="tpl-list">

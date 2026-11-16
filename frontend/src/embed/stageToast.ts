@@ -1,5 +1,5 @@
 // #Created By AiCoding(codex)
-// 嵌入式舞台内零依赖轻提示工具：直接挂载于 .embed-stage 内，确保在等比缩放模式下同比例清晰居中呈现，无 Element Plus 体积负担
+// 嵌入式窗口内零依赖轻提示工具：直接挂载于 .embed-stage 内，确保在等比缩放模式下同比例清晰居中呈现，无 Element Plus 体积负担
 
 type ToastType = 'success' | 'warning' | 'error' | 'info'
 
@@ -34,7 +34,7 @@ function showToast(type: ToastType, message: string, duration: number) {
   const stack = resolveToastStack()
   if (!stack) return
 
-  // 限制同时堆叠数量，避免高频点击撑满舞台顶栏
+  // 限制同时堆叠数量，避免高频点击撑满区域顶栏
   while (stack.children.length >= 4) {
     stack.firstElementChild?.remove()
   }

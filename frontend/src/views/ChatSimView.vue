@@ -1,11 +1,11 @@
 <!--
   聊天窗口模拟联调视图（PC 左右双栏工作台 + 联动顶部全局多页签栏）：
   在管理端内扮演「外部工单受理系统父页面」：
-  - 左栏：工单身份（userId / orderId）、资源快照（online / draft）、系统 API Key 自动同步（内存态）、
+  - 左栏：工单身份（userId / orderId）、资源版本（online / draft）、系统 API Key 自动同步（内存态）、
          从模板预填充、结构化入参（键值/JSON 双模式）、单据全文，以及「在顶部新页签打开聊天窗口」与「重新下发入参」。
   - 右栏：支持页签切换或上下分栏查看父子 postMessage 实时报文流（方向筛选、JSON 展开/收起、一键复制）
          与 report-confirmed 确认回传报告（元信息徽标 + 渲染效果 / Markdown 源码切换 + 一键复制）。
-  契约：docs/chat-embed-api.md
+  接口约定：docs/chat-embed-api.md
   #Created By AiCoding(codex)
 -->
 <script setup lang="ts">
@@ -366,7 +366,7 @@ async function handleOpenChatInGlobalTab() {
 
   const trimmedKey = tabsStore.simApiKey.trim()
   if (form.target === 'online' && systemKeyConfigured.value === true && !trimmedKey) {
-    ElMessage.info('当前未填写 API Key，将使用管理端登录态会话打开线上快照预览')
+    ElMessage.info('当前未填写 API Key，将使用管理端登录态会话打开线上版本预览')
   }
 
   await tabsStore.openOrUpdateChatTab(
@@ -602,8 +602,8 @@ function jumpToRunRecord(runId: string) {
                 <el-input v-model="form.userId" placeholder="外部坐席账号，如 sim-user" />
               </el-form-item>
 
-              <el-form-item label="工单流水号 orderId" required>
-                <el-input v-model="form.orderId" placeholder="工单流水号">
+              <el-form-item label="工单编号 orderId" required>
+                <el-input v-model="form.orderId" placeholder="工单编号">
                   <template #append>
                     <el-button @click="newOrderId">新建</el-button>
                   </template>
@@ -613,9 +613,9 @@ function jumpToRunRecord(runId: string) {
 
             <!-- 第二行：target + apiKey -->
             <div class="form-row-target-key">
-              <el-form-item label="资源快照 target">
+              <el-form-item label="资源版本 target">
                 <el-radio-group v-model="form.target">
-                  <el-radio-button value="online">线上快照</el-radio-button>
+                  <el-radio-button value="online">线上版本</el-radio-button>
                   <el-radio-button value="draft">草稿叠加</el-radio-button>
                 </el-radio-group>
               </el-form-item>
@@ -678,7 +678,7 @@ function jumpToRunRecord(runId: string) {
                   v-if="form.target === 'online' && systemKeyConfigured === true && !tabsStore.simApiKey.trim()"
                   class="apikey-inline-tip"
                 >
-                  未填 API Key 时将回退当前管理端会话预览；如需模拟外部上层系统 X-API-Key 鉴权，请点击「同步」或前往「引擎与系统设置」。
+                  未填 API Key 时将回退当前管理端会话预览；如需模拟外部上层系统 X-API-Key 鉴权，请点击「同步」或前往「系统设置」。
                 </div>
               </el-form-item>
             </div>
@@ -1063,10 +1063,10 @@ function jumpToRunRecord(runId: string) {
                   v-if="currentReport.runId && currentReport.runId !== '—'"
                   type="button"
                   class="meta-run-link"
-                  title="跳转至运行流水记录查看全链路证据"
+                  title="跳转至运行记录查看完整证据"
                   @click="jumpToRunRecord(currentReport.runId)"
                 >
-                  <span>查看流水</span>
+                  <span>查看运行记录</span>
                   <ArrowUpRight :size="11" />
                 </button>
                 <span class="meta-plain mono">

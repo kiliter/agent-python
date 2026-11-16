@@ -1,7 +1,7 @@
 <!--
   #Created By AiCoding(codex)
   IDE 级紧凑单卡多宫格推荐模板组件：
-  1. 单个紧凑外框容器（.rec-panel）整合单行顶栏：标题 + 命中计数 + 实时搜索框（编号/名称/推荐理由） + 「全部模板库」纯图标按钮；
+  1. 单个紧凑外框容器（.rec-panel）整合单行顶栏：标题 + 匹配计数 + 实时搜索框（编号/名称/推荐理由） + 「全部模板库」纯图标按钮；
   2. 内部多列响应式小卡片网格（.rec-mini-card），每张卡片单行展示 #<id> 模板名、匹配度标签、小眼睛纯图标预览按钮与「选用」按钮；
   3. 推荐理由单行截断并支持悬浮 Tooltip 展开完整理由，缺参提醒收敛为小卡片内紧凑 Tag + Tooltip。
 -->
@@ -65,8 +65,8 @@ function onUse(item: RecommendItem) {
       <button
         type="button"
         class="eb-icon-btn is-bordered eb-tip eb-tip-right"
-        data-tip="浏览全部核查模板"
-        aria-label="浏览全部核查模板"
+        data-tip="浏览全部模板"
+        aria-label="浏览全部模板"
         @click="emit('browse')"
       >
         <LayoutGrid :size="13" />
@@ -77,7 +77,7 @@ function onUse(item: RecommendItem) {
       <!-- 单行紧凑容器顶栏 -->
       <div class="rec-panel-head">
         <div class="rec-head-left">
-          <span class="rec-head-title">推荐核查模板</span>
+          <span class="rec-head-title">推荐模板</span>
           <span class="rec-count mono">
             {{ keyword.trim() ? `${filteredItems.length}/${message.items.length}` : `${message.items.length}` }}
           </span>
@@ -117,7 +117,7 @@ function onUse(item: RecommendItem) {
         </div>
       </div>
 
-      <!-- 搜索无命中态 -->
+      <!-- 搜索无结果态 -->
       <div v-if="!filteredItems.length" class="rec-filter-empty">
         <span>未检索到与「{{ keyword }}」匹配的推荐模板</span>
         <button type="button" class="rec-reset-btn" @click="keyword = ''">清空筛选</button>

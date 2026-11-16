@@ -1,5 +1,5 @@
 <!--
-  5.7 基准回归测试视图（多选模板弹出层 + 4联数智统计与线性通过率条 + 状态筛选器 + 逐字段执行对比表）
+  5.7 回归测试视图（多选模板弹出层 + 4联统计与线性通过率条 + 状态筛选器 + 逐字段执行对比表）
   批量回归接口属于第二阶段，当前统计卡片基于真实状态展示，差异表只展示 store.regressionDiffs 中的真实数据。
   #Created By AiCoding(codex)
 -->
@@ -62,7 +62,7 @@ const compareHeaderA = computed(() =>
 
 /** 差异表 B 列表头 */
 const compareHeaderB = computed(() =>
-  store.regCompareMode === 'ver_a_vs_b' ? '对比对象 B（版本 B）取值' : '对比对象 B（生产基线）取值',
+  store.regCompareMode === 'ver_a_vs_b' ? '对比对象 B（版本 B）取值' : '对比对象 B（线上版本）取值',
 )
 
 /** 带原始索引的差异行，支持状态筛选与关键字检索且点击准确打开对应抽屉 */
@@ -148,7 +148,7 @@ async function handleExecuteRegression() {
     <!-- 顶部阶段说明条 -->
     <div class="alert-banner alert-info" style="margin-bottom: 0; flex-shrink: 0">
       <span>
-        批量基准回归将在第二阶段开放异步调度能力（自动对比草稿与生产基线逐字段输出）。当前可在模板编排工作台的「用例」页签逐条执行回归试运行。
+        批量回归将在第二阶段开放异步调度能力（自动对比草稿与线上版本逐字段输出）。当前可在模板编辑的「用例」页签逐条执行回归试运行。
       </span>
     </div>
 
@@ -160,7 +160,7 @@ async function handleExecuteRegression() {
           <el-popover placement="bottom-start" :width="320" trigger="click">
             <template #reference>
               <button class="btn">
-                <span>核查模板范围：已选</span>
+                <span>模板范围：已选</span>
                 <strong class="mono" style="color: var(--primary)">{{ store.regSelectedTemplates.length }}</strong>
                 <span>/ {{ selectableTemplates.length }} 个 ▾</span>
               </button>
@@ -176,7 +176,7 @@ async function handleExecuteRegression() {
                   font-size: 11.5px;
                 "
               >
-                <span style="color: var(--text-secondary)">选择参与基准回归的模板</span>
+                <span style="color: var(--text-secondary)">选择参与回归的模板</span>
                 <div style="display: flex; gap: 8px">
                   <button class="btn-link" @click="selectAllTemplates">全选</button>
                   <button class="btn-link" @click="clearSelectedTemplates">清空</button>
@@ -212,7 +212,7 @@ async function handleExecuteRegression() {
               :class="{ active: store.regScopeFilter === 'all' }"
               @click="store.regScopeFilter = 'all'"
             >
-              全部基准用例 <span class="mono">({{ selectedTotalCases }})</span>
+              全部回归用例 <span class="mono">({{ selectedTotalCases }})</span>
             </button>
             <button
               type="button"
@@ -225,7 +225,7 @@ async function handleExecuteRegression() {
           </div>
 
           <select v-model="store.regCompareMode" class="select" style="width: 225px">
-            <option value="draft_vs_online">对比模式：当前草稿 vs 生产基线</option>
+            <option value="draft_vs_online">对比模式：当前草稿 vs 线上版本</option>
             <option value="ver_a_vs_b">对比模式：指定两个历史版本</option>
           </select>
         </div>
@@ -246,14 +246,14 @@ async function handleExecuteRegression() {
       <div class="reg-kpi-card">
         <div class="reg-kpi-meta" style="flex: 1">
           <div class="reg-kpi-top">
-            <span class="reg-kpi-label">已执行用例 / 纳入基准池</span>
+            <span class="reg-kpi-label">已执行用例 / 回归用例总数</span>
             <span class="mono reg-kpi-mini">覆盖 {{ selectionCoveragePct }}%</span>
           </div>
           <div class="reg-kpi-val-line">
             <span class="reg-kpi-big mono">—</span>
             <span class="reg-kpi-unit">/ 待测 {{ selectedTotalCases }} 条</span>
           </div>
-          <div class="reg-linear-track" title="已选模板覆盖平台基准用例比例">
+          <div class="reg-linear-track" title="已选模板覆盖回归用例比例">
             <div
               class="reg-linear-fill"
               :style="{ width: `${selectionCoveragePct}%`, background: 'var(--primary)' }"
@@ -397,7 +397,7 @@ async function handleExecuteRegression() {
               <th style="width: 120px; white-space: nowrap">差异字段 Key</th>
               <th>{{ compareHeaderA }}</th>
               <th>{{ compareHeaderB }}</th>
-              <th style="width: 190px">基准期望值</th>
+              <th style="width: 190px">期望值</th>
               <th style="width: 156px; min-width: 156px; text-align: right; white-space: nowrap">溯源比对操作</th>
             </tr>
           </thead>
@@ -408,7 +408,7 @@ async function handleExecuteRegression() {
                 style="padding: 36px 20px; text-align: center; color: var(--text-secondary)"
               >
                 <template v-if="store.regressionDiffs.length === 0">
-                  暂无回归差异数据 · 可前往「核查模板 → 编排工作台 → 用例」逐条运行基准验证
+                  暂无回归差异数据 · 可前往「模板 → 模板编辑 → 用例」逐条运行验证
                 </template>
                 <template v-else>
                   当前筛选条件下暂无匹配的差异记录 ·

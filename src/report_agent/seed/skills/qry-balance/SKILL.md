@@ -6,7 +6,7 @@ apis:
   - BOSS_QryBalanceFlowLog
 ---
 
-<!-- #Created By AiCoding(codex) 迁移自 Java skills/qry-balance，二期升级采用 expand_period + query_result(resultIds, between) + 列表空值 found/[] 语义，修复纯年月 202607 回溯缺陷与客户号码同名入参警告 -->
+<!-- #Created By AiCoding(codex) -->
 
 # 充值流水
 

@@ -1,7 +1,7 @@
-# #Created By AiCoding(codex) 由 tools/java_migration/generate.py 从 Java 模板生成，请勿手工修改后再重新生成
+# #Created By AiCoding(codex)
 id: 106
 name: 充值争议处理通用模板
-description: 迁移自 Java 模板「充值争议处理通用模板」（资源库模板 ID 106），正文与规则以 Java 为准。
+description: 客户对手机话费充值记录、未到账、延迟到账、充值金额或充值渠道产生疑问，需调取充值记录逐笔核实充值时间、支付方式、充值金额与订单流水号。
 skills:
 - qry-balance
 inputs:
@@ -35,11 +35,7 @@ fields:
     description: 充值订单号/流水号
   evidence: quote
   whenMissing: empty
-  description: '按 Skill qry-balance 查询充值号码/手机号码在充值时间所属账期的余额流水，每条充值记录一行，单元格原样取自接口记录， evidence 引用每一行对应的接口记录；各账期接口调用成功但匹配 0 条流水时，必须提交 status="found"、value=[] 并附上结果为 0 行的 query_result 或 count=0 的 call_api 工具 callId 证据（严禁引用 load_skill）；仅在缺少必要入参或任一账期接口报错时提交 not_found。
-
-    原规则（Java）：调用qry-balance skill查询客户号码在充值时间所属账期的余额流水，返回可用于模板for循环的JSON数组；每条记录字段为充值时间、支付方式、充值金额、流水号'
+  description: 按 Skill qry-balance 查询充值号码/手机号码在充值时间所属账期的余额流水，每条充值记录一行，单元格原样取自接口记录， evidence 引用每一行对应的接口记录；各账期接口调用成功但匹配 0 条流水时，必须提交 status="found"、value=[] 并附上结果为 0 行的 query_result 或 count=0 的 call_api 工具 callId 证据（严禁引用 load_skill）；仅在缺少必要入参或任一账期接口报错时提交 not_found。
 - name: 客户号码
   evidence: derive
-  description: '优先取入参「extraInfo」中的充值号码（或入参「充值号码」），其次取入参「手机号码」。
-
-    原规则（Java）：优先取extraInfo中的充值号码，其次取用户的手机号'
+  description: 优先取入参「extraInfo」中的充值号码（或入参「充值号码」），其次取入参「手机号码」。

@@ -1,12 +1,11 @@
 # #Created By AiCoding(codex) 短信发送记录查询（统一网关 XML）
-# 迁移自 Java：business-sms / second-confirmation-sms / verification-sms / original-package-name /
-# reminder-sms / renewal-reminder-sms / number-portability-sms / billing-cycle-sms 的 assembly.groovy。
-# 与 seed 版本相比的修正：
-#   1. 结束时间说明去掉“跨度不超过 31 天”——Java 的 renewal-reminder-sms 一次查询到期基准日前后各 31 天（共 63 天），
-#      billing-cycle-sms 按自然月查询；契约本身从不限制跨度。
-#   2. records.columns 补齐真实响应中的 smsSendStatus / remark / staffId / userMobile。
-#   3. retry 改为 1：Java xml-nytool（WebClient）不做任何重试。
-# 请求报文与 Java 一致：route_type=2、route_value=手机号；content 按 userMobile、startDate、endDate、
+# 供 business-sms / second-confirmation-sms / verification-sms / original-package-name /
+# reminder-sms / renewal-reminder-sms / number-portability-sms / billing-cycle-sms 等技能查询短信记录。
+# 说明：
+#   1. 查询跨度不做限制——renewal-reminder-sms 一次查询到期基准日前后各 31 天（共 63 天），billing-cycle-sms 按自然月查询。
+#   2. records.columns 覆盖真实响应中的 smsSendStatus / remark / staffId / userMobile。
+#   3. retry 为 1：接口失败不做重试。
+# 请求报文：route_type=2、route_value=手机号；content 按 userMobile、startDate、endDate、
 # sendType=0、sendPort=空串（输出普通空标签）、busiType=0 的顺序输出；其余公共字段走 XmlBaseRequest 默认值
 # （request_type=1、organ_id=1、request_source=1，operator_id/request_seq/request_time/verify_code 为 xsi:nil）。
 name: querySMSSendInfo
@@ -51,7 +50,7 @@ response:
     equals: '0000'
     missingAs: success
   noData:
-    # 现网无短信时返回 resp_code=1、resp_desc=“号码不存在或该时间段内无短信记录!”，Java 各短信 Skill 均按正常空结果处理
+    # 现网无短信时返回 resp_code=1、resp_desc=“号码不存在或该时间段内无短信记录!”，各短信技能均按正常空结果处理
     - path: operation_out.response.resp_desc
       contains: 无短信记录
   records:

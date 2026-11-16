@@ -8,6 +8,11 @@ metadata:
 ---
 
 
+## 单文件 Plan 兼容约定
+
+- 读取包含 `<!-- SPECKIT_PLAN_LAYOUT: inline-v1 -->` 标记的 `plan.md` 时，直接校验 `plan-research`、`plan-data-model`、`plan-contracts`、`plan-quickstart` 四个内联锚点与正文完整性，不因缺失独立拆分文件判错；任意锚点缺失、内容为空或残留模板占位符则报 CRITICAL。
+- 核对 `spec.md` 第 8.2 节三类外部独立交付物确认结果：仅涉及项须检查文件存在性与任务覆盖，不涉及项不得误报缺失。
+
 ## User Input
 
 ```text

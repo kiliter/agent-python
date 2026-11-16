@@ -1,6 +1,6 @@
 <!--
   #Created By AiCoding(codex)
-  舞台内二次确认弹窗（替代 ElMessageBox.confirm）：
+  窗口内二次确认弹窗（替代 ElMessageBox.confirm）：
   挂载于 .embed-stage 内部，用于版本切换丢弃手工微调提示与 PARTIAL 部分缺失字段确认。
 -->
 <script setup lang="ts">

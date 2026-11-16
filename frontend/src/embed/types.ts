@@ -1,5 +1,5 @@
 // #Created By AiCoding(codex)
-// 嵌入式聊天选模板窗口 · 前端数据结构（严格对应 docs/chat-embed-api.md §3 及模板预览/原样记录扩展契约）
+// 嵌入式聊天选模板窗口 · 前端数据结构（严格对应 docs/chat-embed-api.md §3 及模板预览/原样记录扩展配置）
 
 export type RunStatus = 'RUNNING' | 'SUCCESS' | 'PARTIAL' | 'FAILED' | 'CANCELLED' | 'INTERRUPTED'
 

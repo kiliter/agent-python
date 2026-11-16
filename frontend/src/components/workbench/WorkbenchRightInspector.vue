@@ -1,6 +1,6 @@
 <!--
-  核查模板 IDE 工作台 · 右侧常驻属性配置与证据溯源检查器
-  支持字段、入参、规程、回归用例、历史版本的零抽屉内联编辑，以及调试运行报告字段证据溯源定位
+  模板 IDE 工作台 · 右侧常驻属性配置与证据溯源检查器
+  支持字段、入参、技能、回归用例、历史版本的零抽屉内联编辑，以及调试运行报告字段证据溯源定位
   #Created By AiCoding(codex)
 -->
 <script setup lang="ts">
@@ -48,20 +48,34 @@ const hasOnline = computed(() => Boolean(tpl.value.onlineRev) && tpl.value.onlin
 const contextBadgeText = computed(() => {
   if (store.ideRightMode === 'evidence') return '溯源定位'
   switch (store.ideLeftSection) {
+    case 'info':
+      return '基本信息'
     case 'fields':
       return store.ideSelectedFieldIdx < 0 ? '新建字段' : '字段规则'
     case 'inputs':
-      return '入参契约'
+      return '入参'
     case 'skills':
-      return '规程详情'
+      return '技能详情'
     case 'cases':
       return store.ideSelectedCaseIdx < 0 ? '新建用例' : '回归用例'
     case 'history':
-      return '版本基线'
+      return '版本'
     default:
       return '属性检查'
   }
 })
+
+/** 编辑模板名称：直接写入工作区草稿状态并标记未保存 */
+function onTemplateNameInput(e: Event) {
+  store.templateName = (e.target as HTMLInputElement).value
+  store.markCurrentTemplateDirty()
+}
+
+/** 编辑模板说明：直接写入工作区草稿状态并标记未保存 */
+function onTemplateDescriptionInput(e: Event) {
+  store.templateDescription = (e.target as HTMLTextAreaElement).value
+  store.markCurrentTemplateDirty()
+}
 
 function switchRightMode(mode: 'inspector' | 'evidence') {
   store.ideRightMode = mode
@@ -166,7 +180,7 @@ function batchCreateAllUndefinedFields() {
   let lastCreatedName = ''
   names.forEach(rawName => {
     const f = store.newFieldTemplate(rawName)
-    f.description = '从模板正文未定义引用自动补建，请完善取证规则口径。'
+    f.description = '从模板正文未定义引用自动补建，请完善填写规则口径。'
     if (store.upsertTemplateField(f)) {
       createdCount += 1
       lastCreatedName = rawName
@@ -201,7 +215,7 @@ function handleApplyField() {
     return
   }
   if (isList && f.evidenceType === 'input') {
-    store.showToast('列表字段的取证来源只能是原文引用或逻辑推导', 'warning')
+    store.showToast('列表字段的证据来源只能是原文引用或逻辑推导', 'warning')
     return
   }
   if (isList) f.whenMissing = '置空'
@@ -353,7 +367,7 @@ function handleDeleteInput() {
   const idx = Math.min(Math.max(0, store.ideSelectedInputIdx), list.length - 1)
   const target = list[idx]
   if (!target) return
-  ElMessageBox.confirm(`确认移除调用入参契约「${target.key}」吗？`, '确认删除入参', {
+  ElMessageBox.confirm(`确认移除入参「${target.key}」吗？`, '确认删除入参', {
     confirmButtonText: '确认删除',
     cancelButtonText: '取消',
     type: 'warning',
@@ -369,7 +383,7 @@ function handleDeleteInput() {
     .catch(() => {})
 }
 
-// ======================================================================== 3. 已绑定 Skill 规程实时预览
+// ======================================================================== 3. 已绑定技能实时预览
 const loadedSkillDetail = ref<SkillDetail | null>(null)
 const loadingSkill = ref(false)
 const skillLoadError = ref('')
@@ -444,8 +458,8 @@ const skillMarkdownHtml = computed(() => {
 function handleUnbindSkill(skillId: string) {
   const label = activeSkillSummaryItem.value?.name || skillId
   ElMessageBox.confirm(
-    `确认从当前模板解绑核查规程「${label}」吗？保存草稿后生效。`,
-    '确认解绑规程',
+    `确认从当前模板解绑技能「${label}」吗？保存草稿后生效。`,
+    '确认解绑技能',
     {
       confirmButtonText: '确认解绑',
       cancelButtonText: '取消',
@@ -455,7 +469,7 @@ function handleUnbindSkill(skillId: string) {
     .then(() => {
       store.removeTemplateSkill(skillId)
       store.ideSelectedSkillId = store.templateSkills[0] || ''
-      store.showToast(`已解绑规程「${label}」，保存草稿后生效`)
+      store.showToast(`已解绑技能「${label}」，保存草稿后生效`)
     })
     .catch(() => {})
 }
@@ -629,7 +643,7 @@ function handleDeleteCaseInline() {
   const c = currentStoreCase.value
   if (!c) return
   ElMessageBox.confirm(
-    `确认删除基准回归用例「${c.id} ${c.name}」吗？删除后不可恢复。`,
+    `确认删除回归用例「${c.id} ${c.name}」吗？删除后不可恢复。`,
     '确认删除用例',
     {
       confirmButtonText: '确认删除',
@@ -695,7 +709,7 @@ function handleOpenRollbackModal() {
     rev: concreteRev,
     operator: rec?.operator || tpl.value.publisher || '—',
     time: rec?.time || tpl.value.lastPublishedAt || '—',
-    note: rec?.note || rec?.summary || '恢复至该基线版本内容',
+    note: rec?.note || rec?.summary || '恢复至该版本内容',
   })
 }
 
@@ -707,11 +721,11 @@ function formatRunFieldBrief(rf: TemplateField): string {
   if (rf.type === '列表') {
     if (rf.runStatus === 'found') {
       const n = Array.isArray(rf.runRows) ? rf.runRows.length : (rf.runValue || '').trim() === '[]' ? 0 : -1
-      return n === 0 ? '无记录（0 行）' : n > 0 ? `共 ${n} 行` : rf.runValue || '已命中'
+      return n === 0 ? '无记录（0 行）' : n > 0 ? `共 ${n} 行` : rf.runValue || '已找到'
     }
-    return '缺失（未命中）'
+    return '缺失（未找到）'
   }
-  return rf.runStatus === 'found' ? rf.runValue || '已命中' : '未命中'
+  return rf.runStatus === 'found' ? rf.runValue || '已找到' : '未找到'
 }
 
 function onEvidenceFieldChange(e: Event) {
@@ -767,8 +781,47 @@ function handleExpandDebugPanel() {
 
     <!-- ==================== 模式 A：属性配置（随左侧分类直接内联编辑） ==================== -->
     <div v-if="store.ideRightMode === 'inspector'" class="inspector-scroll">
-      <!-- 1. 核查取证字段表单 -->
-      <template v-if="store.ideLeftSection === 'fields'">
+      <!-- 0. 模板基本信息（名称与说明，随“保存草稿”提交） -->
+      <template v-if="store.ideLeftSection === 'info'">
+        <div class="wb-insp-card">
+          <div class="insp-title-row">
+            <span class="insp-title">
+              模板基本信息 · <span class="mono brand-text">#{{ store.currentTemplateId }}</span>
+            </span>
+          </div>
+
+          <div class="form-block">
+            <label class="field-lbl">模板名称 *</label>
+            <input
+              :value="store.templateName"
+              type="text"
+              class="ide-input"
+              maxlength="64"
+              placeholder="例如：业务办理争议类"
+              @input="onTemplateNameInput"
+            />
+          </div>
+
+          <div class="form-block">
+            <label class="field-lbl">模板说明</label>
+            <textarea
+              :value="store.templateDescription"
+              rows="8"
+              class="ide-textarea"
+              placeholder="说明这个模板适用于什么场景、核查哪些内容、和相近模板有什么区别……"
+              @input="onTemplateDescriptionInput"
+            ></textarea>
+          </div>
+
+          <div class="readonly-meta-box">
+            <div>模板说明会显示在模板列表、⌘K 搜索和聊天窗口的模板选择中。</div>
+            <div>修改后点击「保存草稿」生效，发布后上线。</div>
+          </div>
+        </div>
+      </template>
+
+      <!-- 1. 字段表单 -->
+      <template v-else-if="store.ideLeftSection === 'fields'">
         <!-- 未定义变量一键补建入口 -->
         <div v-if="store.undefinedBodyFields.length > 0" class="wb-insp-card undef-quick-card">
           <div class="insp-title-row">
@@ -801,13 +854,13 @@ function handleExpandDebugPanel() {
           v-if="!fieldForm && store.templateFields.length === 0"
           class="wb-insp-card insp-empty-card"
         >
-          <div class="empty-desc">当前核查模板尚未配置任何取证字段</div>
+          <div class="empty-desc">当前模板尚未配置任何字段</div>
           <button
             type="button"
             class="ide-btn ide-btn-brand"
             @click="startCreateNewField('')"
           >
-            + 新建首个取证字段
+            + 新建首个字段
           </button>
         </div>
 
@@ -816,7 +869,7 @@ function handleExpandDebugPanel() {
           <div class="insp-title-row">
             <span class="insp-title">
               <template v-if="isCreatingField">
-                新建取证字段
+                新建字段
                 <span v-if="fieldForm.name" class="mono brand-text">
                   &#123;&#123;{{ fieldForm.name }}&#125;&#125;
                 </span>
@@ -924,7 +977,7 @@ function handleExpandDebugPanel() {
 
           <div class="form-row-2">
             <div class="form-block">
-              <label class="field-lbl">取证来源类型</label>
+              <label class="field-lbl">证据来源</label>
               <select v-model="fieldForm.evidenceType" class="ide-select">
                 <option v-for="opt in evidenceOptions" :key="opt.value" :value="opt.value">
                   {{ opt.label }}
@@ -932,7 +985,7 @@ function handleExpandDebugPanel() {
               </select>
             </div>
             <div class="form-block">
-              <label class="field-lbl">缺失兜底策略</label>
+              <label class="field-lbl">缺失时处理</label>
               <select
                 v-model="fieldForm.whenMissing"
                 class="ide-select"
@@ -958,7 +1011,7 @@ function handleExpandDebugPanel() {
               v-model="fieldForm.defaultValue"
               class="ide-select"
             >
-              <option value="">请选择枚举兜底值</option>
+              <option value="">请选择枚举默认值</option>
               <option v-for="ev in parsedEnums" :key="ev" :value="ev">{{ ev }}</option>
             </select>
             <input
@@ -966,12 +1019,12 @@ function handleExpandDebugPanel() {
               v-model="fieldForm.defaultValue"
               type="text"
               class="ide-input mono"
-              placeholder="未检索到证据时的兜底展示文本"
+              placeholder="未找到时显示的默认文本"
             />
           </div>
 
           <div class="form-block">
-            <label class="field-lbl">取证规则说明 Prompt（指导智能体核验口径）</label>
+            <label class="field-lbl">填写说明（提示词）（指导智能体核验口径）</label>
             <textarea
               v-model="fieldForm.description"
               rows="4"
@@ -1002,15 +1055,15 @@ function handleExpandDebugPanel() {
             class="ide-btn ide-btn-brand full-width-btn"
             @click="handleApplyField"
           >
-            {{ isCreatingField ? '创建取证字段' : '应用字段修改' }}
+            {{ isCreatingField ? '创建字段' : '应用字段修改' }}
           </button>
         </div>
       </template>
 
-      <!-- 2. 调用入参契约内联编辑 -->
+      <!-- 2. 入参内联编辑 -->
       <template v-else-if="store.ideLeftSection === 'inputs'">
         <div v-if="!currentInput" class="wb-insp-card insp-empty-card">
-          <div class="empty-desc">当前模板暂未定义调用入参契约</div>
+          <div class="empty-desc">当前模板暂未定义入参</div>
           <button
             type="button"
             class="ide-btn ide-btn-brand"
@@ -1023,7 +1076,7 @@ function handleExpandDebugPanel() {
         <div v-else class="wb-insp-card">
           <div class="insp-title-row">
             <span class="insp-title">
-              入参契约 · <span class="mono brand-text">{{ currentInput.key || '未命名' }}</span>
+              入参 · <span class="mono brand-text">{{ currentInput.key || '未命名' }}</span>
             </span>
             <button
               type="button"
@@ -1119,16 +1172,16 @@ function handleExpandDebugPanel() {
         </div>
       </template>
 
-      <!-- 3. 已绑定 Skill 核查规程实时详情与 Markdown 预览 -->
+      <!-- 3. 已绑定技能实时详情与 Markdown 预览 -->
       <template v-else-if="store.ideLeftSection === 'skills'">
         <div v-if="!activeSkillId" class="wb-insp-card insp-empty-card">
-          <div class="empty-desc">当前核查模板尚未绑定任何 Skill 核查规程</div>
+          <div class="empty-desc">当前模板尚未绑定任何技能</div>
           <button
             type="button"
             class="ide-btn ide-btn-brand"
             @click="store.openModal('add-skill')"
           >
-            + 绑定核查规程 Skill
+            + 绑定技能
           </button>
         </div>
 
@@ -1156,7 +1209,7 @@ function handleExpandDebugPanel() {
               :disabled="!activeSkillSummaryItem"
               @click="store.openSkillByName(activeSkillId)"
             >
-              前往规程库编辑
+              前往技能列表编辑
             </button>
             <button
               type="button"
@@ -1170,19 +1223,19 @@ function handleExpandDebugPanel() {
               class="ide-btn ide-btn-xs ide-btn-danger"
               @click="handleUnbindSkill(activeSkillId)"
             >
-              解绑规程
+              解绑技能
             </button>
           </div>
 
           <div v-if="loadingSkill" class="readonly-meta-box">
-            正在从后端加载规程正文与 API 接口清单...
+            正在从后端加载技能正文与 API 接口清单...
           </div>
           <div v-else-if="skillLoadError" class="readonly-meta-box err-box">
-            加载规程详情失败：{{ skillLoadError }}
+            加载技能详情失败：{{ skillLoadError }}
           </div>
           <template v-else>
             <div class="skill-desc-text">
-              {{ activeSkillSummaryItem?.description || '暂无规程描述说明' }}
+              {{ activeSkillSummaryItem?.description || '暂无技能描述说明' }}
             </div>
 
             <div class="form-block">
@@ -1199,11 +1252,11 @@ function handleExpandDebugPanel() {
                   {{ apiName }}
                 </span>
               </div>
-              <div v-else class="muted-note">该规程未声明外部 API 调用</div>
+              <div v-else class="muted-note">该技能未声明外部 API</div>
             </div>
 
             <div class="form-block">
-              <label class="field-lbl">规程执行脚本只读预览 (Markdown)</label>
+              <label class="field-lbl">技能执行脚本只读预览 (Markdown)</label>
               <div
                 v-if="skillMarkdownHtml"
                 class="skill-md-box"
@@ -1215,26 +1268,26 @@ function handleExpandDebugPanel() {
         </div>
       </template>
 
-      <!-- 4. 基准回归用例内联新建与编辑 -->
+      <!-- 4. 回归用例内联新建与编辑 -->
       <template v-else-if="store.ideLeftSection === 'cases'">
         <div
           v-if="!caseForm && store.templateCases.length === 0"
           class="wb-insp-card insp-empty-card"
         >
-          <div class="empty-desc">暂无基准回归测试用例，可新建或从调试结果沉淀</div>
+          <div class="empty-desc">暂无回归用例，可新建或从调试结果保存</div>
           <button
             type="button"
             class="ide-btn ide-btn-brand"
             @click="store.ideSelectedCaseIdx = -1"
           >
-            + 新建基准回归用例
+            + 新建回归用例
           </button>
         </div>
 
         <div v-else-if="caseForm" class="wb-insp-card">
           <div class="insp-title-row">
             <span class="insp-title">
-              <template v-if="isCreatingCase">新建基准回归用例</template>
+              <template v-if="isCreatingCase">新建回归用例</template>
               <template v-else>
                 回归用例 · <span class="mono brand-text">{{ caseForm.id }}</span>
               </template>
@@ -1311,7 +1364,7 @@ function handleExpandDebugPanel() {
           </div>
 
           <div v-if="store.templateInputs.length > 0" class="form-block">
-            <label class="field-lbl">契约调用入参值 ({{ store.templateInputs.length }} 项)</label>
+            <label class="field-lbl">入参值 ({{ store.templateInputs.length }} 项)</label>
             <div class="sub-kv-list">
               <div
                 v-for="inp in store.templateInputs"
@@ -1395,11 +1448,11 @@ function handleExpandDebugPanel() {
 
           <div class="rev-meta-list">
             <div>
-              草稿基线版本：
+              草稿基于版本：
               <strong class="mono">{{ tpl.baseRev || '—' }}</strong>
             </div>
             <div>
-              当前线上基线：
+              当前线上版本：
               <strong class="mono">{{ tpl.onlineRev || '—' }}</strong>
             </div>
             <div v-if="store.templateDetail?.draft">
@@ -1411,9 +1464,9 @@ function handleExpandDebugPanel() {
               <strong>{{ store.templateDetail.draft.updatedBy }}</strong>
             </div>
             <div>
-              编排规模：
+              配置概况：
               <span class="mono">
-                字段 {{ store.templateFields.length }} · 入参 {{ store.templateInputs.length }} · 规程 {{ store.templateSkills.length }}
+                字段 {{ store.templateFields.length }} · 入参 {{ store.templateInputs.length }} · 技能 {{ store.templateSkills.length }}
               </span>
             </div>
           </div>
@@ -1424,7 +1477,7 @@ function handleExpandDebugPanel() {
             :disabled="!diffComparisonTargetRev"
             @click="handleOpenDiffInStage"
           >
-            在模板区对比差异 Diff
+            在模板区查看差异
           </button>
         </div>
 
@@ -1432,7 +1485,7 @@ function handleExpandDebugPanel() {
         <div v-else class="wb-insp-card">
           <div class="insp-title-row">
             <span class="insp-title">
-              修订基线 ·
+              修订版本 ·
               <span class="mono brand-text">
                 {{ resolvedRevisionRecord?.rev || (selectedRevisionKey === 'online' ? tpl.onlineRev : selectedRevisionKey) }}
               </span>
@@ -1483,7 +1536,7 @@ function handleExpandDebugPanel() {
               class="ide-btn"
               @click="handleOpenDiffInStage"
             >
-              在模板区对比差异 Diff
+              在模板区查看差异
             </button>
             <button
               type="button"
@@ -1501,9 +1554,9 @@ function handleExpandDebugPanel() {
     <div v-else class="evidence-pane-wrap">
       <div v-if="!store.dryRunResult" class="inspector-scroll">
         <div class="wb-insp-card insp-empty-card">
-          <div class="empty-title">尚无激活的调试运行证据快照</div>
+          <div class="empty-title">尚无激活的调试结果</div>
           <div class="empty-desc">
-            请在下方调试区点击「▶ 运行调试」，或点选左侧「调试运行记录」中的任意历史流水，即可在此定位原始业务单据与 API 调用报文凭据。
+            请在下方调试区点击「▶ 运行调试」，或点选左侧「调试运行记录」中的任意历史记录，即可在此定位原始业务单据与 API 报文。
           </div>
           <button
             type="button"

@@ -6,7 +6,7 @@ apis:
   - querySMSSendInfo
 ---
 
-<!-- #Created By AiCoding(codex) 迁移自 Java skills/second-confirmation-sms（SKILL.md + scripts/assembly.groovy + scripts/extract.groovy） -->
+<!-- #Created By AiCoding(codex) -->
 
 # 二次确认短信
 
@@ -55,13 +55,13 @@ apis:
 {"column": "smsContent", "op": "contains", "value": "订购提醒"}
 ```
 
-规则说明（与 Java 一致）：
+规则说明：
 
 1. 业务名称在**全文**中比较（不截取“编号”之前），两边按 `normalize_text` 规则清洗后包含即可（`normalizedContains`）。
 2. 原文必须包含“回复”（原文比较，不清洗）。
 3. 优先级：只要存在包含“订购确认提醒”的候选，就只在这些候选中取最新一条；一条都没有时，才在包含“订购提醒”的候选中取最新一条。
 4. 同一优先级多条时按 `smsSendTime` 倒序取第一条。
-5. 不排除退订类短信（Java 没有这条规则，不要自行添加）。
+5. 不排除退订类短信（不要自行增加这条过滤）。
 
 ## 提交要求
 

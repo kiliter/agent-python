@@ -1,7 +1,7 @@
-# #Created By AiCoding(codex) 由 tools/java_migration/generate.py 从 Java 模板生成，请勿手工修改后再重新生成
+# #Created By AiCoding(codex)
 id: 107
 name: 充值错号处理类
-description: 迁移自 Java 模板「充值错号处理类」（资源库模板 ID 107），正文与规则以 Java 为准。
+description: 客户在充值缴费时输错手机号码，将话费误充入他人号码并引发退费或核查诉求，需查询被充错目标号码在指定账期/日期内的真实充值流水。
 skills:
 - qry-balance
 inputs:
@@ -38,4 +38,4 @@ fields:
   description: 按 Skill qry-balance 查询充值号码/手机号码在充值时间所属账期的余额流水，每条充值记录一行，单元格原样取自接口记录， evidence 引用每一行对应的接口记录；各账期接口调用成功但匹配 0 条流水时，必须提交 status="found"、value=[] 并附上结果为 0 行的 query_result 或 count=0 的 call_api 工具 callId 证据（严禁引用 load_skill）；仅在缺少必要入参或任一账期接口报错时提交 not_found。
 - name: 客户号码
   evidence: derive
-  description: 优先取入参「extraInfo」中的充值号码（或入参「充值号码」），其次从单据中摘取充值的 11 位客户号码，都没有时取入参「手机号码」（Java 该模板没有 rule，优先级与同族充值争议模板对齐）。
+  description: 优先取入参「extraInfo」中的充值号码（或入参「充值号码」），其次从单据中摘取充值的 11 位客户号码，都没有时取入参「手机号码」（优先级与同族充值争议模板一致）。

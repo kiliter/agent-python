@@ -2,7 +2,7 @@
   #Created By AiCoding(codex)
   IDE 级紧凑行内报告文档卡片（由 RunCard.vue 与 ChatEmbedApp.vue AI 改写回复共同复用）：
   1. 严格单行 36px 顶栏：#<id> <templateName> + 顶部语义 Tag（AI 改写 / 已微调 / 缺 N 项 / 已核验 / 旧入参 / 已回传），
-     鼠标悬浮 Tag 通过舞台内纯 CSS Tooltip（.eb-tip）展示缺失字段、未校验警告与旧入参详情，彻底消除整行提示条；
+     鼠标悬浮 Tag 通过窗口内纯 CSS Tooltip（.eb-tip）展示缺失字段、未校验警告与旧入参详情，彻底消除整行提示条；
   2. 右侧不换行工具区：紧凑版本选择 + 纯图标工具按钮（恢复原始 / 复制 / 重查 / 换模板 / 分栏 / 放大预览） + 紧凑「确认回传」主按钮；
   3. 正文采用 12.5px 紧凑排版与低边距标题/列表，常规报告可在单张卡片内完整一屏预览。
 -->
@@ -192,8 +192,8 @@ async function onCopyReport() {
           type="button"
           class="eb-icon-btn eb-tip eb-tip-right"
           :disabled="switchDisabled"
-          data-tip="切换核查模板"
-          aria-label="切换核查模板"
+          data-tip="切换模板"
+          aria-label="切换模板"
           @click="emit('switchTemplate')"
         >
           <ArrowLeftRight :size="13" />

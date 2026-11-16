@@ -1,131 +1,218 @@
-# Feature Specification: [FEATURE NAME]
+# 需求文档（Spec）：[FEATURE NAME]
 
-**Feature Branch**: `[###-feature-name]`
+<!-- #Created By AiCoding(codex) -->
 
-**Created**: [DATE]
-
-**Status**: Draft
-
-**Input**: User description: "$ARGUMENTS"
-
-## User Scenarios & Testing *(mandatory)*
-
-<!--
-  IMPORTANT: User stories should be PRIORITIZED as user journeys ordered by importance.
-  Each user story/journey must be INDEPENDENTLY TESTABLE - meaning if you implement just ONE of them,
-  you should still have a viable MVP (Minimum Viable Product) that delivers value.
-
-  Assign priorities (P1, P2, P3, etc.) to each story, where P1 is the most critical.
-  Think of each story as a standalone slice of functionality that can be:
-  - Developed independently
-  - Tested independently
-  - Deployed independently
-  - Demonstrated to users independently
--->
-
-### User Story 1 - [Brief Title] (Priority: P1)
-
-[Describe this user journey in plain language]
-
-**Why this priority**: [Explain the value and why it has this priority level]
-
-**Independent Test**: [Describe how this can be tested independently - e.g., "Can be fully tested by [specific action] and delivers [specific value]"]
-
-**Acceptance Scenarios**:
-
-1. **Given** [initial state], **When** [action], **Then** [expected outcome]
-2. **Given** [initial state], **When** [action], **Then** [expected outcome]
+> **Spec Kit 使用约定**：产物文件名固定为 `spec.md`、`plan.md`、`tasks.md`；三类外部独立交付物按需确认，仅涉及项单独生成并建立链接，不涉及项只记录依据。生成时必须将全部 `{...}` 占位提示替换为实际内容，示例文本不得作为既定需求；不适用章节保留标题并说明 `本需求不涉及` 及原因，不得删除章节；不确定项正文标注 `【待确认】` 并统一沉淀至第 11 节 `Q-*`（实质歧义配合 `[NEEDS CLARIFICATION: Q-编号 ...]`）。
+> **项目依据**：项目宪章 `.specify/memory/constitution.md`、`AGENTS.md` 及 `wiki/index.md`。遵循先取证后写作原则，优先核对代码、测试与运行证据，不把推测写成事实。
 
 ---
 
-### User Story 2 - [Brief Title] (Priority: P2)
+**功能分支**：`[###-feature-name]`
 
-[Describe this user journey in plain language]
+**创建日期**：[DATE]
 
-**Why this priority**: [Explain the value and why it has this priority level]
+**状态**：草稿
 
-**Independent Test**: [Describe how this can be tested independently]
+**输入**：用户描述："$ARGUMENTS"
 
-**Acceptance Scenarios**:
+## 基本信息 【核心】
 
-1. **Given** [initial state], **When** [action], **Then** [expected outcome]
-
----
-
-### User Story 3 - [Brief Title] (Priority: P3)
-
-[Describe this user journey in plain language]
-
-**Why this priority**: [Explain the value and why it has this priority level]
-
-**Independent Test**: [Describe how this can be tested independently]
-
-**Acceptance Scenarios**:
-
-1. **Given** [initial state], **When** [action], **Then** [expected outcome]
+| 字段 | 内容 |
+| --- | --- |
+| 需求编号 | {如 RA-009 / REQ-001} |
+| 需求名称 | {一句话概括需求核心价值} |
+| 核算工作量 | {如 XX.X 人天，若不按人天拆分则写“不涉及人天核算”} |
+| 资料与证据来源 | {原始需求/设计说明/代码路径/测试报告及可信度分级} |
+| 文档版本 | {如 1.0，与文末“变更记录”一致} |
+| 文档状态 | {草稿 / 评审中 / 已确认 / 已交付归档} |
 
 ---
 
-[Add more user stories as needed, each with an assigned priority]
+## 1. 业务背景与目标 【核心】
 
-### Edge Cases
+### 1.1 业务背景
 
-<!--
-  ACTION REQUIRED: The content in this section represents placeholders.
-  Fill them out with the right edge cases.
--->
+{简要说明需求产生的业务场景、现有链路痛点、影响角色与建设必要性（1-3 段）。}
 
-- What happens when [boundary condition]?
-- How does system handle [error scenario]?
+### 1.2 业务目标
 
-## Requirements *(mandatory)*
+- **GOAL-1**：{可量化、可观察的业务/工程目标 1}
+- **GOAL-2**：{可量化、可观察的业务/工程目标 2}
 
-<!--
-  ACTION REQUIRED: The content in this section represents placeholders.
-  Fill them out with the right functional requirements.
--->
+---
 
-### Functional Requirements
+## 2. 需求概述 【核心】
 
-- **FR-001**: System MUST [specific capability, e.g., "allow users to create accounts"]
-- **FR-002**: System MUST [specific capability, e.g., "validate email addresses"]
-- **FR-003**: Users MUST be able to [key interaction, e.g., "reset their password"]
-- **FR-004**: System MUST [data requirement, e.g., "persist user preferences"]
-- **FR-005**: System MUST [behavior, e.g., "log all security events"]
+{用 2-3 段概括本需求整体要交付的能力、涵盖的功能模块以及对现有运行链路或治理流程的影响。}
 
-*Example of marking unclear requirements:*
+### 2.1 用户场景与测试
 
-- **FR-006**: System MUST authenticate users via [NEEDS CLARIFICATION: auth method not specified - email/password, SSO, OAuth?]
-- **FR-007**: System MUST retain user data for [NEEDS CLARIFICATION: retention period not specified]
+> 按用户旅程组织并标记稳定编号 `US1`、`US2` 等，使用 `P1`/`P2`/`P3` 排序；每个故事须可独立测试并交付价值。
 
-### Key Entities *(include if feature involves data)*
+#### 用户故事 1（US1）— {简短标题}（优先级：P1）
 
-- **[Entity 1]**: [What it represents, key attributes without implementation]
-- **[Entity 2]**: [What it represents, relationships to other entities]
+- **用户旅程**：{作为某角色，在何场景下完成何目标，获得何价值}
+- **优先级理由**：{业务价值与 MVP 取舍依据}
+- **独立测试**：{脱离其他故事独立验证该能力的步骤与产出}
+- **关联需求**：{FR-001, FR-002 等}
+- **验收场景**：
+  1. **前提** {初始状态或数据}，**当** {执行动作}，**则** {可验证的系统输出或状态}。
+  2. **前提** {边界或替代状态}，**当** {执行动作}，**则** {可验证的处理结果}。
 
-## Success Criteria *(mandatory)*
+### 2.2 成功标准
 
-<!--
-  ACTION REQUIRED: Define measurable success criteria.
-  These must be technology-agnostic and measurable.
--->
+> 使用 `SC-001` 起的稳定编号，定义与具体代码实现解耦、可观察、可验证的业务/质量结果。
 
-### Measurable Outcomes
+- **SC-001**：{可量化或可明确核验的成功标准及验证方式}
+- **SC-002**：{可量化或可明确核验的成功标准及验证方式}
 
-- **SC-001**: [Measurable metric, e.g., "Users can complete account creation in under 2 minutes"]
-- **SC-002**: [Measurable metric, e.g., "System handles 1000 concurrent users without degradation"]
-- **SC-003**: [User satisfaction metric, e.g., "90% of users successfully complete primary task on first attempt"]
-- **SC-004**: [Business metric, e.g., "Reduce support tickets related to [X] by 50%"]
+### 2.3 假设
 
-## Assumptions
+- {明确上下游接口前提、运行环境约束与默认取值；存在实质歧义须进入第 11 节 `Q-*`，不得以假设掩盖未决问题}
 
-<!--
-  ACTION REQUIRED: The content in this section represents placeholders.
-  Fill them out with the right assumptions based on reasonable defaults
-  chosen when the feature description did not specify certain details.
--->
+---
 
-- [Assumption about target users, e.g., "Users have stable internet connectivity"]
-- [Assumption about scope boundaries, e.g., "Mobile support is out of scope for v1"]
-- [Assumption about data/environment, e.g., "Existing authentication system will be reused"]
-- [Dependency on existing system/service, e.g., "Requires access to the existing user profile API"]
+## 3. 术语与概念定义 【核心，如有新术语】
+
+> 只定义本需求新增或容易引发歧义的专有术语；已在 `wiki/reference/glossary.md` 或 `frontend/src/constants/terms.ts` 统一定义的通用术语直接引用，不重复粘贴。若无新增术语，标注“本需求不涉及新增术语”。
+
+| 术语 | 英文/标识 | 定义 | 备注 |
+| --- | --- | --- | --- |
+| {术语 1} | {Identifier} | {在本需求上下文中的精确定义} | {与既有术语的关系} |
+
+---
+
+## 4. 用户角色 【核心】
+
+| 角色 | 类型 | 本需求中可执行的操作与数据范围 | 权限/安全约束 |
+| --- | --- | --- | --- |
+| {如：业务配置人员 / 平台管理员} | {人工角色} | {操作能力与可访问范围} | {需经 `require_user` 登录鉴权等} |
+| {如：上游工单系统 / 嵌入式聊天窗口} | {外部/系统角色} | {调用或订阅能力} | {仅限 `X-API-Key` + `online` 视图等} |
+
+---
+
+## 5. 功能需求 【核心】
+
+> 按功能模块分组，全局唯一编号 `FR-001`、`FR-002`……每项须写明规则、输入/触发、输出与可测试验收标准（使用 `- AC-1：...`）。
+
+### 5.1 {功能模块 1 名称}
+
+#### FR-001 {功能点标题}
+
+- **来源**：{需求材料/代码模块/问题单编号}
+- **描述**：{功能职责与面向角色}
+- **关联用户故事/成功标准**：{US1 / SC-001}
+- **业务规则**：
+  1. {规则 1：包含明确判断条件、阈值、优先级或回退策略}
+  2. {规则 2}
+- **输入/触发**：{API 请求、页面操作、工具调用或事件触发}
+- **输出/结果**：{返回值、持久化状态、SSE 事件或页面反馈}
+- **验收标准**：
+  - AC-1：{给定条件，执行动作，可验证的精确结果}
+  - AC-2：{异常或边界情况的可验证结果}
+
+---
+
+## 6. 非功能需求 【补充】
+
+> 遵循项目宪章（`.specify/memory/constitution.md`），不重复全文。逐项评估单智能体防幻觉隔离、单进程并发安全（`workers=1`）、安全隐私与脱敏、关键路径事件/审计留痕、前端分包与兼容约束；不涉及项注明依据，新增专项约束按 `NFR-001` 编号。
+
+| 类型 | 编号 | 说明 | 验收方式 |
+| --- | --- | --- | --- |
+| {宪章适用场景 / 专项 NFR} | {NFR-001；关联宪章原则} | {具体非功能要求与边界} | {单测/静态检查/日志审计核验} |
+
+---
+
+## 7. 数据与存储需求 【补充】
+
+> 说明本需求在 `DATA_DIR`（`repo/`、`releases/`、`drafts/`、`runs/`、`chats/`、`cases/`、`config/`、`audit.jsonl`）或内存结构中的新增/变更对象及一致性口径；不涉及则写“本需求不涉及数据存储结构变更”。
+
+| 数据对象/存储位置 | 变更类型 | 关键字段与口径 | 一致性/留存策略 | 关联需求 |
+| --- | --- | --- | --- | --- |
+| {表/文件/缓存/内存结构} | {新增/修改/只读} | {字段与结构摘要} | {原子写/乐观锁/过期清理} | {FR-*} |
+
+---
+
+## 8. 外部接口与集成 【补充】
+
+> 描述本需求涉及的上游调用、统一网关（XML/JSON）、大模型（LLM）或 iframe `postMessage` 交互；不涉及则写“本需求不涉及新增外部接口与集成”。
+
+| 接口/系统 | 方向 | 交互内容 | 是否新增 | 关联需求 | 备注 |
+| --- | --- | --- | --- | --- | --- |
+| {如：统一网关 / 上游系统 / LLM} | {入站/出站} | {核心交互内容} | {是/否} | {FR-*} | {协议/契约参考} |
+
+### 8.1 出站网关与模型接口契约摘要（涉及时填写）
+
+> 若本需求不涉及新增或变更出站外部接口，标注“本需求不涉及新增/变更出站外部接口，沿用既有网关或模型客户端”。
+
+| 接口/工具 | 调用方向 | 协议与端点 | 路由/识别字段 | 成功判定 | 关键失败与降级策略 |
+| --- | --- | --- | --- | --- | --- |
+| {如：`querySMSSendInfo`} | {平台 → 统一网关} | {XML / JSON} | {`processCode`} | {`noData`/`success` 规则} | {超时/5xx 退避重试、降级 `not_found`} |
+
+### 8.2 三类独立交付物涉及情况
+
+| 独立文档 | 涉及情况 | 判断依据与范围摘要 | 确认来源/日期及关联需求 |
+| --- | --- | --- | --- |
+| `接口文档.md` | {涉及/不涉及/待确认} | {是否新增或变更对外集成契约；内部接口不触发} | {确认来源、日期；FR-*} |
+| `资源迁移与Seed清单.md` | {涉及/不涉及/待确认} | {是否新增或批量修改 `seed/` 或迁移规则脚本} | {确认来源、日期；FR-*} |
+| `部署与配置变更单.md` | {涉及/不涉及/待确认} | {是否新增环境变量、容器镜像或运维配置动作} | {确认来源、日期；FR-*} |
+
+---
+
+## 9. 边界与约束 【补充】
+
+### 9.1 范围边界
+
+**本次需求包含（In Scope）：**
+
+- {明确包含的模块或功能项 1}
+- {明确包含的模块或功能项 2}
+
+**本次需求不包含（Out of Scope）：**
+
+- {明确排除的功能或改造项 1}
+- {明确排除的功能或改造项 2}
+
+### 9.2 技术与业务约束
+
+- {遵循平台零业务硬编码原则、单进程并发模型或特定版本兼容约束等}
+
+---
+
+## 10. 异常场景与边界情况 【核心】
+
+| 编号 | 场景描述 | 触发条件 | 预期处理方式 | 是否阻断主流程 | 优先级 | 关联需求 |
+| --- | --- | --- | --- | --- | --- | --- |
+| EX-001 | {异常或边界场景} | {触发条件} | {重试/退回/降级/错误码/提示} | {是/否} | {高/中/低} | {FR-*} |
+
+---
+
+## 11. 待确认事项 【核心】
+
+> 所有阻塞或待拍板事项均登记 `Q-*`；已澄清或归档闭环的问题保留状态“已关闭/已确认”及结论摘要，做到可追溯。
+
+| 编号 | 问题描述 | 影响范围 | 责任方 | 期望确认日期 | 状态 | 结论 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Q-001 | {问题描述或“无未关闭阻塞问题”} | {FR-* / 模块} | {角色} | {YYYY-MM-DD} | {待确认/已确认/已关闭} | {确认结论} |
+
+---
+
+## 附录：原始需求描述 【补充】
+
+```text
+{保留原始需求输入、业务摘要或拆分指令原文，不做随意改写}
+```
+
+---
+
+## 变更记录（Changelog）
+
+| 版本 | 日期 | 变更人 | 变更内容 |
+| --- | --- | --- | --- |
+| 1.0 | {YYYY-MM-DD} | {姓名/AI} | {初始化/转换需求规格} |
+
+---
+
+## 增量更新说明
+
+> 本文档按 `report-agent` 中文 Spec-Kit 模板与 SDD 取证规范生成；后续如有范围或契约变更，同步更新对应章节与 `变更记录` 并联动刷新 `plan.md` 与 `tasks.md`。

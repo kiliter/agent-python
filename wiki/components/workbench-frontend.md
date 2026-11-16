@@ -49,10 +49,10 @@ updated: 2026-11-13
 | 路由路径 | 视图组件 | 核心功能 |
 |----------|----------|----------|
 | `/login` | `LoginView.vue` | 工作台账号密码登录，展示锁定倒计时与错误提示 |
-| `/templates` | `TemplatesListView.vue` | 33+ 模板总览表格、状态筛选（已发布 / 有草稿 / 草稿 / 已下线）、新建/复制/下线/恢复；关联 Skill 规程列采用 `.ref-count-pill` 计数胶囊 + 限高滚动 `<el-popover>`（`.ref-popover-panel` / `.ref-popover-list`） |
+| `/templates` | `TemplatesListView.vue` | 33+ 模板总览表格、状态筛选（已发布 / 有草稿 / 草稿 / 已下线）、新建/复制/下线/恢复；关联技能列采用 `.ref-count-pill` 计数胶囊 + 限高滚动 `<el-popover>`（`.ref-popover-panel` / `.ref-popover-list`） |
 | `/workbench` | `TemplateWorkbenchView.vue` | **核心 IDE 式模板工作台**：左栏导航（字段 / 入参 / Skill / 用例 / 历史）、中栏双模式编辑器（代码 / 实时预览 / 分屏 / 版本 Diff）、右栏属性检查器与 SSE 试运行证据溯源 |
-| `/skills` | `SkillsView.vue` | 纯文本 `SKILL.md` 在线编辑器（含 11 个填报 Skill 与聊天路由 `template-router`）；「核查业务规程摘要」单行省略配 `<el-tooltip>` 悬浮查看全文，「被核查模板引用」采用全局 `.ref-popover-list` 限高滚动面板（`max-height: 240px`），避免列表过长撑大页面 |
-| `/apis` | `ApisView.vue` | 网关接口契约管理：可视化表单（`ApiVisualEditor`）与原始 YAML 双模式编辑及在线拨测；接口说明单行省略配 `<el-tooltip>` 悬浮提示，关联 Skill 规程列与 `SkillsView.vue` 一致采用数量胶囊 + 限高滚动 `<el-popover>` |
+| `/skills` | `SkillsView.vue` | 纯文本 `SKILL.md` 在线编辑器（含 11 个填报 Skill 与聊天路由 `template-router`）；「技能摘要」单行省略配 `<el-tooltip>` 悬浮查看全文，「被模板引用」采用全局 `.ref-popover-list` 限高滚动面板（`max-height: 240px`），避免列表过长撑大页面 |
+| `/apis` | `ApisView.vue` | 网关接口契约管理：可视化表单（`ApiVisualEditor`）与原始 YAML 双模式编辑及在线拨测；接口说明单行省略配 `<el-tooltip>` 悬浮提示，关联技能列与 `SkillsView.vue` 一致采用数量胶囊 + 限高滚动 `<el-popover>` |
 | `/runs` | `RunsView.vue` | 历史运行审计台账：多维检索（含 `聊天窗口` 入口）、查看单次运行的渲染报告、完整推理轨迹与证据定位，支持一键“保存为回归用例” |
 | `/regression` | `RegressionView.vue` | 模板回归测试用例管理与单条试跑验证 |
 | `/releases` | `ReleasesView.vue` | 全局版本时间线（`r1`..`rN`）、版本间资源变更 Diff 对比及生产紧急版本切换（`emergency-switch`） |
@@ -63,7 +63,7 @@ updated: 2026-11-13
 
 | 组件文件 | 职责说明 |
 |----------|----------|
-| `WorkspaceTabsBar.vue` + `ChatIframeTabPane.vue` | **右侧全局多页签导航与动态聊天保活面板**：基于 Element Plus `<el-tabs type="card">` + `SortableJS` 拖拽重排（锁死固定首页签 `核查模板`，重排前还原 DOM 顺序再由 Pinia `splice` 驱动避免 VNode 错位）+ `<el-dropdown>` 快捷关闭菜单（关闭当前/其他/右侧/全部可关页签），适配亮/暗双主题；`ChatIframeTabPane.vue` 以 `100% × 100%` 承载无边框 `/embed.html` `<iframe>`（`v-show` 保活，激活时 `App.vue` 通过 `.main-wrapper.is-chat-fullscreen` 隐藏 `.topbar` 与页签栏实现右侧全屏展示，严格校验同源 `origin` 与 `event.source` 执行 `chat-ready` ↔ `chat-init` 握手及回传） |
+| `WorkspaceTabsBar.vue` + `ChatIframeTabPane.vue` | **右侧全局多页签导航与动态聊天保活面板**：基于 Element Plus `<el-tabs type="card">` + `SortableJS` 拖拽重排（锁死固定首页签 `模板`，重排前还原 DOM 顺序再由 Pinia `splice` 驱动避免 VNode 错位）+ `<el-dropdown>` 快捷关闭菜单（关闭当前/其他/右侧/全部可关页签），适配亮/暗双主题；`ChatIframeTabPane.vue` 以 `100% × 100%` 承载无边框 `/embed.html` `<iframe>`（`v-show` 保活，激活时 `App.vue` 通过 `.main-wrapper.is-chat-fullscreen` 隐藏 `.topbar` 与页签栏实现右侧全屏展示，严格校验同源 `origin` 与 `event.source` 执行 `chat-ready` ↔ `chat-init` 握手及回传） |
 | `CodeMirrorEditor.vue` + `WorkbenchTemplateStage.vue` + `src/utils/jinjaBody.ts` | 基于 CodeMirror 6 定制的 Jinja2 / Markdown / YAML 代码编辑器与共享词法作用域分析器（`analyzeJinjaBody` / `renameJinjaBodyVariable`），完整识别 `{{ }}` / `{% %}` / `{# #}`、`{% for item in 列表 %}` 循环绑定变量、`| filter` 与 `is [not] hasDigit` 测试，支持 `{{字段名}}` 芯片高亮、零误报未定义变量提示、字段重命名同步替换输出块与控制块，以及携带内存编辑态 `fields` 的实时沙箱渲染预览联动 |
 | `WorkbenchDebugPanel.vue` | 模板在线试运行入参表单与单据面板：对声明了 `pattern` 的入参自动执行 `.trim()` 与整串锚定 `^(?:...)$` 校验（对齐后端 `safe_regex_fullmatch`） |
 | `ApiVisualEditor.vue` | 将复杂的 `apis/*.yaml`（连接器类型、JSON Schema 入参表、请求报文映射、`noData`/`success` 判定条件、多模式记录抽取列）转化为直观表单双向同步编辑，原生对齐后端 `BUILTIN_PLACEHOLDERS`（识别 `${$now}` 内置动态占位符、拦截非法 `$xxx` 参数名） |
@@ -72,13 +72,40 @@ updated: 2026-11-13
 | `ReportPreviewContent.vue` | 最终报告渲染展示面板，支持点击已填入的字段值反向联动定位右侧证据源 |
 | `WorkbenchRightInspector.vue` + `GlobalDrawers.vue` + `GlobalModals.vue` | `WorkbenchRightInspector.vue` 内联承载字段精细属性配置（类型、`list` 子列编辑器、证据等级、`quoteWhole`、日期 `format`、缺失回退策略，重命名自动携带 `originalName`）与回归用例编辑；`GlobalDrawers.vue` 按需懒挂载（`v-if="store.activeDrawer"`）承载双版本回归差异溯源抽屉（`reg-diff-detail`）；`GlobalModals.vue` 承载发布前校验弹窗与 409 `DRAFT_CONFLICT` 多人编辑冲突对比弹窗 |
 | `src/utils/{sse,markdown,textDiff,clipboard}.ts` | 跨工作台与嵌入窗复用的零过度抽象基础工具：统一 SSE 流读取与取消释放（`readSseStream`）、带 32 条目 LRU 缓存的 `marked` + `sanitizeHtml` 安全渲染（`renderSafeMarkdown`）、行级对比与上下文折叠（`diffLines`）及剪贴板复制（`copyToClipboard`） |
-| `SettingsView.vue`（引擎与系统设置） | 覆盖全部 **48 项**运行期配置的分栏展示（`gatewaySpecRows` / `engineSpecRows` / `chatSpecRows`）与 4 组在线热更新编辑表单（含新增的「3. 聊天会话与滚动上下文压缩配额」与「4. 平台工具限额与历史数据留存」分组）：通过 `DEFAULT_RUNTIME_CONFIG` 与 `parseNumOrDefault` 对空值/缺省项自动兜底回填默认值，并做 `agentQueryMaxLimit >= agentQueryDefaultLimit`、`chatCompactTriggerMessages > chatCompactKeepRecent` 前端预校验；提供「恢复默认参数」按钮（`handleResetDefaultParams`）仅重置数值/配额/枚举模式并保护 `gatewayUrl`、`llmBaseUrl`、`llmModel` 与已填密钥；Tab 3（引擎与网关配置回滚）通过 `COMPARE_CONFIG_KEYS` 与 `RUNTIME_KEY_LABELS` 呈现全量 48 项中文对照与历史快照差异对比 |
+| `SettingsView.vue`（系统设置） | 覆盖全部 **48 项**运行期配置的分栏展示（`gatewaySpecRows` / `engineSpecRows` / `chatSpecRows`）与 4 组在线热更新编辑表单（含新增的「3. 聊天会话与滚动上下文压缩配额」与「4. 平台工具限额与历史数据留存」分组）：通过 `DEFAULT_RUNTIME_CONFIG` 与 `parseNumOrDefault` 对空值/缺省项自动兜底回填默认值，并做 `agentQueryMaxLimit >= agentQueryDefaultLimit`、`chatCompactTriggerMessages > chatCompactKeepRecent` 前端预校验；提供「恢复默认参数」按钮（`handleResetDefaultParams`）仅重置数值/配额/枚举模式并保护 `gatewayUrl`、`llmBaseUrl`、`llmModel` 与已填密钥；Tab 3（引擎与网关配置回滚）通过 `COMPARE_CONFIG_KEYS` 与 `RUNTIME_KEY_LABELS` 呈现全量 48 项中文对照与历史快照差异对比 |
 
 ## 3. 全局状态与并发安全协同（`stores/platform.ts` + `stores/workspaceTabs.ts`）
 
 - **全局工作区多页签与保活拦截（`App.vue` + `stores/workspaceTabs.ts`）**：`App.vue` 在 `.main-content` 内以 `<KeepAlive :max="12">` 缓存路由模块页签，并与 `v-for` + `v-show` 渲染的动态聊天窗口页签并列保活；切换或关闭含未保存草稿的编辑页签（含从运行记录执行 `loadRunIntoDryRun` 跨模板跳转）时强制二次确认拦截（取消则保持原页签与试运行预设不变），顶部页签切回 `skills`/`apis`/`runs` 自动恢复详情子视图，退出登录（`currentNav === 'login'`）自动调用 `tabsStore.resetAll()` 销毁全部动态聊天页签与内存密钥。
 - **本地工作区缓冲、异步竞态防护与响应式降载**：在 `TemplateWorkbenchView` 中修改正文、入参时更新 Pinia 内存状态并标记 `dirty`（`loadSettings` 对系统提示词同样启用 `preserveDirty` 脏草稿保护）；整包保存（`PUT /templates/{id}/draft`）与所有细粒度变更操作均携带当前 `draft.revision` 并在成功后写回新 `revision`。快速切换模板、修订、运行记录与设置时通过递增请求序号守卫丢弃过期异步响应，并对 `dryRunEvents`、`RunDetail` 大数组及聊天 `rawEvents` 使用 `markRaw` 消除深层 Proxy 开销。
 - **SSE 实时流解析（`api/platformApi.ts` + `utils/sse.ts`）**：基于 `fetch` + `ReadableStream` 的共享 `readSseStream` 解析标准 `event: event` / `event: final` / `event: error` 帧（兼容 `\r\n` 与尾帧 flush，异常或 `AbortController` 取消时强制 `reader.cancel()` 释放连接）。
+
+## 4. 前端统一术语（`frontend/src/constants/terms.ts`）
+
+页面与导航分组名称集中定义在 `NAV_LABELS` / `NAV_GROUP_LABELS`，`App.vue`（侧栏、⌘K）、`stores/workspaceTabs.ts`（页签）与 `ReleasesView.vue`（资源类型）统一引用。界面文案遵循"最通俗"原则：
+
+| 统一用词 | 废弃叫法 |
+|---|---|
+| 模板 | 核查模板、申告模板 |
+| 技能 | Skill 能力库、Skill 规程、核查规程、规程 |
+| API | API调用、API 调用契约、接口契约 |
+| 运行记录 / 运行编号 | 运行流水记录、运行流水号 |
+| 回归测试 / 回归用例 | 基准回归测试、基准回归用例 |
+| 版本发布 | 发布版本基线 |
+| 系统设置 | 引擎与系统设置 |
+| 模板编辑 | 模板编排、编排工作台 |
+| 线上版本 / 版本 | 生产基线、线上基线、快照 |
+| 调试结果 | 调试快照 |
+| 字段 / 证据来源 / 填写说明 | 取证字段、取证来源类型、取证规则说明 |
+| 已找到 / 未找到 | 命中 / 未命中 |
+| 默认值 / 缺失时处理 | 兜底 |
+| 立即生效 / 回滚 / 回退 | 热更新、热重载、热回滚、回切 |
+| 资源配置 / 运行与测试 / 发布与设置（导航分组） | 核心编排资产 / 数智执行稽核 / 基线发布治理 |
+| 浅色 / 深色（主题） | 极昼云台 / 省网大屏 |
+
+⌘K 检索关键词保留旧叫法（核查模板、申告模板、规程、能力库、运行流水、基准回归、基线、契约），老用户按旧名仍可检索。
+
+**模板名称与说明的编辑入口**：模板编辑左侧活动栏首项「信息」（`IdeLeftSection = 'info'`），右侧属性区直接编辑 `store.templateName` / `store.templateDescription`，随「保存草稿」一并提交（`draftPayload()` 携带 `name` / `description`，名称为空时拦截保存）；「新建模板」弹窗也可选填模板说明。
 
 ## 相关页面
 

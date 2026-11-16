@@ -16,7 +16,7 @@ import type {
 import { readSseStream } from '@/utils/sse'
 
 const API_BASE = `${import.meta.env.VITE_API_BASE_URL || 'api/v1'}/chat`
-/** 管理端登录 token 的 sessionStorage 键（同源模拟页兜底鉴权） */
+/** 管理端登录 token 的 sessionStorage 键（同源模拟页默认鉴权） */
 const ADMIN_TOKEN_KEY = 'agent-python-token'
 
 /** 后端错误：status 为 HTTP 状态码，code / message 来自后端统一错误格式，其余字段放在 details */

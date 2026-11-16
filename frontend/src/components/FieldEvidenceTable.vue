@@ -33,7 +33,7 @@ function isEmptyFoundList(f: TemplateField): boolean {
   return (f.runValue || '').trim() === '[]'
 }
 
-/** 列表字段命中行数 #Created By AiCoding(codex) */
+/** 列表字段匹配行数 #Created By AiCoding(codex) */
 function listRowCount(f: TemplateField): number {
   return Array.isArray(f.runRows) ? f.runRows.length : 0
 }

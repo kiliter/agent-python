@@ -41,7 +41,7 @@ export interface ToolDisplayMeta {
   badgeLabel: string
   failed: boolean
   errMsg: string
-  /** load_skill 的单个或批量 Skill 名称列表 */
+  /** load_skill 的单个或批量技能名称列表 */
   skillNames: string[]
   /** load_skill 返回的单个或批量标题文本 */
   skillTitleSummary: string
@@ -49,7 +49,7 @@ export interface ToolDisplayMeta {
   queryTarget: string
   /** query_result 的条件与排序描述 */
   queryConditionText: string
-  /** query_result 的命中行数描述 */
+  /** query_result 的匹配行数描述 */
   queryHitsText: string
   /** 平台工具入参可读摘要 */
   argsText: string
@@ -67,7 +67,7 @@ export const TIMELINE_OUTCOME_TYPES = new Set([
 ])
 
 export const TOOL_CN_LABELS: Record<string, string> = {
-  load_skill: '加载规程',
+  load_skill: '加载技能',
   call_api: '调用接口',
   query_result: '结果筛选',
   normalize_text: '文本清洗',
@@ -157,7 +157,7 @@ export function formatRoundBadge(g: TimelineRoundGroup<TimelineProcessEventLike>
   for (const e of g.items) {
     if (e.type === 'model_text') push('推理说明')
     else if (e.type === 'tool') {
-      if (e.tool === 'load_skill') push('加载规程')
+      if (e.tool === 'load_skill') push('加载技能')
       else if (e.tool === 'call_api') push('接口查询')
       else if (e.tool === 'query_result') push('记录筛选')
       else push('确定性工具计算')
@@ -202,7 +202,7 @@ export function formatQueryConditions(args: Record<string, unknown> | undefined)
   return (parts.length ? parts.join(' 并且 ') : '无筛选条件') + orderText
 }
 
-/** 格式化 query_result 的命中行摘要（兼容单结果行号数组与多结果 {resultId, row} 数组） */
+/** 格式化 query_result 的匹配行摘要（兼容单结果行号数组与多结果 {resultId, row} 数组） */
 export function formatQueryHits(result: unknown): string {
   const r = asRecord(result)
   if (r.error) return `失败：${asText(r.error)}`
@@ -218,7 +218,7 @@ export function formatQueryHits(result: unknown): string {
   })
   const more = rawRows.length > 8 ? '…' : ''
   return (
-    `命中 ${asText(r.total) || '0'} 条` +
+    `找到 ${asText(r.total) || '0'} 条` +
     (rowLabels.length ? `（行 ${rowLabels.join('、')}${more}）` : '')
   )
 }
@@ -292,7 +292,7 @@ export function describeToolEvent(e: TimelineProcessEventLike): ToolDisplayMeta 
       resultText = queryHitsText
       compactSummary = failed
         ? `${queryTarget} 失败：${errMsg}`
-        : `${queryTarget} [${truncateText(queryConditionText, 42)}] → 命中 ${asText(r.total ?? 0)} 条`
+        : `${queryTarget} [${truncateText(queryConditionText, 42)}] → 找到 ${asText(r.total ?? 0)} 条`
       break
     }
     case 'normalize_text': {
@@ -308,7 +308,7 @@ export function describeToolEvent(e: TimelineProcessEventLike): ToolDisplayMeta 
       resultText = failed ? `失败：${errMsg}` : r.contains ? 'true（包含）' : 'false（不包含）'
       compactSummary = failed
         ? `失败：${errMsg}`
-        : `查找 “${truncateText(asText(a.target), 26)}” → ${r.contains ? '命中' : '未命中'}`
+        : `查找 “${truncateText(asText(a.target), 26)}” → ${r.contains ? '找到' : '未找到'}`
       break
     }
     case 'date_range': {
@@ -356,7 +356,7 @@ export function describeToolEvent(e: TimelineProcessEventLike): ToolDisplayMeta 
         a.endDays !== undefined && a.endDays !== null && a.endDays !== a.days
           ? ` ~ ${asText(a.endDays)}`
           : ''
-      argsText = `基准 ${asText(a.date)}，偏移 ${asText(a.days ?? 0)}${endPart} 天`
+      argsText = `基准日期 ${asText(a.date)}，偏移 ${asText(a.days ?? 0)}${endPart} 天`
       resultText = failed ? `失败：${errMsg}` : `${asText(r.start)} ~ ${asText(r.end)}`
       compactSummary = failed
         ? `${asText(a.date)} 失败：${errMsg}`
@@ -393,8 +393,8 @@ export function describeToolEvent(e: TimelineProcessEventLike): ToolDisplayMeta 
       resultText = failed
         ? `失败：${errMsg}`
         : cnt > 0
-          ? `命中 ${cnt} 项（首项：“${truncateText(asText(r.first), 30)}”）`
-          : '未命中（0 项）'
+          ? `找到 ${cnt} 项（首项：“${truncateText(asText(r.first), 30)}”）`
+          : '未找到（0 项）'
       compactSummary = resultText
       break
     }

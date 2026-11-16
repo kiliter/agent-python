@@ -256,7 +256,7 @@ async function onCopyRunId() {
         <div v-if="traceMode === 'steps'" class="steps-list">
           <div v-if="!message.steps.length" class="steps-empty">
             <Loader2 v-if="running" :size="14" class="spin tb-spinner" />
-            <span>{{ running ? '正在初始化工作区并加载业务规程…' : '暂无步骤流水' }}</span>
+            <span>{{ running ? '正在初始化工作区并加载业务技能…' : '暂无步骤' }}</span>
           </div>
 
           <div

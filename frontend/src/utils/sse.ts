@@ -4,7 +4,7 @@
  * - 兼容 \r\n 与 \n 换行、id:/event:/data: 多行拼接及流尾残余帧冲刷；
  * - 任何非自然流结束（onFrame 返回 true 提前终止、onFrame 抛错或 AbortSignal 取消）一律主动调用 reader.cancel() 释放底层连接；
  * - AbortSignal 触发时主动取消挂起的 reader.read() 并抛出标准 AbortError，避免调用方误判为异常断流重连；
- * - 提供带异常兜底的 JSON 解析辅助函数，避免单帧损坏导致整条流崩溃。
+ * - 提供带异常默认的 JSON 解析辅助函数，避免单帧损坏导致整条流崩溃。
  */
 
 export interface SseFrame {

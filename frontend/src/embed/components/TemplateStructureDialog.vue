@@ -612,7 +612,7 @@ function onUse() {
                       <th>字段名</th>
                       <th>类型</th>
                       <th>枚举值 / 子列</th>
-                      <th>核查取证规则</th>
+                      <th>核查填写规则</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -724,7 +724,7 @@ function onUse() {
         </div>
       </footer>
 
-      <!-- 舞台弹窗内零依赖悬浮提示 -->
+      <!-- 窗口弹窗内零依赖悬浮提示 -->
       <div v-if="tip.visible" class="eb-float-tip" :style="tip.style">
         <div v-if="tip.title" class="eb-float-tip-title">{{ tip.title }}</div>
         <div>{{ tip.text }}</div>

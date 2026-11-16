@@ -1,7 +1,7 @@
 <!--
   管理端右侧全局多页签导航栏组件
   基于成熟开源组件 Element Plus <el-tabs type="card"> + SortableJS 拖拽重排 + <el-dropdown> 批量操作菜单实现。
-  同时承载固定路由首页签（核查模板）、可关闭业务模块页签与动态智能填报聊天窗口页签。
+  同时承载固定路由首页签（模板）、可关闭业务模块页签与动态智能填报聊天窗口页签。
   #Created By AiCoding(codex)
 -->
 <script setup lang="ts">
@@ -25,9 +25,9 @@ function resolveRouteTabTitle(tab: RouteWorkspaceTab): string {
   if (tab.navKey === 'workbench') {
     const tpl = store.currentTemplate
     if (tpl && tpl.id) {
-      return `编排 · #${tpl.id} ${tpl.name}`
+      return `编辑 · #${tpl.id} ${tpl.name}`
     }
-    return '模板编排'
+    return '模板编辑'
   }
   return tab.title
 }

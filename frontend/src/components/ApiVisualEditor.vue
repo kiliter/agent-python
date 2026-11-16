@@ -1,7 +1,7 @@
 <!--
   #Created By AiCoding(codex)
-  API 调用可视化契约编排器（类 Apifox / Postman 结构化编排 + XML/JSON 双协议网关信封预览 + YAML 实时双向无损同步）
-  全部数据实时双向绑定 YAML 契约源码与后端 /api/v1/apis 校验/试调用能力，零写死演示数据
+  API 可视化编辑器（类 Apifox / Postman 结构化编辑 + XML/JSON 双协议网关信封预览 + YAML 实时双向无损同步）
+  全部数据实时双向绑定 YAML 源码与后端 /api/v1/apis 校验/试调用能力，零写死演示数据
 -->
 <script setup lang="ts">
 import { ref, reactive, computed, watch } from 'vue'
@@ -210,7 +210,7 @@ const sampleExtractorOpen = ref(false)
 const sampleRawInput = ref('')
 const sampleParseHint = ref<{ ok: boolean; msg: string } | null>(null)
 
-// ==================== 结构化契约状态（与 YAML 实时双向同步） ====================
+// ==================== 结构化状态（与 YAML 实时双向同步） ====================
 const form = reactive({
   name: '',
   title: '',
@@ -220,7 +220,7 @@ const form = reactive({
   timeoutMs: 10000,
   maxAttempts: 1,
   idempotent: true,
-  // 入参契约
+  // 入参
   inputAdditionalProperties: false as boolean | undefined,
   inputExtra: {} as Record<string, unknown>,
   params: [] as InputParamRow[],
@@ -372,7 +372,7 @@ function parseYamlIntoForm(rawYaml: string) {
   }
 
   if (parsed !== null && parsed !== undefined && !isPlainObject(parsed)) {
-    yamlParseError.value = '接口契约 YAML 顶层必须是键值映射对象（Mapping）'
+    yamlParseError.value = 'API YAML 顶层必须是键值映射对象（Mapping）'
     return
   }
 
@@ -735,7 +735,7 @@ watch(
   { immediate: true },
 )
 
-// ==================== 前端即时契约校验与占位符一致性检查 ====================
+// ==================== 前端即时配置校验与占位符一致性检查 ====================
 const declaredParamNames = computed(() =>
   form.params.map(p => p.name.trim()).filter(Boolean),
 )
@@ -1214,7 +1214,7 @@ function removeColumnMapRow(idx: number) {
   emitSerializedYaml()
 }
 
-/** 暴露给父组件及内部按钮：从最近一次试调用结果提取记录列并写入契约列映射 */
+/** 暴露给父组件及内部按钮：从最近一次试调用结果提取记录列并写入列映射 */
 function syncColumnsFromTestResult(): number {
   const res = props.testResult
   if (!res) return 0
@@ -1739,7 +1739,7 @@ function extractColumnsFromSample() {
   }
 }
 
-// ==================== 深度后端契约校验 ====================
+// ==================== 深度后端配置校验 ====================
 let validateReqSeq = 0
 
 watch(
@@ -1773,7 +1773,7 @@ async function handleRunValidate() {
     if (seq !== validateReqSeq || props.apiName !== targetName) return
     remoteValidation.value = res
     if (res.ok && localErrors.value.length === 0) {
-      store.showToast('契约 Schema 与网关组装预览校验通过', 'success')
+      store.showToast('API 配置与网关报文校验通过', 'success')
     }
   } catch {
     // 后端尚未热载新路由时静默回退至前端本地即时校验
@@ -1804,14 +1804,14 @@ defineExpose({
 
 <template>
   <div class="api-visual-editor" :class="{ 'is-split': props.mode === 'split' }" @keydown="handleRootKeydown">
-    <!-- 左侧（或全宽）类 Apifox 可视化编排器主列 -->
+    <!-- 左侧（或全宽）类 Apifox 可视化编辑器主列 -->
     <div class="ave-visual-col">
       <!-- YAML 语法受损保护横幅（绝不自动覆盖损坏原文本） -->
       <div v-if="yamlParseError" class="ave-yaml-err-banner">
         <div class="ave-err-main">
           <AlertTriangle :size="15" style="flex-shrink: 0" />
           <div>
-            <div style="font-weight: 600">当前 YAML 源码存在语法错误，可视化编排已进入保护锁定态（不会覆盖您的原文本）</div>
+            <div style="font-weight: 600">当前 YAML 源码存在语法错误，可视化编辑已进入保护锁定态（不会覆盖您的原文本）</div>
             <div class="mono ave-err-detail">{{ yamlParseError }}</div>
           </div>
         </div>
@@ -1874,24 +1874,24 @@ defineExpose({
         </div>
 
         <div class="ave-endpoint-actions">
-          <!-- 契约校验徽标 + 详情浮层 -->
+          <!-- 配置校验徽标 + 详情浮层 -->
           <div class="ave-pop-anchor">
             <button
               type="button"
               class="ave-status-badge"
               :class="combinedErrors.length === 0 ? 'is-ok' : 'is-err'"
-              title="点击执行契约完整性与网关组包深度校验"
+              title="点击校验 API 配置与网关报文"
               @click="handleRunValidate"
             >
               <RefreshCw v-if="remoteValidating" :size="12" class="spin-icon" />
               <CheckCircle2 v-else-if="combinedErrors.length === 0" :size="12" />
               <AlertTriangle v-else :size="12" />
-              <span>{{ combinedErrors.length === 0 ? '契约合规' : `${combinedErrors.length} 项待修复` }}</span>
+              <span>{{ combinedErrors.length === 0 ? '校验通过' : `${combinedErrors.length} 项待修复` }}</span>
             </button>
 
             <div v-if="validationPopoverOpen" class="ave-val-popover" @mousedown.stop>
               <div class="ave-pop-header">
-                <span>API 契约完整性校验</span>
+                <span>API 配置完整性校验</span>
                 <button type="button" class="ave-link-btn" @click="validationPopoverOpen = false">关闭</button>
               </div>
               <div class="ave-pop-body">
@@ -1921,7 +1921,7 @@ defineExpose({
         <div class="ave-undef-left">
           <AlertTriangle :size="13" style="flex-shrink: 0" />
           <span>
-            请求模板中引用了尚未在「动态入参契约」声明的变量：
+            请求模板中引用了尚未在「动态入参」声明的变量：
             <code v-for="u in undeclaredPlaceholders" :key="u" class="mono ave-undef-code">{{ wrapPlaceholder(u) }}</code>
           </span>
         </div>
@@ -1931,7 +1931,7 @@ defineExpose({
         </button>
       </div>
 
-      <!-- 2. 四页签结构化编排导航条（强制单行 nowrap） -->
+      <!-- 2. 四页签结构化编辑导航条（强制单行 nowrap） -->
       <div class="ave-subtabs-bar" role="tablist">
         <button
           type="button"
@@ -1940,7 +1940,7 @@ defineExpose({
           :class="{ active: activeTab === 'input' }"
           @click="activeTab = 'input'"
         >
-          <span>① 动态入参契约</span>
+          <span>① 动态入参</span>
           <span class="ave-count-pill mono">{{ form.params.length }}</span>
         </button>
         <button
@@ -1975,9 +1975,9 @@ defineExpose({
         </button>
       </div>
 
-      <!-- 3. 页签内容主滚动舱 -->
+      <!-- 3. 页签内容主滚动区 -->
       <div class="ave-tab-scroll" :class="{ 'is-disabled-pane': !!yamlParseError }">
-        <!-- ==================== Tab ① 动态入参契约 (input) ==================== -->
+        <!-- ==================== Tab ① 动态入参 (input) ==================== -->
         <div v-if="activeTab === 'input'" class="ave-section-stack">
           <div class="ave-panel-card">
             <div class="ave-panel-head">
@@ -2274,7 +2274,7 @@ defineExpose({
             <div class="ave-panel-card">
               <div class="ave-panel-head">
                 <div class="ave-panel-title-wrap">
-                  <span class="ave-panel-title">业务请求体编排 (request.content)</span>
+                  <span class="ave-panel-title">业务请求体 (request.content)</span>
                   <span class="ave-panel-sub">支持点分嵌套子路径（如 <code class="mono">query.startTime</code>）与 JSON 模板双模式无缝切换</span>
                 </div>
                 <div class="ave-head-right">
@@ -2484,7 +2484,7 @@ defineExpose({
                 />
               </div>
               <div>
-                <label class="ave-lbl">路径缺失兜底策略 (missingAs)</label>
+                <label class="ave-lbl">路径缺失时处理 (missingAs)</label>
                 <select v-model="form.successMissingAs" class="ave-select" @change="emitSerializedYaml">
                   <option value="success">视为成功 (success)</option>
                   <option value="failure">视为失败 (failure)</option>
@@ -2498,7 +2498,7 @@ defineExpose({
             <div class="ave-panel-head">
               <div class="ave-panel-title-wrap">
                 <span class="ave-panel-title">无业务数据判定规则 (response.noData)</span>
-                <span class="ave-panel-sub">命中任一规则时视为调用成功且返回 0 条业务记录（避免误判为接口报错）</span>
+                <span class="ave-panel-sub">满足任一规则时视为调用成功且返回 0 条业务记录（避免误判为接口报错）</span>
               </div>
               <button type="button" class="ave-btn ave-btn-xs" @click="addNoDataRule">
                 <Plus :size="12" />
@@ -2557,7 +2557,7 @@ defineExpose({
             <div class="ave-panel-head">
               <div class="ave-panel-title-wrap">
                 <span class="ave-panel-title">结构化响应抽取与字段映射 (response.records)</span>
-                <span class="ave-panel-sub">支持单对象、列表数组、单值标量与无业务数据体响应，自动映射为结构化取证结果</span>
+                <span class="ave-panel-sub">支持单对象、列表数组、单值标量与无业务数据体响应，自动映射为结构化结果</span>
               </div>
               <div class="ave-head-right">
                 <button
@@ -2591,7 +2591,7 @@ defineExpose({
               </div>
             </div>
 
-            <!-- 内联响应样例智能识别工具舱 -->
+            <!-- 内联响应样例智能识别工具区 -->
             <div v-if="sampleExtractorOpen" class="ave-sample-drawer">
               <div class="ave-sample-top">
                 <span style="font-weight: 600">粘贴原始 XML 或 JSON 响应报文，自动识别响应结构模式、业务数据节点路径与字段 Key：</span>
@@ -2656,9 +2656,9 @@ defineExpose({
 
             <!-- 无业务数据体 (mode: none) 专属说明面板 -->
             <div v-if="form.recordsMode === 'none'" class="ave-mode-callout is-none">
-              <div class="ave-callout-title">当前契约声明为「无业务数据体 (mode: none)」</div>
+              <div class="ave-callout-title">当前 API 声明为「无业务数据体 (mode: none)」</div>
               <div class="ave-callout-desc">
-                网关调用仅依据上方 <code class="mono">response.success</code> 与 <code class="mono">response.noData</code> 判定业务是否成功，不提取二维记录行；核查智能体调用成功后将收到「接口调用成功（该契约声明无业务记录体）」的明确回执，不会误判为“未查到记录”。
+                网关调用仅依据上方 <code class="mono">response.success</code> 与 <code class="mono">response.noData</code> 判定业务是否成功，不提取二维记录行；核查智能体调用成功后将收到「接口调用成功（该配置声明无业务记录体）」的明确回执，不会误判为“未查到记录”。
               </div>
             </div>
 
@@ -2666,7 +2666,7 @@ defineExpose({
               <!-- 单值标量 (mode: scalar) 字段约定提示 -->
               <div v-if="form.recordsMode === 'scalar'" class="ave-mode-callout is-scalar">
                 <span>
-                  标量模式下，匹配节点的文本、数值或布尔值（完整保留 <code class="mono">false</code> / <code class="mono">0</code>）统一封装至标准字段列 <code class="mono">value</code> 中供智能体读取与取证引用。
+                  标量模式下，匹配节点的文本、数值或布尔值（完整保留 <code class="mono">false</code> / <code class="mono">0</code>）统一封装至标准字段列 <code class="mono">value</code> 中供智能体读取与取数引用。
                 </span>
                 <button
                   v-if="!form.columns.some(c => c.key.trim() === 'value')"
@@ -2788,7 +2788,7 @@ defineExpose({
             <div class="ave-policy-body">
               <div class="ave-form-grid-3">
                 <div>
-                  <label class="ave-lbl">接口唯一契约标识 (name)</label>
+                  <label class="ave-lbl">API 唯一标识 (name)</label>
                   <input :value="form.name || props.apiName" type="text" class="ave-input mono" readonly />
                 </div>
                 <div>
@@ -2849,12 +2849,12 @@ defineExpose({
               </div>
 
               <div>
-                <label class="ave-lbl">接口业务用途与取证边界说明 (description)</label>
+                <label class="ave-lbl">API 用途说明 (description)</label>
                 <textarea
                   v-model="form.description"
                   class="ave-textarea"
                   rows="4"
-                  placeholder="清晰描述该 API 查询的数据范围、适用场景与注意事项（将注入 Skill 上下文辅助智能体准确传参）"
+                  placeholder="清晰描述该 API 查询的数据范围、适用场景与注意事项（将注入技能上下文辅助智能体准确传参）"
                   @input="emitSerializedYaml"
                 ></textarea>
               </div>
@@ -2869,12 +2869,12 @@ defineExpose({
       <div class="ave-yaml-head">
         <div class="ave-yaml-title">
           <ShieldCheck :size="13" style="color: var(--primary)" />
-          <span>YAML 契约源码实时双向同步</span>
+          <span>YAML 源码实时双向同步</span>
         </div>
         <button
           type="button"
           class="ave-btn ave-btn-xs"
-          @click="store.copyText(props.yamlText, '已复制接口契约 YAML')"
+          @click="store.copyText(props.yamlText, '已复制 API YAML')"
         >
           <Copy :size="12" />
           <span>复制 YAML</span>
@@ -3396,7 +3396,7 @@ defineExpose({
   gap: 6px;
 }
 
-/* ==================== Tab ② 请求编排 + 实时报文预览双栏/自适应布局 ==================== */
+/* ==================== Tab ② 请求编辑 + 实时报文预览双栏/自适应布局 ==================== */
 .ave-request-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 350px;
@@ -3729,7 +3729,7 @@ defineExpose({
   color: var(--text-secondary);
 }
 
-/* ==================== 表格编排样式 ==================== */
+/* ==================== 表格编辑样式 ==================== */
 .ave-table-wrap {
   width: 100%;
   overflow-x: auto;
@@ -3997,7 +3997,7 @@ defineExpose({
   font-size: 11.5px;
 }
 
-/* 响应样例识别内联工具舱 */
+/* 响应样例识别内联工具区 */
 .ave-sample-drawer {
   padding: 12px 14px;
   background: var(--bg-subtle);

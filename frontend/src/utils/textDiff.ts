@@ -1,6 +1,6 @@
 // #Created By AiCoding(codex)
 /**
- * 文本行级差异对比构建工具（供模板正文、Skill 规程、API YAML 与系统提示词回滚视图复用）：
+ * 文本行级差异对比构建工具（供模板正文、技能、API YAML 与系统提示词回滚视图复用）：
  * - buildDiffRows：带上下文折叠（默认保留首尾 3 行，折叠超长无变更段落）；
  * - buildFullDiffRows：保留完整双列行号与上下文行，用于全量逐行审阅。
  */

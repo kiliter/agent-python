@@ -1,6 +1,6 @@
 <!--
   #Created By AiCoding(codex)
-  ChatGPT Web 底部悬浮大圆角输入舱（max-width: 840px）：
+  ChatGPT Web 底部悬浮大圆角输入框（max-width: 840px）：
   - 静止态 #F4F4F5 大圆角胶囊（border-radius: 24px），聚焦切换 #FFFFFF + 细腻描边弥散阴影；
   - 自适应高度 <textarea>（Enter 发送、Shift+Enter 换行，严格处理中文输入法 isComposing 防误发）；
   - 底栏左展示动态上下文轻提示与快捷入口（如改写提示、「换模板」），右侧深色圆形发送按钮 ↑。
@@ -31,7 +31,7 @@ const effectivePlaceholder = computed(() => {
   if (props.hasReport) {
     return '直接输入改写要求（如：精简为一段话、把语气改温和一点），或发送指令重新筛选模板…'
   }
-  return '描述工单核查诉求、指定模板编号（如 #101），或让助手推荐核查模板…'
+  return '描述工单核查诉求、指定模板编号（如 #101），或让助手推荐模板…'
 })
 
 function adjustHeight() {
@@ -106,7 +106,7 @@ defineExpose({ prefill })
           type="button"
           class="chip-btn"
           :disabled="disabled"
-          title="打开全部核查模板列表"
+          title="打开全部模板列表"
           @click="emit('switchTemplate')"
         >
           <LayoutGrid :size="11" />

@@ -204,7 +204,7 @@ function sanitizeNode(node: Node, doc: Document): void {
     return
   }
 
-  // 先递归净化全部子节点（静态快照遍历，避免移除/展开节点导致跳项）
+  // 先递归净化全部子节点（静态版本遍历，避免移除/展开节点导致跳项）
   const children = Array.from(el.childNodes)
   for (const child of children) {
     sanitizeNode(child, doc)

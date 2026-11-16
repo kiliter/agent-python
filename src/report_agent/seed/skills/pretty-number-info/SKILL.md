@@ -6,7 +6,7 @@ apis:
   - cc_pretty_num_info_query
 ---
 
-<!-- #Created By AiCoding(codex) 迁移自 Java skills/pretty-number-info，二期修复号码精确匹配、空 grade 判非靓号及多档活动名称拼接 -->
+<!-- #Created By AiCoding(codex) -->
 
 # 靓号信息
 

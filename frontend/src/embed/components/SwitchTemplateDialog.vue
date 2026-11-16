@@ -220,7 +220,7 @@ function onUse(it: TemplateOption) {
       <div class="st-body" @scroll.passive="hideTip">
         <div v-if="loading && !allItems.length" class="st-empty">
           <Loader2 :size="20" class="spin accent-ic" />
-          <span>正在加载在线核查模板列表…</span>
+          <span>正在加载在线模板列表…</span>
         </div>
 
         <div v-else-if="!filteredItems.length" class="st-empty">
@@ -338,7 +338,7 @@ function onUse(it: TemplateOption) {
         </table>
       </div>
 
-      <!-- 舞台弹窗内零依赖悬浮提示 -->
+      <!-- 窗口弹窗内零依赖悬浮提示 -->
       <div v-if="tip.visible" class="eb-float-tip" :style="tip.style">
         <div v-if="tip.title" class="eb-float-tip-title">{{ tip.title }}</div>
         <div>{{ tip.text }}</div>

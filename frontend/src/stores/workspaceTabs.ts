@@ -7,6 +7,7 @@ import { defineStore } from 'pinia'
 import { computed, reactive, ref, watch } from 'vue'
 import { usePlatformStore } from '@/stores/platform'
 import type { NavKey } from '@/types/platform'
+import { NAV_LABELS } from '@/constants/terms'
 
 export type RouteTabNav = Exclude<NavKey, 'login'>
 
@@ -73,15 +74,15 @@ export interface ConfirmedReportRecord {
 }
 
 const ROUTE_TAB_META: Record<RouteTabNav, { title: string; icon: string; closable: boolean }> = {
-  templates: { title: '核查模板', icon: 'template', closable: false },
-  workbench: { title: '模板编排', icon: 'template', closable: true },
-  skills: { title: 'Skill 能力库', icon: 'skill', closable: true },
-  apis: { title: 'API调用', icon: 'api', closable: true },
-  runs: { title: '运行流水记录', icon: 'run', closable: true },
-  regression: { title: '基准回归测试', icon: 'regression', closable: true },
-  releases: { title: '发布版本基线', icon: 'release', closable: true },
-  settings: { title: '引擎与系统设置', icon: 'settings', closable: true },
-  chatSim: { title: '聊天窗口模拟', icon: 'play', closable: true },
+  templates: { title: NAV_LABELS.templates, icon: 'template', closable: false },
+  workbench: { title: NAV_LABELS.workbench, icon: 'template', closable: true },
+  skills: { title: NAV_LABELS.skills, icon: 'skill', closable: true },
+  apis: { title: NAV_LABELS.apis, icon: 'api', closable: true },
+  runs: { title: NAV_LABELS.runs, icon: 'run', closable: true },
+  regression: { title: NAV_LABELS.regression, icon: 'regression', closable: true },
+  releases: { title: NAV_LABELS.releases, icon: 'release', closable: true },
+  settings: { title: NAV_LABELS.settings, icon: 'settings', closable: true },
+  chatSim: { title: NAV_LABELS.chatSim, icon: 'play', closable: true },
 }
 
 function createHomeTab(): RouteWorkspaceTab {
@@ -195,13 +196,13 @@ export const useWorkspaceTabsStore = defineStore('workspace-tabs', () => {
   function getRouteDirtyLabel(navKey: RouteTabNav): string | null {
     const platform = usePlatformStore()
     if (navKey === 'workbench' && platform.hasUnsavedChanges) {
-      return '当前核查模板草稿有未保存的修改'
+      return '当前模板草稿有未保存的修改'
     }
     if (navKey === 'skills' && platform.skillsSubView === 'detail' && platform.skillDirty) {
-      return '当前 Skill 规程有未保存的修改'
+      return '当前技能有未保存的修改'
     }
     if (navKey === 'apis' && platform.apisSubView === 'detail' && platform.apiDirty) {
-      return '当前 API 调用契约有未保存的修改'
+      return '当前 API 有未保存的修改'
     }
     if (navKey === 'settings') {
       if (
@@ -221,7 +222,7 @@ export const useWorkspaceTabsStore = defineStore('workspace-tabs', () => {
     return getRouteDirtyLabel(navKey) !== null
   }
 
-  /** 放弃指定路由页签的未保存修改并恢复干净基线 */
+  /** 放弃指定路由页签的未保存修改并恢复干净版本 */
   function discardRouteDirtyState(navKey: RouteTabNav) {
     const platform = usePlatformStore()
     if (navKey === 'workbench') {
@@ -289,7 +290,7 @@ export const useWorkspaceTabsStore = defineStore('workspace-tabs', () => {
   /**
    * 顶部页签切回目标路由模块后恢复其详情子视图：
    * 当此前经左侧导航 / ⌘K 放弃过脏草稿（clearCurrentDirtyState 仅清零脏标记而未重载详情）时，
-   * 在非脏状态下主动重新拉取干净基线，避免 <KeepAlive> 残留已放弃的旧文本。
+   * 在非脏状态下主动重新拉取干净版本，避免 <KeepAlive> 残留已放弃的旧文本。
    */
   function restoreSubViewAfterNavigate(navKey: RouteTabNav, savedView: 'list' | 'detail') {
     if (savedView !== 'detail') return

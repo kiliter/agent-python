@@ -32,7 +32,7 @@ const EVIDENCE_TYPE_LABELS: Record<string, string> = {
   derive: '推导',
 }
 
-/** 获取证据类型中文标签 */
+/** 获取数据类型中文标签 */
 export function evidenceTypeLabel(ev?: string): string {
   if (!ev) return ''
   return EVIDENCE_TYPE_LABELS[ev] || ev
@@ -160,7 +160,7 @@ function parseJinjaAst(tokens: RawToken[]): AstNode[] | null {
           hasElse: finished.hasElse,
         })
       } else {
-        // 含 for / set / macro 等复杂控制块时交由兜底匹配处理
+        // 含 for / set / macro 等复杂控制块时交由默认匹配处理
         return null
       }
     }
@@ -399,7 +399,7 @@ function alignReportWithTemplate(
       return null
     }
 
-    // if / elif / else 节点：先按条件求值选出优先分支，再保留回溯兜底
+    // if / elif / else 节点：先按条件求值选出优先分支，再保留回溯默认
     const allBranches: AstNode[][] = node.branches.map(b => b.body)
     if (!node.hasElse) {
       allBranches.push([])
@@ -447,7 +447,7 @@ function alignReportWithTemplate(
   return matched ? mergePlainSegments(matched) : null
 }
 
-// ============================================================ 兜底分段匹配（无模板源码时）
+// ============================================================ 默认分段匹配（无模板源码时）
 
 function fallbackSegmentize(
   reportText: string,

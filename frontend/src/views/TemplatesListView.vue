@@ -60,12 +60,12 @@ const statusCounts = computed(() => {
   }
 })
 
-/** 卡片 1：在网生效核查模板 + 6 柱状态分布微柱图 */
+/** 卡片 1：已上线模板 + 6 柱状态分布微柱图 */
 const templateStatusBars = computed(() => {
   const c = statusCounts.value
   const rawBars = [
     { key: 'all', label: '在册总数', value: c.ALL, color: 'var(--primary-border)' },
-    { key: 'online', label: '在网生效', value: c.ONLINE, color: 'var(--primary)' },
+    { key: 'online', label: '已上线', value: c.ONLINE, color: 'var(--primary)' },
     { key: 'pub', label: '纯线上稳定', value: c.PUBLISHED, color: 'var(--success)' },
     { key: 'pubDraft', label: '线上含草稿', value: c.PUBLISHED_DRAFT, color: 'var(--warning)' },
     { key: 'draft', label: '待发草稿', value: c.DRAFT, color: 'var(--text-secondary)' },
@@ -132,11 +132,11 @@ const accuracyMetrics = computed(() => {
 
   let subText = '暂无历史核验样本'
   if (totalSum > 0 && tplAvg !== null) {
-    subText = `字段命中 ${foundSum}/${totalSum} · 覆盖 ${tplValidCount} 个生效模板`
+    subText = `字段找到 ${foundSum}/${totalSum} · 覆盖 ${tplValidCount} 个生效模板`
   } else if (totalSum > 0) {
-    subText = `累计核验命中 ${foundSum} / ${totalSum} 项字段`
+    subText = `累计找到 ${foundSum} / ${totalSum} 项字段`
   } else if (tplAvg !== null) {
-    subText = `基于 ${tplValidCount} 个在网运行模板加权统计`
+    subText = `基于 ${tplValidCount} 个已上线模板加权统计`
   }
 
   return {
@@ -151,7 +151,7 @@ const accuracyMetrics = computed(() => {
   }
 })
 
-/** 卡片 3：近期核查运行流水 + 平均耗时 + 折线趋势微图 */
+/** 卡片 3：近期核查运行记录 + 平均耗时 + 折线趋势微图 */
 const runMetrics = computed(() => {
   const list = store.runs
   const total = list.length
@@ -169,7 +169,7 @@ const runMetrics = computed(() => {
   const avgSec = durations.length > 0 ? durations.reduce((a, b) => a + b, 0) / durations.length : null
   const avgLabel = avgSec !== null ? `${avgSec.toFixed(1)}s` : '—'
 
-  // 取最近最多 8 笔流水按时间正序生成真实折线坐标
+  // 取最近最多 8 条运行记录按时间正序生成真实折线坐标
   const recent = list.slice(0, 8).reverse()
   if (recent.length === 0) {
     return {
@@ -219,7 +219,7 @@ const runMetrics = computed(() => {
   }
 })
 
-/** 卡片 4：关联支撑能力底座（已绑定/在库 Skill + CRM 接口 + 线上基线） */
+/** 卡片 4：关联支撑能力底座（已绑定/在库技能 + CRM 接口 + 线上版本） */
 const capabilityMetrics = computed(() => {
   const boundSkillSet = new Set<string>()
   let totalCases = 0
@@ -338,12 +338,12 @@ async function handleRefresh() {
 
 <template>
   <div class="page-fill catalog-stage">
-    <!-- 4 卡政企数智运营指标行（全部源自 store 实时业务数据） -->
-    <section class="kpi-row" aria-label="核查模板数智运营指标">
-      <!-- 卡片 1：在网生效核查模板 -->
+    <!-- 4 卡运营指标行（全部源自 store 实时业务数据） -->
+    <section class="kpi-row" aria-label="模板运营指标">
+      <!-- 卡片 1：已上线模板 -->
       <div class="kpi-card">
         <div class="kpi-meta">
-          <span class="kpi-label">在网生效核查模板</span>
+          <span class="kpi-label">已上线模板</span>
           <div class="kpi-value-line">
             <span class="kpi-big">{{ statusCounts.ONLINE }}</span>
             <span class="kpi-unit">/ 共 {{ statusCounts.ALL }} 个模板</span>
@@ -406,10 +406,10 @@ async function handleRefresh() {
         </div>
       </div>
 
-      <!-- 卡片 3：近期核查运行流水 -->
+      <!-- 卡片 3：近期核查运行记录 -->
       <div class="kpi-card">
         <div class="kpi-meta">
-          <span class="kpi-label">近期核查运行流水</span>
+          <span class="kpi-label">近期核查运行记录</span>
           <div class="kpi-value-line">
             <span class="kpi-big">{{ runMetrics.total }}</span>
             <span class="kpi-unit">笔</span>
@@ -419,7 +419,7 @@ async function handleRefresh() {
             成功 {{ runMetrics.successCount }} 笔 · 部分成稿 {{ runMetrics.partialCount }} 笔
           </span>
         </div>
-        <div class="kpi-viz" title="近期运行流水趋势">
+        <div class="kpi-viz" title="近期运行记录趋势">
           <svg width="76" height="34" viewBox="0 0 76 34" fill="none" aria-hidden="true">
             <line x1="2" y1="29" x2="74" y2="29" stroke="var(--border-light)" stroke-width="1" />
             <polyline
@@ -453,10 +453,10 @@ async function handleRefresh() {
             <span class="kpi-unit">接口</span>
           </div>
           <span class="kpi-sub mono">
-            生产基线 {{ capabilityMetrics.liveRev }} · 回归用例 {{ capabilityMetrics.totalCases }} 个
+            线上版本 {{ capabilityMetrics.liveRev }} · 回归用例 {{ capabilityMetrics.totalCases }} 个
           </span>
         </div>
-        <div class="kpi-viz" title="模板 / Skill / 接口生效装配覆盖度">
+        <div class="kpi-viz" title="模板 / 技能 / 接口使用覆盖度">
           <svg width="52" height="34" viewBox="0 0 52 34" fill="none" aria-hidden="true">
             <rect x="4" y="5" width="44" height="5" rx="1.5" fill="var(--bg-muted)" />
             <rect x="4" y="5" :width="capabilityMetrics.tplWidth" height="5" rx="1.5" fill="var(--primary)" />
@@ -469,11 +469,11 @@ async function handleRefresh() {
       </div>
     </section>
 
-    <!-- 主台账卡片（工具栏 + 表头吸顶自适应滚动表格 + 固定底栏） -->
+    <!-- 主列表卡片（工具栏 + 表头吸顶自适应滚动表格 + 固定底栏） -->
     <div class="card card-fill ledger-card">
       <div class="ledger-toolbar">
         <div class="toolbar-left">
-          <div class="seg-filter-group" role="tablist" aria-label="核查模板状态筛选">
+          <div class="seg-filter-group" role="tablist" aria-label="模板状态筛选">
             <button
               v-for="seg in statusSegments"
               :key="seg.value"
@@ -514,10 +514,10 @@ async function handleRefresh() {
           <thead>
             <tr>
               <th style="width: 84px; white-space: nowrap">模板编号</th>
-              <th style="min-width: 165px">核查模板名称</th>
+              <th style="min-width: 165px">模板名称</th>
               <th style="width: 148px; white-space: nowrap">发布状态</th>
-              <th style="min-width: 130px">关联 Skill 规程</th>
-              <th style="width: 78px; white-space: nowrap">基准用例</th>
+              <th style="min-width: 130px">关联技能</th>
+              <th style="width: 78px; white-space: nowrap">回归用例</th>
               <th style="width: 196px; white-space: nowrap">近 7 日核验准确率 / 运行量</th>
               <th style="width: 154px; white-space: nowrap">最近发布信息</th>
               <th class="action-col">操作</th>
@@ -534,7 +534,7 @@ async function handleRefresh() {
                     <line x1="9" y1="17" x2="13" y2="17" />
                   </svg>
                   <div>
-                    核查模板台账暂无记录，点击右上角创建首个核查模板 ·
+                    模板列表暂无记录，点击右上角创建首个模板 ·
                     <button class="btn-link" @click="store.openModal('new-template')">新建模板</button>
                   </div>
                 </div>
@@ -543,7 +543,7 @@ async function handleRefresh() {
             <tr v-else-if="filteredTemplates.length === 0">
               <td colspan="8" class="empty-cell">
                 <div class="empty-state-box">
-                  <span>未找到符合当前筛选条件的核查模板 · </span>
+                  <span>未找到符合当前筛选条件的模板 · </span>
                   <button class="btn-link" @click="resetFilters">重置筛选条件</button>
                 </div>
               </td>
@@ -570,7 +570,7 @@ async function handleRefresh() {
                   草稿基于 {{ t.baseRev }}，线上已更新至 {{ t.onlineRev }}
                 </div>
                 <div v-else-if="t.onlineRev && t.onlineRev !== '—'" class="tpl-rev-sub mono">
-                  在线基线 {{ t.onlineRev }}
+                  在线版本 {{ t.onlineRev }}
                 </div>
               </td>
               <td>
@@ -581,12 +581,12 @@ async function handleRefresh() {
                 <el-popover v-else placement="bottom-start" :width="280" trigger="hover">
                   <template #reference>
                     <span class="chip-tag clickable ref-count-pill" @click.stop>
-                      {{ t.skills.length }} 个 Skill 规程 ▾
+                      {{ t.skills.length }} 个技能 ▾
                     </span>
                   </template>
                   <div class="ref-popover-panel">
                     <div class="ref-popover-head">
-                      关联的 Skill 规程 ({{ t.skills.length }})
+                      关联的技能 ({{ t.skills.length }})
                     </div>
                     <div class="ref-popover-list">
                       <button
@@ -636,7 +636,7 @@ async function handleRefresh() {
                   </span>
                   <span class="runs-count-sub">{{ t.runs7d.toLocaleString() }} 次</span>
                 </div>
-                <span v-else class="muted-dash">尚未产生流水</span>
+                <span v-else class="muted-dash">暂无运行记录</span>
               </td>
               <td style="white-space: nowrap">
                 <div class="mono pub-time-text">{{ t.lastPublishedAt }}</div>
@@ -664,9 +664,9 @@ async function handleRefresh() {
 
       <div class="card-footer-bar ledger-footer">
         <span>
-          共 <strong class="mono">{{ filteredTemplates.length }}</strong> 条核查模板记录
+          共 <strong class="mono">{{ filteredTemplates.length }}</strong> 个模板
           <template v-if="store.templateStatusFilter !== 'ALL' || store.templateSearch.trim()">
-            （全库 {{ statusCounts.ALL }} 条）
+            （全部 {{ statusCounts.ALL }} 条）
           </template>
         </span>
         <el-pagination

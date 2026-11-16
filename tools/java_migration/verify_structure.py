@@ -6,7 +6,7 @@
   S2 正文：Python 正文 == Java 正文经转换（elseif→elif、null→none、CRLF→LF，以及模板 115 违约责任占位符守卫）的结果，逐字相同。
   S3 字段集合：Python 字段 == Java 正文变量 ∪ Java 隐式依赖字段（规则中 {{X}} 引用、映射为 SKILL 的字段），
      且隐式依赖字段为中间字段（visible=false）；正文直接输出的字段 visible=true。
-  S4 规则：Java 规则中每条“正文变量: 规则”的原文都逐字出现在对应 Python 字段说明中。
+  S4 规则：Java 规则中每条“正文变量: 规则”对应的 Python 字段都写有非空的取值说明（说明只描述取值方法，不再附带原规则文本）。
   S5 Skill：Java 字段映射为 SKILL 的字段，其 Skill（及 Java 依赖 Skill）都在 Python 模板的 skills 中，
      且 Python 资源中存在同名 Skill；Skill 声明的接口都存在。
   S6 列表字段：Java 正文 for 循环中 item.xxx 用到的属性都是 Python 列表字段的列。
@@ -276,8 +276,8 @@ def main() -> int:
                 errors.append(f"S3 {tag}：字段「{name}」visible={f.visible}，应为 {should_visible}")
         # S4
         for name, rule in rules.items():
-            if name in py_fields and rule.strip() not in py_fields[name].description:
-                errors.append(f"S4 {tag}：字段「{name}」说明中缺少 Java 规则原文")
+            if name in py_fields and rule.strip() and not py_fields[name].description.strip():
+                errors.append(f"S4 {tag}：字段「{name}」缺少取值说明")
         # S5
         need: list[str] = []
         for name in java_vars | implicit:

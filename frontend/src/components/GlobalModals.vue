@@ -1,4 +1,4 @@
-<!-- #Created By AiCoding(codex) 全局模态弹窗组件（发布校验 / 保存冲突 / 紧急切换线上版本 / Skill发布 / 新建与复制模板 / 新建Skill与接口等） -->
+<!-- #Created By AiCoding(codex) 全局模态弹窗组件（发布校验 / 保存冲突 / 紧急切换线上版本 / 技能发布 / 新建与复制模板 / 新建技能与接口等） -->
 <script setup lang="ts">
 // #Created By AiCoding(codex) 全局弹窗：所有内容均来自后端数据（Store），不含任何写死的演示数据
 import { ref, computed, watch } from 'vue'
@@ -21,13 +21,14 @@ const skillPublishNote = ref('')
 const offlineReason = ref('')
 const newTplId = ref<number | string>(1001)
 const newTplName = ref('')
+const newTplDescription = ref('')
 const copySourceId = ref<number>(0)
 const copyNewId = ref<number | string>(1001)
 const copyNewName = ref('')
 const saveCaseName = ref('')
 const selectedSkillIds = ref<string[]>([])
 
-// 新建 Skill / 新建接口表单
+// 新建技能 / 新建接口表单
 const newSkillId = ref('')
 const newSkillName = ref('')
 const newSkillDesc = ref('')
@@ -42,7 +43,7 @@ const newApiConnector = ref<ApiConnector>('unified-gateway-xml')
 const publishErrors = computed<ValidationIssue[]>(() => store.templateValidation?.errors || [])
 /** 发布校验的提示（不阻止发布） */
 const publishWarnings = computed<ValidationIssue[]>(() => store.templateValidation?.warnings || [])
-/** 草稿基线与线上版本不一致的信息 */
+/** 草稿版本与线上版本不一致的信息 */
 const publishDrift = computed(() => store.templateValidation?.drift || null)
 /** 当前模板的用例数（优先使用校验结果中的数量） */
 const publishCasesCount = computed(() => store.templateValidation?.casesCount ?? store.templateCases.length)
@@ -98,6 +99,7 @@ watch(
     } else if (modal === 'new-template') {
       newTplId.value = nextAvailableTemplateId()
       newTplName.value = ''
+      newTplDescription.value = ''
     } else if (modal === 'copy-template') {
       copySourceId.value = store.copySourceTemplateId || store.currentTemplate.id || store.templates[0]?.id || 0
       copyNewId.value = nextAvailableTemplateId()
@@ -165,14 +167,14 @@ async function handlePublishConfirm() {
   }
 }
 
-/** 勾选 / 取消勾选某个 Skill（按标识） */
+/** 勾选 / 取消勾选某个技能（按标识） */
 function toggleSelectedSkill(skillId: string) {
   const idx = selectedSkillIds.value.indexOf(skillId)
   if (idx >= 0) selectedSkillIds.value.splice(idx, 1)
   else selectedSkillIds.value.push(skillId)
 }
 
-/** 勾选 / 取消勾选新 Skill 可调用的接口 */
+/** 勾选 / 取消勾选新技能可调用的接口 */
 function toggleNewSkillApi(apiName: string) {
   const idx = newSkillApis.value.indexOf(apiName)
   if (idx >= 0) newSkillApis.value.splice(idx, 1)
@@ -202,7 +204,7 @@ function handleCreateNewTemplate() {
     store.showToast('请填写模板名称', 'warning')
     return
   }
-  void store.createNewTemplate(id, name)
+  void store.createNewTemplate(id, name, newTplDescription.value.trim())
 }
 
 /** 从已有模板复制 */
@@ -252,26 +254,26 @@ function handleSaveCase() {
   void store.createRegressionCase(name)
 }
 
-/** 新建 Skill */
+/** 新建技能 */
 function handleCreateNewSkill() {
   const id = newSkillId.value.trim()
   const name = newSkillName.value.trim()
   if (!id || !name) {
-    store.showToast('请填写 Skill 标识与名称', 'warning')
+    store.showToast('请填写技能标识与名称', 'warning')
     return
   }
   if (!SKILL_ID_RE.test(id)) {
-    store.showToast('Skill 标识只能包含小写字母、数字和连字符，且以字母或数字开头，最长 64 位', 'warning')
+    store.showToast('技能标识只能包含小写字母、数字和连字符，且以字母或数字开头，最长 64 位', 'warning')
     return
   }
   if (store.skills.some(s => s.id === id)) {
-    store.showToast(`Skill 标识 ${id} 已存在`, 'warning')
+    store.showToast(`技能标识 ${id} 已存在`, 'warning')
     return
   }
   void store.createNewSkill(id, name, newSkillDesc.value.trim(), [...newSkillApis.value])
 }
 
-/** 新建 API 调用 */
+/** 新建 API */
 function handleCreateNewApi() {
   const name = newApiName.value.trim()
   const title = newApiTitle.value.trim()
@@ -493,7 +495,7 @@ async function handleSaveAndLeave() {
       <div class="modal-body">
         <div class="alert-banner alert-danger" style="margin-bottom: 0">
           <span>
-            此操作为紧急回切操作，<strong>会将线上整体切回 {{ store.targetEmergencyRev }}<template v-if="emergencyRevertedRevs.length > 0">，并撤销 {{ store.targetEmergencyRev }} 之后的所有发布（{{ emergencyRevertedRevs.join('、') }}）</template></strong>，请谨慎确认！
+            此操作为紧急回退操作，<strong>会将线上整体切回 {{ store.targetEmergencyRev }}<template v-if="emergencyRevertedRevs.length > 0">，并撤销 {{ store.targetEmergencyRev }} 之后的所有发布（{{ emergencyRevertedRevs.join('、') }}）</template></strong>，请谨慎确认！
           </span>
         </div>
         <div>
@@ -521,7 +523,7 @@ async function handleSaveAndLeave() {
     </div>
   </div>
 
-  <!-- 4. Skill 发布确认弹窗 -->
+  <!-- 4. 技能发布确认弹窗 -->
   <div
     v-else-if="store.activeModal === 'skill-publish'"
     class="modal-backdrop"
@@ -529,7 +531,7 @@ async function handleSaveAndLeave() {
   >
     <div class="modal-dialog" style="width: 520px" @click.stop>
       <div class="modal-header">
-        <div class="modal-title">发布 Skill · {{ store.currentSkill.name }}</div>
+        <div class="modal-title">发布技能 · {{ store.currentSkill.name }}</div>
         <button class="btn btn-sm" @click="store.closeModal()">✕</button>
       </div>
       <div class="modal-body">
@@ -556,7 +558,7 @@ async function handleSaveAndLeave() {
             v-if="store.currentSkill.refTemplates.length === 0"
             style="font-size: 12.5px; color: var(--text-secondary)"
           >
-            暂无模板引用该 Skill
+            暂无模板引用该技能
           </div>
         </div>
         <div>
@@ -609,6 +611,18 @@ async function handleSaveAndLeave() {
             style="width: 100%"
             placeholder="例如：国际漫游流量争议类"
           />
+        </div>
+        <div>
+          <label style="display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px">
+            模板说明（选填）
+          </label>
+          <textarea
+            v-model="newTplDescription"
+            class="textarea"
+            rows="3"
+            style="width: 100%"
+            placeholder="说明这个模板适用于什么场景，创建后也可在模板编辑的「信息」页修改"
+          ></textarea>
         </div>
       </div>
       <div class="modal-footer">
@@ -696,7 +710,7 @@ async function handleSaveAndLeave() {
     </div>
   </div>
 
-  <!-- 8. 添加建议 Skill 弹窗 -->
+  <!-- 8. 添加建议技能弹窗 -->
   <div
     v-else-if="store.activeModal === 'add-skill'"
     class="modal-backdrop"
@@ -704,18 +718,18 @@ async function handleSaveAndLeave() {
   >
     <div class="modal-dialog" style="width: 520px" @click.stop>
       <div class="modal-header">
-        <div class="modal-title">选择本模板可用的 Skill</div>
+        <div class="modal-title">选择本模板可用的技能</div>
         <button class="btn btn-sm" @click="store.closeModal()">✕</button>
       </div>
       <div class="modal-body">
         <div style="font-size: 12px; color: var(--text-secondary)">
-          模型只能加载这里勾选的 Skill。修改后需保存草稿才会生效。
+          模型只能加载这里勾选的技能。修改后需保存草稿才会生效。
         </div>
         <div
           v-if="store.skills.length === 0"
           style="font-size: 12.5px; color: var(--text-secondary); padding: 12px 0; text-align: center"
         >
-          Skill 库中还没有 Skill，请先在 Skill 库中新建。
+          还没有技能，请先在「技能」页新建。
         </div>
         <label
           v-for="s in store.skills"
@@ -827,7 +841,7 @@ async function handleSaveAndLeave() {
     </div>
   </div>
 
-  <!-- 11. 新建 Skill 弹窗 -->
+  <!-- 11. 新建技能弹窗 -->
   <div
     v-else-if="store.activeModal === 'new-skill'"
     class="modal-backdrop"
@@ -835,13 +849,13 @@ async function handleSaveAndLeave() {
   >
     <div class="modal-dialog" style="width: 480px" @click.stop>
       <div class="modal-header">
-        <div class="modal-title">新建 Skill</div>
+        <div class="modal-title">新建技能</div>
         <button class="btn btn-sm" @click="store.closeModal()">✕</button>
       </div>
       <div class="modal-body">
         <div>
           <label style="display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px">
-            Skill 唯一标识 (英文 kebab-case) *
+            技能唯一标识 (英文 kebab-case) *
           </label>
           <input
             v-model="newSkillId"
@@ -852,7 +866,7 @@ async function handleSaveAndLeave() {
         </div>
         <div>
           <label style="display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px">
-            Skill 名称 *
+            技能名称 *
           </label>
           <input
             v-model="newSkillName"
@@ -870,7 +884,7 @@ async function handleSaveAndLeave() {
             class="textarea"
             rows="3"
             style="width: 100%"
-            placeholder="简述该 Skill 解决的核查判断场景…"
+            placeholder="简述该技能解决的核查判断场景…"
           ></textarea>
         </div>
         <div>
@@ -881,7 +895,7 @@ async function handleSaveAndLeave() {
             v-if="store.apis.length === 0"
             style="font-size: 12px; color: var(--text-secondary)"
           >
-            API调用列表中还没有接口，可稍后在 Skill 中补充。
+            API 列表中还没有接口，可稍后在技能中补充。
           </div>
           <div
             v-else
@@ -925,7 +939,7 @@ async function handleSaveAndLeave() {
     </div>
   </div>
 
-  <!-- 12. 新建 API 调用弹窗 -->
+  <!-- 12. 新建 API 弹窗 -->
   <div
     v-else-if="store.activeModal === 'new-api'"
     class="modal-backdrop"
@@ -933,7 +947,7 @@ async function handleSaveAndLeave() {
   >
     <div class="modal-dialog" style="width: 540px" @click.stop>
       <div class="modal-header">
-        <div class="modal-title">新建 API 调用</div>
+        <div class="modal-title">新建 API</div>
         <button class="btn btn-sm" @click="store.closeModal()">✕</button>
       </div>
       <div class="modal-body">
@@ -1019,13 +1033,13 @@ async function handleSaveAndLeave() {
             class="textarea"
             rows="3"
             style="width: 100%"
-            placeholder="描述该 API 调用的入参要求、网关交易说明与返回记录含义…"
+            placeholder="描述该 API 的入参要求、网关交易说明与返回记录含义…"
           ></textarea>
         </div>
       </div>
       <div class="modal-footer">
         <button class="btn" @click="store.closeModal()">取消</button>
-        <button class="btn btn-primary" @click="handleCreateNewApi">创建并编辑契约</button>
+        <button class="btn btn-primary" @click="handleCreateNewApi">创建并编辑</button>
       </div>
     </div>
   </div>

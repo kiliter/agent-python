@@ -62,9 +62,9 @@ export interface TemplateItem {
   status: ResourceStatus
   baseRev: string
   onlineRev: string
-  /** Skill 标识 */
+  /** 技能标识 */
   skills: string[]
-  /** Skill 中文名称，与 skills 一一对应 */
+  /** 技能中文名称，与 skills 一一对应 */
   skillNames?: string[]
   casesCount: number
   runs7d: number

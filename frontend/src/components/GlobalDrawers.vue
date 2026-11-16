@@ -44,7 +44,7 @@ function formatDiffFieldVal(fieldName: string, rawVal?: string): string {
           回归用例：{{ currentRegDiff.caseName }}
         </div>
         <div v-if="currentRegDiff.expected" style="font-size: 12px; color: var(--text-regular)">
-          基准期望值：<span class="mono">{{ formatDiffFieldVal(currentRegDiff.field, currentRegDiff.expected) }}</span>
+          期望值：<span class="mono">{{ formatDiffFieldVal(currentRegDiff.field, currentRegDiff.expected) }}</span>
         </div>
         <div class="diff-grid">
           <div class="g-ver-card ver-a">

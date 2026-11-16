@@ -1,5 +1,5 @@
 <!--
-  5.4 Skill 核查规程库视图（政企数智概览条 + 高密度规程台账 + 独立分栏编排与修订对比）
+  5.4 技能库视图（概览条 + 高密度技能列表 + 独立分栏编辑与版本对比）
   列表、正文、修订历史全部来自后端 /api/v1/skills，没有写死的演示数据。
   #Created By AiCoding(codex)
 -->
@@ -23,7 +23,7 @@ const refreshing = ref(false)
 
 const currentSkill = computed(() => store.currentSkill)
 
-/** 顶部政企数智概览指标（全部基于 store.skills 实时动态聚合） */
+/** 顶部政企概览指标（全部基于 store.skills 实时动态聚合） */
 const skillOverview = computed(() => {
   const list = store.skills
   const total = list.length
@@ -148,7 +148,7 @@ const renderedPreviewHtml = computed(() => {
         <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
           ${
             fmMeta.name
-              ? `<span class="chip-tag mono" style="color:var(--primary); border-color:var(--primary-border); background:var(--primary-bg);">规程标识: ${escapeHtml(fmMeta.name)}</span>`
+              ? `<span class="chip-tag mono" style="color:var(--primary); border-color:var(--primary-border); background:var(--primary-bg);">技能标识: ${escapeHtml(fmMeta.name)}</span>`
               : ''
           }
           ${apisText ? `<span class="chip-tag mono">关联 API 接口: ${escapeHtml(apisText)}</span>` : ''}
@@ -179,7 +179,7 @@ function handleRestoreOnline() {
   const online = store.skillOnlineMarkdown
   if (!online) return
   ElMessageBox.confirm(
-    `确认将 Skill「${currentSkill.value.name}」的编辑内容替换为线上内容吗？替换后需保存草稿才会生效。`,
+    `确认将技能「${currentSkill.value.name}」的编辑内容替换为线上内容吗？替换后需保存草稿才会生效。`,
     '确认恢复线上内容',
     {
       confirmButtonText: '确认恢复',
@@ -195,10 +195,10 @@ function handleRestoreOnline() {
     .catch(() => {})
 }
 
-/** 放弃已保存的 Skill 草稿 */
+/** 放弃已保存的技能草稿 */
 function handleDiscardDraft() {
   ElMessageBox.confirm(
-    `确认放弃 Skill「${currentSkill.value.name}」的草稿吗？从未发布过的 Skill 会被直接删除，此操作不可撤销。`,
+    `确认放弃技能「${currentSkill.value.name}」的草稿吗？从未发布过的技能会被直接删除，此操作不可撤销。`,
     '确认放弃草稿',
     {
       confirmButtonText: '确认放弃',
@@ -212,7 +212,7 @@ function handleDiscardDraft() {
     .catch(() => {})
 }
 
-/** 列表页直接发布：先加载 Skill 详情，再打开发布确认弹窗 */
+/** 列表页直接发布：先加载技能详情，再打开发布确认弹窗 */
 async function handlePublishFromList(skillId: string) {
   await store.openSkillDetail(skillId)
   store.openModal('skill-publish')
@@ -221,7 +221,7 @@ async function handlePublishFromList(skillId: string) {
 /** 把历史版本内容恢复到草稿（不直接发布） */
 function handleRollbackRevision(rev: string) {
   ElMessageBox.confirm(
-    `确认把 Skill「${currentSkill.value.name}」的历史版本 ${rev} 恢复到草稿吗？${store.skillDirty ? '当前未保存的修改将被覆盖。' : ''}`,
+    `确认把技能「${currentSkill.value.name}」的历史版本 ${rev} 恢复到草稿吗？${store.skillDirty ? '当前未保存的修改将被覆盖。' : ''}`,
     '确认恢复到草稿',
     {
       confirmButtonText: '确认恢复',
@@ -241,13 +241,13 @@ function handleRollbackRevision(rev: string) {
 /** 直接回退历史版本并上线生效 */
 function handleDirectRollbackSkill(rev: string) {
   ElMessageBox.prompt(
-    `将 Skill「${currentSkill.value.name}」直接回退至历史版本 ${rev} 并立即生成新线上版本生效，请填写回退原因（必填）：`,
+    `将技能「${currentSkill.value.name}」直接回退至历史版本 ${rev} 并立即生成新线上版本生效，请填写回退原因（必填）：`,
     `直接回退上线 · ${rev}`,
     {
       confirmButtonText: '回退并上线',
       cancelButtonText: '取消',
       type: 'warning',
-      inputPlaceholder: '例如：新规程步骤校验过严，回退至稳定版',
+      inputPlaceholder: '例如：新技能步骤校验过严，回退至稳定版',
       inputValidator: val => (val && val.trim().length > 0 ? true : '请填写回退原因'),
     },
   )
@@ -276,21 +276,21 @@ function refTemplateStatus(tplLabel: string) {
 </script>
 
 <template>
-  <!-- 独立列表页：Skill 核查规程库 -->
+  <!-- 独立列表页：技能库 -->
   <div v-if="store.skillsSubView === 'list'" class="page-fill asset-stage">
-    <!-- 紧凑型政企数智概览条 -->
-    <section class="overview-strip" aria-label="Skill 核查规程库数智概览">
+    <!-- 紧凑型概览条 -->
+    <section class="overview-strip" aria-label="技能库概览">
       <div class="strip-brand">
         <div class="strip-title-row">
-          <span class="strip-title">Skill 核查规程库</span>
-          <span class="strip-tag">标准取证规程</span>
+          <span class="strip-title">技能库</span>
+          <span class="strip-tag">标准技能</span>
         </div>
-        <span class="strip-desc">沉淀业务争议核查步骤与工具调度约束，供核查模板按需装配</span>
+        <span class="strip-desc">描述业务核查步骤与工具使用要求，供模板按需使用</span>
       </div>
 
       <div class="strip-metrics">
         <div class="strip-metric-item">
-          <span class="metric-lbl">在库规程总数</span>
+          <span class="metric-lbl">在库技能总数</span>
           <div class="metric-val-row">
             <strong class="metric-num mono">{{ skillOverview.total }}</strong>
             <span class="metric-unit">项</span>
@@ -301,7 +301,7 @@ function refTemplateStatus(tplLabel: string) {
         <div class="strip-divider"></div>
 
         <div class="strip-metric-item">
-          <span class="metric-lbl">在网已发布规程</span>
+          <span class="metric-lbl">已发布技能</span>
           <div class="metric-val-row">
             <strong class="metric-num mono">{{ skillOverview.online }}</strong>
             <span class="metric-unit">/ {{ skillOverview.total }}</span>
@@ -331,7 +331,7 @@ function refTemplateStatus(tplLabel: string) {
         <div class="strip-divider"></div>
 
         <div class="strip-metric-item">
-          <span class="metric-lbl">核查模板引用覆盖率</span>
+          <span class="metric-lbl">模板引用覆盖率</span>
           <div class="metric-val-row">
             <strong class="metric-num mono" style="color: var(--primary)">{{ skillOverview.refRateText }}</strong>
             <span class="metric-sub mono">({{ skillOverview.referenced }}/{{ skillOverview.total }})</span>
@@ -363,11 +363,11 @@ function refTemplateStatus(tplLabel: string) {
       </div>
     </section>
 
-    <!-- 主台账卡片 -->
+    <!-- 主列表卡片 -->
     <div class="card card-fill asset-card">
       <div class="asset-toolbar">
         <div class="toolbar-left">
-          <div class="seg-filter-group" role="tablist" aria-label="规程状态筛选">
+          <div class="seg-filter-group" role="tablist" aria-label="技能状态筛选">
             <button
               type="button"
               role="tab"
@@ -403,7 +403,7 @@ function refTemplateStatus(tplLabel: string) {
           <input
             v-model="store.skillSearch"
             class="input search-input"
-            placeholder="搜索 Skill 规程名称或标识…"
+            placeholder="搜索技能名称或标识…"
           />
         </div>
 
@@ -412,7 +412,7 @@ function refTemplateStatus(tplLabel: string) {
             {{ refreshing ? '刷新中…' : '刷新' }}
           </button>
           <button class="btn btn-primary cta-btn" @click="store.openModal('new-skill')">
-            ＋ 新建 Skill
+            ＋ 新建技能
           </button>
         </div>
       </div>
@@ -421,11 +421,11 @@ function refTemplateStatus(tplLabel: string) {
         <table class="data-table asset-table">
           <thead>
             <tr>
-              <th style="min-width: 195px">规程名称与标识</th>
-              <th style="min-width: 180px">核查业务规程摘要</th>
+              <th style="min-width: 195px">技能名称与标识</th>
+              <th style="min-width: 180px">技能摘要</th>
               <th style="width: 146px; white-space: nowrap">发布状态</th>
               <th style="min-width: 165px">关联 API 接口</th>
-              <th style="width: 150px; white-space: nowrap">被核查模板引用</th>
+              <th style="width: 150px; white-space: nowrap">被模板引用</th>
               <th style="width: 132px; white-space: nowrap">近 7 日调度次数</th>
               <th style="width: 145px; white-space: nowrap">最近发布时间</th>
               <th class="action-col">操作</th>
@@ -442,12 +442,12 @@ function refTemplateStatus(tplLabel: string) {
                   </svg>
                   <template v-if="store.skillSearch || statusFilter !== 'ALL'">
                     <span>
-                      未检索到符合筛选条件的 Skill 核查规程 ·
+                      未检索到符合筛选条件的技能 ·
                       <button class="btn-link" @click="resetSkillFilters">重置筛选</button>
                     </span>
                   </template>
                   <template v-else>
-                    <span>Skill 核查规程库暂无记录，点击右上角「＋ 新建 Skill」创建</span>
+                    <span>暂无技能，点击右上角「＋ 新建技能」创建</span>
                   </template>
                 </div>
               </td>
@@ -481,7 +481,7 @@ function refTemplateStatus(tplLabel: string) {
                     v-for="apiName in s.apis"
                     :key="apiName"
                     class="chip-tag mono clickable api-chip"
-                    :title="`查看 API 接口契约：${apiName}`"
+                    :title="`查看 API：${apiName}`"
                     @click="store.openApiDetail(apiName, 'schema')"
                   >
                     {{ apiName }}
@@ -499,12 +499,12 @@ function refTemplateStatus(tplLabel: string) {
                       class="chip-tag clickable ref-count-pill"
                       @click.stop
                     >
-                      {{ s.refsCount }} 个核查模板 ▾
+                      {{ s.refsCount }} 个模板 ▾
                     </span>
                   </template>
                   <div class="ref-popover-panel">
                     <div class="ref-popover-head">
-                      引用此规程的核查模板 ({{ s.refsCount }})
+                      引用此技能的模板 ({{ s.refsCount }})
                     </div>
                     <div class="ref-popover-list">
                       <button
@@ -538,12 +538,12 @@ function refTemplateStatus(tplLabel: string) {
 
       <div class="card-footer-bar asset-footer">
         <span>
-          共 <strong class="mono">{{ displayedSkills.length }}</strong> 项 Skill 核查规程
+          共 <strong class="mono">{{ displayedSkills.length }}</strong> 项技能
           <template v-if="statusFilter !== 'ALL' || store.skillSearch.trim()">
-            （全库 {{ skillOverview.total }} 项）
+            （全部 {{ skillOverview.total }} 项）
           </template>
         </span>
-        <span class="footer-tip">点击任意规程行可进入 Markdown 规程编排与修订对比工作区</span>
+        <span class="footer-tip">点击任意技能行可进入 Markdown 技能编辑与版本对比页</span>
       </div>
     </div>
   </div>
@@ -553,7 +553,7 @@ function refTemplateStatus(tplLabel: string) {
     <div class="workbench-header detail-header-card">
       <div class="workbench-top-row">
         <div class="workbench-title-group">
-          <button class="btn btn-sm" @click="handleBackToSkillList">← 返回 Skill 核查规程库</button>
+          <button class="btn btn-sm" @click="handleBackToSkillList">← 返回技能列表</button>
           <span class="workbench-title">{{ currentSkill.name }}</span>
           <span class="chip-tag mono id-code-chip">{{ currentSkill.id }}</span>
           <StatusTag :status="currentSkill.status" />
@@ -561,7 +561,7 @@ function refTemplateStatus(tplLabel: string) {
             v-if="currentSkill.onlineRev && currentSkill.onlineRev !== '—'"
             class="chip-tag mono online-rev-chip"
           >
-            线上基线 {{ currentSkill.onlineRev }}
+            线上版本 {{ currentSkill.onlineRev }}
           </span>
           <span
             v-if="store.skillDirty"
@@ -592,7 +592,7 @@ function refTemplateStatus(tplLabel: string) {
           </button>
           <button
             class="btn"
-            :title="`保存 Skill 草稿 (${store.saveShortcutHint})`"
+            :title="`保存技能草稿 (${store.saveShortcutHint})`"
             @click="store.saveSkillDraft()"
           >
             保存草稿
@@ -602,7 +602,7 @@ function refTemplateStatus(tplLabel: string) {
         </div>
       </div>
 
-      <div class="tabs-bar detail-tabs-bar" role="tablist" aria-label="Skill 详情视图切换">
+      <div class="tabs-bar detail-tabs-bar" role="tablist" aria-label="技能详情视图切换">
         <button
           type="button"
           role="tab"
@@ -612,7 +612,7 @@ function refTemplateStatus(tplLabel: string) {
           @click="store.skillDetailTab = 'editor'"
         >
           <FileEdit :size="14" />
-          <span>规程内容编辑</span>
+          <span>技能内容编辑</span>
         </button>
         <button
           type="button"
@@ -623,7 +623,7 @@ function refTemplateStatus(tplLabel: string) {
           @click="store.skillDetailTab = 'refs'"
         >
           <Link2 :size="14" />
-          <span>关联核查模板</span>
+          <span>关联模板</span>
           <span class="tab-count mono">{{ currentSkill.refTemplates.length }}</span>
         </button>
         <button
@@ -646,7 +646,7 @@ function refTemplateStatus(tplLabel: string) {
       <div class="card card-fill pane-card">
         <div class="card-header pane-header">
           <div class="card-title pane-title">
-            <span>Skill 规程源码编辑器</span>
+            <span>技能源码编辑器</span>
             <span class="chip-tag pane-sub-chip">YAML Frontmatter + Markdown · 支持 Ctrl+Z 撤销</span>
           </div>
           <div style="display: flex; gap: 6px">
@@ -679,8 +679,8 @@ function refTemplateStatus(tplLabel: string) {
 
       <div class="card card-fill pane-card">
         <div class="card-header pane-header">
-          <div class="card-title pane-title">规程结构化实时预览</div>
-          <button class="btn btn-sm" @click="store.copyText(skillMarkdownText, '已复制 Skill 全文')">
+          <div class="card-title pane-title">技能结构化实时预览</div>
+          <button class="btn btn-sm" @click="store.copyText(skillMarkdownText, '已复制技能全文')">
             <SvgIcon name="copy" /> 复制全文
           </button>
         </div>
@@ -700,7 +700,7 @@ function refTemplateStatus(tplLabel: string) {
         <table class="data-table asset-table">
           <thead>
             <tr>
-              <th>关联核查模板编号与名称</th>
+              <th>关联模板编号与名称</th>
               <th style="width: 170px; white-space: nowrap">模板发布状态</th>
               <th style="width: 170px; white-space: nowrap">最近发布时间</th>
               <th class="action-col-wide">操作</th>
@@ -709,7 +709,7 @@ function refTemplateStatus(tplLabel: string) {
           <tbody>
             <tr v-if="currentSkill.refTemplates.length === 0">
               <td colspan="4" class="empty-cell">
-                当前暂无核查模板装配此 Skill 规程
+                当前暂无模板使用此技能
               </td>
             </tr>
             <tr v-for="t in currentSkill.refTemplates" :key="t" class="asset-row" @click="jumpToRefTemplate(t)">
@@ -735,7 +735,7 @@ function refTemplateStatus(tplLabel: string) {
     <!-- 历史 Tab：修订列表 + 线上 vs 当前编辑内容的差异 -->
     <div v-else class="card card-fill asset-card">
       <div class="card-header pane-header">
-        <div class="card-title pane-title">规程版本修订台账</div>
+        <div class="card-title pane-title">技能版本修改历史</div>
       </div>
       <div class="card-scroll history-scroll">
         <table class="data-table asset-table">
@@ -752,7 +752,7 @@ function refTemplateStatus(tplLabel: string) {
           <tbody>
             <tr v-if="store.skillRevisions.length === 0">
               <td colspan="6" class="empty-cell">
-                暂无修订历史（该 Skill 规程尚未发布过）
+                暂无修订历史（该技能尚未发布过）
               </td>
             </tr>
             <tr v-for="r in store.skillRevisions" :key="r.rev">
@@ -776,7 +776,7 @@ function refTemplateStatus(tplLabel: string) {
 
         <div>
           <div class="diff-header-row">
-            <span class="diff-section-title">规程正文差异对比</span>
+            <span class="diff-section-title">技能正文差异对比</span>
             <span class="chip-tag diff-line-del">线上生效版本</span>
             <span class="muted-text">vs</span>
             <span class="chip-tag diff-line-add">当前工作区编辑内容</span>

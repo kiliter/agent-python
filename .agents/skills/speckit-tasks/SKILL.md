@@ -8,6 +8,12 @@ metadata:
 ---
 
 
+## 单文件 Plan 兼容约定
+
+- 新需求采用单文件内联 Plan（`<!-- SPECKIT_PLAN_LAYOUT: inline-v1 -->`），直接从 `plan.md` 的 `plan-research`、`plan-data-model`、`plan-contracts`、`plan-quickstart` 四个锚点章节读取设计依据，不得因缺少 `research.md`、`data-model.md`、`contracts/` 或 `quickstart.md` 报错阻塞。
+- 同步核对 `spec.md` 第 8.2 节三类外部独立交付物确认结论：不涉及项仅在台账保留依据、不安排空文档任务；涉及项须安排独立维护与校验任务。
+- 仅在对应验证命令或构建检查真实通过并记录证据后，方可勾选任务为完成（`[X]`）。
+
 ## User Input
 
 ```text

@@ -41,11 +41,11 @@ const activeFieldValueSummary = computed(() => {
   if (f.type === '列表') {
     if (f.runStatus === 'found') {
       const n = Array.isArray(f.runRows) ? f.runRows.length : (f.runValue || '').trim() === '[]' ? 0 : -1
-      return n === 0 ? '无记录（0 行）' : n > 0 ? `已命中（共 ${n} 行）` : f.runValue || '已命中'
+      return n === 0 ? '无记录（0 行）' : n > 0 ? `已找到（共 ${n} 行）` : f.runValue || '已找到'
     }
     return '缺失（未取到列表结果）'
   }
-  return f.runStatus === 'found' ? f.runValue || '已命中' : '未找到'
+  return f.runStatus === 'found' ? f.runValue || '已找到' : '未找到'
 })
 
 /** 接口结果中需要高亮的行：键为 resultId#row，值为该行被引用的列 */
@@ -184,7 +184,7 @@ watch(
         @click="store.setInspectorTab('api')"
       >
         <Database :size="13" />
-        <span>API 调用结果</span>
+        <span>API 结果</span>
         <span class="insp-tab-count mono">{{ apiRecordCount }}条</span>
       </button>
       <button

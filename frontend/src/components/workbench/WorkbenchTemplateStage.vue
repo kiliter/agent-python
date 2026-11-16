@@ -1,6 +1,6 @@
 <!--
   #Created By AiCoding(codex)
-  核查模板专业 IDE 工作台 · 中间上方模板区域（原文 / 预览 / 双栏 / 行级 Diff + 调试快照签与操作工具栏）
+  模板专业 IDE 工作台 · 中间上方模板区域（原文 / 预览 / 双栏 / 行级 Diff + 调试结果签与操作工具栏）
   全部数据实时对接 usePlatformStore 与后端 /api/v1，不含任何写死演示数据
 -->
 <script setup lang="ts">
@@ -72,7 +72,7 @@ const activeInspectorFieldName = computed(() => {
   return store.templateFields[store.ideSelectedFieldIdx]?.name || ''
 })
 
-/** 调试快照简短时间标签 */
+/** 调试结果简短时间标签 */
 const snapshotTimeLabel = computed(() => {
   const run = store.dryRunResult
   if (!run) return ''
@@ -161,7 +161,7 @@ async function handleValidateClick() {
     const errCnt = res.errors.length
     const warnCnt = res.warnings.length
     if (errCnt === 0 && warnCnt === 0 && store.undefinedBodyFields.length === 0) {
-      store.showToast('模板语法与字段契约校验通过（0 错误 · 0 告警）', 'success')
+      store.showToast('模板语法与字段校验通过（0 错误 · 0 告警）', 'success')
       validationPanelOpen.value = false
     } else {
       validationPanelOpen.value = true
@@ -780,7 +780,7 @@ watch(
   },
 )
 
-// ============================================================ 预览画布（快照预览态 + 静态实时预览态）
+// ============================================================ 预览画布（调试结果预览态 + 静态实时预览态）
 const staticPreviewText = ref('')
 const staticPreviewError = ref<string | null>(null)
 const staticPreviewErrorLine = ref<number | undefined>(undefined)
@@ -836,7 +836,7 @@ watch(
   () => scheduleStaticPreview(),
 )
 
-// 当快照为线上版本运行或线上基线变更时，按需拉取最新线上 bodyText 用于精确映射（带请求序号防竞态覆盖）
+// 当版本为线上版本运行或线上版本变更时，按需拉取最新线上 bodyText 用于精确映射（带请求序号防竞态覆盖）
 let onlineBodyReqSeq = 0
 watch(
   () =>
@@ -903,7 +903,7 @@ function copyCurrentReport() {
     store.showToast('当前暂无可复制的预览文本', 'warning')
     return
   }
-  void store.copyText(txt, isSnapshotMode.value ? '已复制调试快照报告全文' : '已复制静态渲染预览全文')
+  void store.copyText(txt, isSnapshotMode.value ? '已复制调试结果报告全文' : '已复制静态渲染预览全文')
 }
 
 // ============================================================ 行级版本差异对比（Diff 模式）
@@ -1276,8 +1276,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="wb-template-stage" aria-label="核查模板正文与报告预览舞台">
-    <!-- ==================== 顶部工具栏（左侧模式切换+快照签 / 右侧核心操作按钮组） ==================== -->
+  <section class="wb-template-stage" aria-label="模板正文与报告预览区">
+    <!-- ==================== 顶部工具栏（左侧模式切换+调试结果标签 / 右侧核心操作按钮组） ==================== -->
     <header class="stage-toolbar">
       <div class="stage-toolbar-left">
         <!-- 原文 | 预览 | 双栏 分段切换器 -->
@@ -1320,7 +1320,7 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
-        <!-- 调试快照状态签（当 store.dryRunResult 存在时醒目展示） -->
+        <!-- 调试结果状态签（当 store.dryRunResult 存在时醒目展示） -->
         <div v-else-if="store.dryRunResult" class="snapshot-status-pill">
           <span
             class="snap-dot"
@@ -1331,12 +1331,12 @@ onBeforeUnmount(() => {
             }"
           ></span>
           <span class="snapshot-pill-text mono">
-            <span class="snap-prefix-text">调试</span>快照<span class="snap-time-seg"> · {{ snapshotTimeLabel }}</span> · 命中 {{ store.dryRunResult.foundCount }}/{{ store.dryRunResult.totalCount }}
+            <span class="snap-prefix-text">调试</span>结果<span class="snap-time-seg"> · {{ snapshotTimeLabel }}</span> · 已找到 {{ store.dryRunResult.foundCount }}/{{ store.dryRunResult.totalCount }}
           </span>
           <button
             type="button"
             class="pill-inline-btn"
-            title="清空当前选中的调试快照，恢复实时静态模板预览"
+            title="清空当前选中的调试结果，恢复实时静态模板预览"
             @click="store.clearSelectedDebugRun()"
           >
             <RotateCcw :size="11" />
@@ -1448,7 +1448,7 @@ onBeforeUnmount(() => {
 
           <div v-if="validationPanelOpen" class="stage-popover validation-popover" @mousedown.stop>
             <div class="pop-head-bar">
-              <span style="font-weight: 600">模板契约与语法校验结果</span>
+              <span style="font-weight: 600">模板校验结果</span>
               <button type="button" class="pop-close-btn" @click="validationPanelOpen = false">
                 <X :size="13" />
               </button>
@@ -1575,7 +1575,7 @@ onBeforeUnmount(() => {
               class="pop-menu-action"
               @click="handleOpenDiffWithOnline"
             >
-              <span>与线上/历史基线对比 Diff</span>
+              <span>与线上/历史版本对比</span>
             </button>
             <button
               v-if="tpl.status === 'OFFLINE'"
@@ -1599,7 +1599,7 @@ onBeforeUnmount(() => {
               class="pop-menu-action is-danger"
               @click="handleOfflineTemplateClick"
             >
-              <span>下线该核查模板</span>
+              <span>下线该模板</span>
             </button>
           </div>
         </div>
@@ -1790,7 +1790,7 @@ onBeforeUnmount(() => {
 
                   <template v-if="store.dryRunResult">
                     <span class="audit-meta-item mono">
-                      流水：<strong>{{ store.dryRunResult.runId }}</strong>
+                      运行编号：<strong>{{ store.dryRunResult.runId }}</strong>
                     </span>
                     <span
                       class="audit-badge mono"
@@ -1804,7 +1804,7 @@ onBeforeUnmount(() => {
                         store.dryRunResult.status === 'SUCCESS'
                           ? '核验通过'
                           : store.dryRunResult.status === 'PARTIAL'
-                            ? '部分命中'
+                            ? '部分找到'
                             : '核验失败'
                       }}
                       · {{ store.dryRunResult.foundCount }}/{{ store.dryRunResult.totalCount }}
@@ -1853,7 +1853,7 @@ onBeforeUnmount(() => {
                   悬浮字段值查看对应 <strong class="mono">&#123;&#123;Key&#125;&#125;</strong> · 点击字段值联动右侧「证据溯源」高亮原始单据与接口报文
                 </span>
                 <span v-else>
-                  悬浮占位或默认值查看对应 <strong class="mono">&#123;&#123;Key&#125;&#125;</strong> · 点击字段联动右侧「属性配置」编辑取证规则
+                  悬浮占位或默认值查看对应 <strong class="mono">&#123;&#123;Key&#125;&#125;</strong> · 点击字段联动右侧「属性配置」编辑填写规则
                 </span>
               </div>
 
@@ -1862,7 +1862,7 @@ onBeforeUnmount(() => {
                   activePreviewText || '暂无报告文本'
                 }}</pre>
 
-                <!-- 快照预览态 -->
+                <!-- 调试结果预览态 -->
                 <ReportPreviewContent
                   v-else-if="store.dryRunResult"
                   wrapper-tag="div"
@@ -1899,16 +1899,16 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <!-- 分支 C：历史/基线行级差异对比视图（Diff 态） -->
+      <!-- 分支 C：历史/版本行级差异对比视图（差异对比态） -->
       <div v-if="isDiffMode" class="diff-pane">
         <div class="diff-toolbar">
           <div class="diff-toolbar-left">
             <span class="diff-label">当前工作区草稿</span>
-            <span style="color: var(--text-secondary)">对比基准：</span>
+            <span style="color: var(--text-secondary)">对比版本：</span>
             <select
               v-model="diffBaselineRev"
               class="diff-ver-select mono"
-              aria-label="选择差异对比基准版本"
+              aria-label="选择对比版本"
               @change="loadBaselineForDiff(diffBaselineRev)"
             >
               <option v-if="diffBaselineOptions.length === 0" value="">暂无历史发布版本</option>
@@ -1928,12 +1928,12 @@ onBeforeUnmount(() => {
               入参变更 {{ inputDiffSummary.length }}
             </span>
             <span v-if="skillDiffSummary.length > 0" class="diff-stat">
-              规程变更 {{ skillDiffSummary.length }}
+              技能变更 {{ skillDiffSummary.length }}
             </span>
           </div>
         </div>
 
-        <!-- 字段、入参与规程变更摘要带 -->
+        <!-- 字段、入参与技能变更摘要带 -->
         <div
           v-if="fieldDiffSummary.length > 0 || inputDiffSummary.length > 0 || skillDiffSummary.length > 0"
           class="diff-meta-strip"
@@ -1963,7 +1963,7 @@ onBeforeUnmount(() => {
             </span>
           </template>
           <template v-if="skillDiffSummary.length > 0">
-            <span class="diff-meta-title" style="margin-left: 6px">规程变更：</span>
+            <span class="diff-meta-title" style="margin-left: 6px">技能变更：</span>
             <span
               v-for="sc in skillDiffSummary"
               :key="'sc-' + sc.name"
@@ -1976,18 +1976,18 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="diff-body-scroll">
-          <div v-if="diffLoading" class="diff-empty-box">正在拉取基准版本内容计算差异…</div>
+          <div v-if="diffLoading" class="diff-empty-box">正在拉取对比版本内容计算差异…</div>
           <div v-else-if="diffError" class="diff-empty-box" style="color: var(--danger)">
             加载对比版本失败：{{ diffError }}
           </div>
           <div v-else-if="!baselineDetail" class="diff-empty-box">
-            当前模板尚未发布任何历史版本，暂无可对比基线。
+            当前模板尚未发布任何历史版本，暂无可对比版本。
           </div>
           <div
             v-else-if="diffAddedCount === 0 && diffRemovedCount === 0 && fieldDiffSummary.length === 0 && inputDiffSummary.length === 0 && skillDiffSummary.length === 0"
             class="diff-empty-box"
           >
-            当前工作区内容与所选基准版本完全一致，无行级或规则差异。
+            当前工作区内容与所选版本完全一致，无行级或规则差异。
           </div>
           <div v-else class="diff-lines-table mono">
             <div
@@ -2092,7 +2092,7 @@ onBeforeUnmount(() => {
   box-shadow: var(--shadow-sm);
 }
 
-/* 调试快照状态签与 Diff 胶囊 */
+/* 调试结果状态签与 Diff 胶囊 */
 .snapshot-status-pill,
 .diff-active-pill {
   min-width: 0;

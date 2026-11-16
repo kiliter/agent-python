@@ -110,11 +110,11 @@ function foldKey(...parts: Array<string | number | undefined>): string {
             <!-- 开始运行 -->
             <div v-if="e.type === 'run_started'" class="tl-init-box">
               <div>
-                核查模板：<strong>{{ e.templateId }} {{ e.templateName }}</strong>
+                模板：<strong>{{ e.templateId }} {{ e.templateName }}</strong>
                 <span class="chip-tag mono" style="margin-left: 6px">{{ e.rev }}</span>
               </div>
               <div class="tl-meta-row">
-                <span style="color: var(--text-secondary)">挂载 Skill 规程：</span>
+                <span style="color: var(--text-secondary)">挂载技能：</span>
                 <span v-if="!(e.skills ?? []).length" style="color: var(--text-secondary)">无</span>
                 <span
                   v-for="s in e.skills ?? []"
@@ -164,7 +164,7 @@ function foldKey(...parts: Array<string | number | undefined>): string {
 
                 <!-- load_skill（兼容单个 name 与批量 names） -->
                 <template v-if="e.tool === 'load_skill'">
-                  <span>加载规程</span>
+                  <span>加载技能</span>
                   <template v-if="toolMeta(e).skillNames.length">
                     <span
                       v-for="sk in toolMeta(e).skillNames"
@@ -326,7 +326,7 @@ function foldKey(...parts: Array<string | number | undefined>): string {
           </template>
           <template v-else-if="o.type === 'report_degraded'">
             <div style="font-weight: 600; color: var(--warning)">
-              重试次数耗尽，以下字段按缺失兜底策略处理：{{ (o.fields ?? []).join('、') || '—' }}
+              重试次数耗尽，以下字段按缺失时处理方式处理：{{ (o.fields ?? []).join('、') || '—' }}
             </div>
           </template>
           <template v-else>
@@ -356,7 +356,7 @@ function foldKey(...parts: Array<string | number | undefined>): string {
     <div v-if="isLive" class="timeline-step tl-node-card timeline-running">
       <span class="timeline-running-dot"></span>
       <span style="font-size: 12px; color: var(--primary); font-weight: 600">
-        智能体正在取证与推理中…
+        智能体正在取数与推理中…
       </span>
     </div>
   </div>

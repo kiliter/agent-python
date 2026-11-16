@@ -6,7 +6,7 @@ apis:
   - querySMSSendInfo
 ---
 
-<!-- #Created By AiCoding(codex) 迁移自 Java skills/verification-sms（SKILL.md + scripts/assembly.groovy + scripts/extract.groovy） -->
+<!-- #Created By AiCoding(codex) -->
 
 # 验证码短信
 

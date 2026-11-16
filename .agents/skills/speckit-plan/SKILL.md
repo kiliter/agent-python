@@ -8,6 +8,12 @@ metadata:
 ---
 
 
+## 单文件 Plan 兼容约定
+
+- 新需求的研究结论、领域与存储模型、内部接口契约及验证指南全部内联写入 `plan.md`，顶部保留 `<!-- SPECKIT_PLAN_LAYOUT: inline-v1 -->` 及 `plan-research`、`plan-data-model`、`plan-contracts`、`plan-quickstart` 四个 HTML 锚点；不再另建 `research.md`、`data-model.md`、`contracts/` 或 `quickstart.md`。
+- 仅当 `spec.md` 第 8.2 节明确确认涉及 `接口文档.md`、`资源迁移与Seed清单.md`、`部署与配置变更单.md` 三类外部独立交付物时，才生成对应文件并在 Plan/Tasks 建立链接；不涉及项只记录依据，不建空文件。
+- 后续 `speckit-tasks`、`speckit-analyze`、`speckit-implement` 均以 `plan.md` 内联四章作为权威设计依据；`plan` 阶段只完成设计与验证方案，不执行业务代码修改或跳过宪章检查。
+
 ## User Input
 
 ```text

@@ -6,7 +6,7 @@ apis:
   - querySMSSendInfo
 ---
 
-<!-- #Created By AiCoding(codex) 迁移自 Java skills/renewal-reminder-sms，二期升级采用 extract_dates + date_shift + regex_extract + query_result(anyOf) -->
+<!-- #Created By AiCoding(codex) -->
 
 # 续约提醒短信
 

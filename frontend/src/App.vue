@@ -1,6 +1,6 @@
 <!--
-  智能申告核查平台 · 业务支撑数智稽核中台 根布局组件
-  包含左侧可折叠权威主导航（3组8项）、50px 顶栏（面包屑/生产基线/⌘K全局检索/双主题切换/账号胶囊）、全局多页签栏、主视图与动态聊天保活舱、全局抽屉与弹窗
+  智能申告核查平台 根布局组件
+  包含左侧可折叠权威主导航（3组8项）、50px 顶栏（面包屑/线上版本/⌘K全局检索/双主题切换/账号胶囊）、全局多页签栏、主视图与动态聊天保活面板、全局抽屉与弹窗
   #Created By AiCoding(codex)
 -->
 <script setup lang="ts">
@@ -10,7 +10,9 @@ import { PanelLeftClose, PanelLeftOpen, ArrowUpRight, Search } from 'lucide-vue-
 import { usePlatformStore } from '@/stores/platform'
 import { useWorkspaceTabsStore } from '@/stores/workspaceTabs'
 import type { NavKey } from '@/types/platform'
+import { NAV_LABELS, NAV_GROUP_LABELS } from '@/constants/terms'
 import SvgIcon from '@/components/SvgIcon.vue'
+import BrandMark from '@/components/BrandMark.vue'
 import WorkspaceTabsBar from '@/components/WorkspaceTabsBar.vue'
 import ChatIframeTabPane from '@/components/ChatIframeTabPane.vue'
 
@@ -92,88 +94,88 @@ const allCmdkItems = computed<CmdkItem[]>(() => {
     {
       uid: 'nav:templates',
       kind: 'nav',
-      kindLabel: '导航模块',
+      kindLabel: '页面',
       icon: 'template',
       code: '',
-      title: '核查模板',
-      subtitle: '核心编排资产 · 模板台账与工作台编排入口',
+      title: NAV_LABELS.templates,
+      subtitle: '资源配置 · 管理模板，进入模板编辑',
       navKey: 'templates',
-      keywords: '核查模板 templates 编排资产 模板列表 工作台',
+      keywords: '模板 申告模板 核查模板 templates 模板列表 模板编辑 工作台',
     },
     {
       uid: 'nav:skills',
       kind: 'nav',
-      kindLabel: '导航模块',
+      kindLabel: '页面',
       icon: 'skill',
       code: '',
-      title: 'Skill 能力库',
-      subtitle: '核心编排资产 · 核查规程与业务判定规则库',
+      title: NAV_LABELS.skills,
+      subtitle: '资源配置 · 管理取数与判定技能',
       navKey: 'skills',
-      keywords: 'skill 能力库 技能 规程 规则 核心编排资产',
+      keywords: 'skill 技能 规程 能力库 规则',
     },
     {
       uid: 'nav:apis',
       kind: 'nav',
-      kindLabel: '导航模块',
+      kindLabel: '页面',
       icon: 'api',
       code: '',
-      title: 'API调用',
-      subtitle: '核心编排资产 · XML / JSON 双协议统一网关契约管理',
+      title: NAV_LABELS.apis,
+      subtitle: '资源配置 · 管理统一网关 API（XML / JSON）',
       navKey: 'apis',
-      keywords: 'api 调用 api调用 接口 crm 接口库 xml json 网关 报文契约 核心编排资产',
+      keywords: 'api api调用 接口 crm xml json 网关 契约',
     },
     {
       uid: 'nav:runs',
       kind: 'nav',
-      kindLabel: '导航模块',
+      kindLabel: '页面',
       icon: 'run',
       code: '',
-      title: '运行流水记录',
-      subtitle: '数智执行稽核 · 全链路执行轨迹与字段证据核查',
+      title: NAV_LABELS.runs,
+      subtitle: '运行与测试 · 查看每次运行的过程、结果与证据',
       navKey: 'runs',
-      keywords: '运行流水记录 runs 执行记录 稽核 证据溯源',
+      keywords: '运行记录 运行流水 runs 执行记录 证据',
     },
     {
       uid: 'nav:regression',
       kind: 'nav',
-      kindLabel: '导航模块',
+      kindLabel: '页面',
       icon: 'regression',
       code: '',
-      title: '基准回归测试',
-      subtitle: '数智执行稽核 · 黄金用例集批量回归与准确率基线',
+      title: NAV_LABELS.regression,
+      subtitle: '运行与测试 · 批量运行回归用例，检查准确率',
       navKey: 'regression',
-      keywords: '基准回归测试 regression 回归 用例 批量测试',
+      keywords: '回归测试 基准回归 regression 回归 用例 批量测试',
     },
     {
       uid: 'nav:releases',
       kind: 'nav',
-      kindLabel: '导航模块',
+      kindLabel: '页面',
       icon: 'release',
       code: store.currentLiveRelease.rev !== '—' ? store.currentLiveRelease.rev : '',
-      title: '发布版本基线',
-      subtitle: '基线发布治理 · 生产版本快照、对比与一键回滚',
+      title: NAV_LABELS.releases,
+      subtitle: '发布与设置 · 查看发布历史、版本对比与回退',
       navKey: 'releases',
-      keywords: '发布版本基线 releases 线上基线 版本 回滚 发布',
+      keywords: '版本发布 发布版本基线 基线 releases 线上版本 版本 回滚 发布',
     },
     {
       uid: 'nav:settings',
       kind: 'nav',
-      kindLabel: '导航模块',
+      kindLabel: '页面',
       icon: 'settings',
       code: '',
-      title: '引擎与系统设置',
-      subtitle: '基线发布治理 · 全局系统提示词、模型与网关参数',
+      title: NAV_LABELS.settings,
+      subtitle: '发布与设置 · 全局系统提示词、模型与网关参数',
       navKey: 'settings',
-      keywords: '引擎与系统设置 settings 系统设置 提示词 模型 配置',
+      keywords: '系统设置 引擎设置 settings 提示词 模型 配置',
     },
     {
       uid: 'nav:chatSim',
       kind: 'nav',
-      kindLabel: '导航模块',
+      kindLabel: '页面',
       icon: 'play',
       code: '',
-      title: '聊天窗口模拟',
-      subtitle: '基线发布治理 · 嵌入式智能填报窗口联调与新页签模拟',
+      title: NAV_LABELS.chatSim,
+      subtitle: '发布与设置 · 嵌入式智能填报窗口联调与新页签模拟',
       navKey: 'chatSim',
       keywords: '聊天窗口模拟 chatSim embed 嵌入联调 智能填报 postMessage',
     },
@@ -181,49 +183,49 @@ const allCmdkItems = computed<CmdkItem[]>(() => {
 
   const tplList = store.templates.map((t): CmdkItem => {
     const code = String(t.id)
-    const subtitle = t.description || '核查模板编排资产'
+    const subtitle = t.description || '模板'
     return {
       uid: `tpl:${code}`,
       kind: 'template',
-      kindLabel: '核查模板',
+      kindLabel: '模板',
       icon: 'template',
       code,
       title: t.name,
       subtitle,
       navKey: 'workbench',
-      keywords: `${code} ${t.name} ${subtitle} 核查模板 template`,
+      keywords: `${code} ${t.name} ${subtitle} 模板 template`,
       tplId: t.id,
     }
   })
 
   const skillList = store.skills.map((s): CmdkItem => {
-    const subtitle = s.description || 'Skill 核查能力单元'
+    const subtitle = s.description || '技能'
     return {
       uid: `skill:${s.id}`,
       kind: 'skill',
-      kindLabel: 'Skill 能力',
+      kindLabel: '技能',
       icon: 'skill',
       code: s.id !== s.name ? s.id : '',
       title: s.name,
       subtitle,
       navKey: 'skills',
-      keywords: `${s.id} ${s.name} ${subtitle} skill 能力库`,
+      keywords: `${s.id} ${s.name} ${subtitle} skill 技能`,
       skillId: s.id,
     }
   })
 
   const apiList = store.apis.map((a): CmdkItem => {
-    const subtitle = a.description || '统一网关 API 调用契约'
+    const subtitle = a.description || '统一网关 API'
     return {
       uid: `api:${a.name}`,
       kind: 'api',
-      kindLabel: 'API调用',
+      kindLabel: 'API',
       icon: 'api',
       code: a.name,
       title: a.title || a.name,
       subtitle,
       navKey: 'apis',
-      keywords: `${a.name} ${a.title} ${a.processCode || ''} ${a.format || ''} ${a.type || ''} ${a.description} api 调用 api调用 接口 crm xml json`,
+      keywords: `${a.name} ${a.title} ${a.processCode || ''} ${a.format || ''} ${a.type || ''} ${a.description} api api调用 接口 crm xml json`,
       apiName: a.name,
     }
   })
@@ -407,11 +409,11 @@ onBeforeUnmount(() => {
 
 const navGroups = computed(() => [
   {
-    title: '核心编排资产',
+    title: NAV_GROUP_LABELS.resources,
     items: [
       {
         key: 'templates' as NavKey,
-        label: '核查模板',
+        label: NAV_LABELS.templates,
         icon: 'template',
         active:
           !tabsStore.isChatIframeActive &&
@@ -420,14 +422,14 @@ const navGroups = computed(() => [
       },
       {
         key: 'skills' as NavKey,
-        label: 'Skill 能力库',
+        label: NAV_LABELS.skills,
         icon: 'skill',
         active: !tabsStore.isChatIframeActive && store.currentNav === 'skills',
         badge: store.skills.length > 0 ? String(store.skills.length) : '',
       },
       {
         key: 'apis' as NavKey,
-        label: 'API调用',
+        label: NAV_LABELS.apis,
         icon: 'api',
         active: !tabsStore.isChatIframeActive && store.currentNav === 'apis',
         badge: store.apis.length > 0 ? String(store.apis.length) : '',
@@ -435,18 +437,18 @@ const navGroups = computed(() => [
     ],
   },
   {
-    title: '数智执行稽核',
+    title: NAV_GROUP_LABELS.runAndTest,
     items: [
       {
         key: 'runs' as NavKey,
-        label: '运行流水记录',
+        label: NAV_LABELS.runs,
         icon: 'run',
         active: !tabsStore.isChatIframeActive && store.currentNav === 'runs',
         badge: '',
       },
       {
         key: 'regression' as NavKey,
-        label: '基准回归测试',
+        label: NAV_LABELS.regression,
         icon: 'regression',
         active: !tabsStore.isChatIframeActive && store.currentNav === 'regression',
         badge: '',
@@ -454,25 +456,25 @@ const navGroups = computed(() => [
     ],
   },
   {
-    title: '基线发布治理',
+    title: NAV_GROUP_LABELS.releaseAndSettings,
     items: [
       {
         key: 'releases' as NavKey,
-        label: '发布版本基线',
+        label: NAV_LABELS.releases,
         icon: 'release',
         active: !tabsStore.isChatIframeActive && store.currentNav === 'releases',
         badge: store.currentLiveRelease.rev !== '—' ? store.currentLiveRelease.rev : '',
       },
       {
         key: 'settings' as NavKey,
-        label: '引擎与系统设置',
+        label: NAV_LABELS.settings,
         icon: 'settings',
         active: !tabsStore.isChatIframeActive && store.currentNav === 'settings',
         badge: '',
       },
       {
         key: 'chatSim' as NavKey,
-        label: '聊天窗口模拟',
+        label: NAV_LABELS.chatSim,
         icon: 'play',
         active: store.currentNav === 'chatSim' || tabsStore.isChatIframeActive,
         badge: '',
@@ -482,22 +484,22 @@ const navGroups = computed(() => [
 ])
 
 const cmdkScopes: Array<{ key: CmdkScope; label: string }> = [
-  { key: 'all', label: '全部资产' },
-  { key: 'nav', label: '导航模块' },
-  { key: 'template', label: '核查模板' },
-  { key: 'skill', label: 'Skill 能力' },
-  { key: 'api', label: 'API调用' },
+  { key: 'all', label: '全部' },
+  { key: 'nav', label: '页面' },
+  { key: 'template', label: NAV_LABELS.templates },
+  { key: 'skill', label: NAV_LABELS.skills },
+  { key: 'api', label: NAV_LABELS.apis },
 ]
 
 // 当前用户展示：全部来自后端登录态，没有默认用户
 const userName = computed(() => store.currentUserLabel || store.currentUser?.username || '未登录')
 const userRole = computed(() => store.currentUserRole)
 
-// 顶部线上生产基线胶囊文案
+// 顶部线上线上版本胶囊文案
 const liveVersionText = computed(() => {
   const live = store.currentLiveRelease
-  if (!live || live.rev === '—') return '暂无生产基线'
-  return `生产基线 ${live.rev} · 运行正常`
+  if (!live || live.rev === '—') return '暂无线上版本'
+  return `线上版本 ${live.rev} · 运行正常`
 })
 
 function handleUserMenuCommand(cmd: string) {
@@ -515,17 +517,17 @@ function handleUserMenuCommand(cmd: string) {
 
   <!-- 管理端主应用骨架 -->
   <div v-else class="app-shell" :class="{ 'is-focus-fullscreen': store.isFocusFullscreen }">
-    <!-- 左侧权威主导航（可折叠，中国移动政企规范术语 3 组共 7 项，无方块品牌图标） -->
+    <!-- 左侧权威主导航（可折叠，中国移动政企规范术语 3 组共 7 项，F2 品牌标志） -->
     <aside class="sidebar" :class="{ collapsed: store.sidebarCollapsed }">
       <div
         class="sidebar-brand"
-        title="智能申告核查平台 · 业务支撑 · 数智稽核中台"
+        title="智能申告核查平台"
         @click="navigateFromShell('templates')"
       >
-        <span v-if="store.sidebarCollapsed" class="brand-collapsed-mark">申告</span>
+        <BrandMark :size="26" class="brand-logo-mark" />
         <div class="brand-copy">
           <span class="brand-text">智能申告核查平台</span>
-          <span class="brand-sub">业务支撑 · 数智稽核中台</span>
+          <span class="brand-sub">申告报告智能填写</span>
         </div>
         <span v-if="store.currentLiveRelease.rev !== '—'" class="brand-rev-tag">
           {{ store.currentLiveRelease.rev }}
@@ -565,9 +567,9 @@ function handleUserMenuCommand(cmd: string) {
       </button>
     </aside>
 
-    <!-- 右侧主控工作舱（亮色内嵌圆角云舱 / 暗色全幅省网指挥舱 / 模拟聊天右侧全屏舱） -->
+    <!-- 右侧主控工作区（亮色内嵌圆角卡片 / 暗色全幅主区域 / 模拟聊天右侧全屏区域） -->
     <div class="main-wrapper" :class="{ 'is-chat-fullscreen': tabsStore.isChatIframeActive }">
-      <!-- 50px 顶栏：规范面包屑、生产基线胶囊、⌘K 全局检索、双主题切换、纯文字账号胶囊 -->
+      <!-- 50px 顶栏：规范面包屑、线上版本胶囊、⌘K 全局检索、双主题切换、纯文字账号胶囊 -->
       <header v-show="!tabsStore.isChatIframeActive" class="topbar">
         <div class="topbar-left">
           <div class="breadcrumb">
@@ -577,10 +579,10 @@ function handleUserMenuCommand(cmd: string) {
               <span class="breadcrumb-current">智能填报 · {{ tabsStore.activeChatTab.orderId }}</span>
             </template>
             <template v-else-if="store.currentNav === 'templates'">
-              <span class="breadcrumb-current">核查模板</span>
+              <span class="breadcrumb-current">模板</span>
             </template>
             <template v-else-if="store.currentNav === 'workbench'">
-              <span class="breadcrumb-link" @click="store.handleBackFromWorkbench()">核查模板</span>
+              <span class="breadcrumb-link" @click="store.handleBackFromWorkbench()">模板</span>
               <span class="breadcrumb-sep">/</span>
               <span class="breadcrumb-current">
                 {{ store.currentTemplate.id }} {{ store.currentTemplate.name }}
@@ -588,36 +590,36 @@ function handleUserMenuCommand(cmd: string) {
             </template>
             <template v-else-if="store.currentNav === 'skills'">
               <template v-if="store.skillsSubView === 'detail'">
-                <span class="breadcrumb-link" @click="store.skillsSubView = 'list'">Skill 能力库</span>
+                <span class="breadcrumb-link" @click="store.skillsSubView = 'list'">技能</span>
                 <span class="breadcrumb-sep">/</span>
                 <span class="breadcrumb-current">{{ store.currentSkill.name }}</span>
               </template>
-              <span v-else class="breadcrumb-current">Skill 能力库</span>
+              <span v-else class="breadcrumb-current">技能</span>
             </template>
             <template v-else-if="store.currentNav === 'apis'">
               <template v-if="store.apisSubView === 'detail'">
-                <span class="breadcrumb-link" @click="store.apisSubView = 'list'">API调用</span>
+                <span class="breadcrumb-link" @click="store.apisSubView = 'list'">API</span>
                 <span class="breadcrumb-sep">/</span>
                 <span class="breadcrumb-current mono">{{ store.selectedApiName }}</span>
               </template>
-              <span v-else class="breadcrumb-current">API调用</span>
+              <span v-else class="breadcrumb-current">API</span>
             </template>
             <template v-else-if="store.currentNav === 'runs'">
               <template v-if="store.runsSubView === 'detail'">
-                <span class="breadcrumb-link" @click="store.runsSubView = 'list'">运行流水记录</span>
+                <span class="breadcrumb-link" @click="store.runsSubView = 'list'">运行记录</span>
                 <span class="breadcrumb-sep">/</span>
                 <span class="breadcrumb-current mono">{{ store.selectedRunId }}</span>
               </template>
-              <span v-else class="breadcrumb-current">运行流水记录</span>
+              <span v-else class="breadcrumb-current">运行记录</span>
             </template>
             <template v-else-if="store.currentNav === 'regression'">
-              <span class="breadcrumb-current">基准回归测试</span>
+              <span class="breadcrumb-current">回归测试</span>
             </template>
             <template v-else-if="store.currentNav === 'releases'">
-              <span class="breadcrumb-current">发布版本基线</span>
+              <span class="breadcrumb-current">版本发布</span>
             </template>
             <template v-else-if="store.currentNav === 'settings'">
-              <span class="breadcrumb-current">引擎与系统设置</span>
+              <span class="breadcrumb-current">系统设置</span>
             </template>
             <template v-else-if="store.currentNav === 'chatSim'">
               <span class="breadcrumb-current">聊天窗口模拟</span>
@@ -631,8 +633,8 @@ function handleUserMenuCommand(cmd: string) {
             class="live-version-pill"
             :title="
               store.currentLiveRelease.rev !== '—'
-                ? `点击查看发布版本基线 · 发版时间 ${store.currentLiveRelease.time}`
-                : '点击查看发布版本基线'
+                ? `点击查看版本发布 · 发版时间 ${store.currentLiveRelease.time}`
+                : '点击查看版本发布'
             "
             @click="navigateFromShell('releases')"
           >
@@ -652,18 +654,18 @@ function handleUserMenuCommand(cmd: string) {
             @click="openCommandPalette()"
           >
             <Search :size="13" class="global-search-icon" />
-            <span class="global-search-placeholder">检索模板、Skill、API调用或模块...</span>
+            <span class="global-search-placeholder">检索模板、技能、API 或页面...</span>
             <kbd class="global-search-kbd">⌘K</kbd>
           </button>
 
           <button
             type="button"
             class="btn topbar-theme-btn"
-            :title="store.theme === 'light' ? '切换至省网指挥大屏暗色模式' : '切换至极昼云原生亮色模式'"
+            :title="store.theme === 'light' ? '切换至深色模式' : '切换至浅色模式'"
             @click="store.toggleTheme()"
           >
             <SvgIcon :name="store.theme === 'light' ? 'moon' : 'sun'" :size="14" />
-            <span>{{ store.theme === 'light' ? '省网大屏' : '极昼云台' }}</span>
+            <span>{{ store.theme === 'light' ? '深色' : '浅色' }}</span>
           </button>
 
           <!-- 用户下拉菜单：纯文字端庄胶囊，无方形头像图标 -->
@@ -679,7 +681,7 @@ function handleUserMenuCommand(cmd: string) {
                   账号：{{ store.currentUser?.username || '—' }}<template v-if="userRole">（{{ userRole }}）</template>
                 </el-dropdown-item>
                 <el-dropdown-item divided command="theme">
-                  切换至{{ store.theme === 'light' ? '省网大屏' : '极昼云台' }}
+                  切换至{{ store.theme === 'light' ? '深色' : '浅色' }}
                 </el-dropdown-item>
                 <el-dropdown-item command="logout">
                   <span style="color: var(--danger)">退出登录</span>
@@ -729,7 +731,7 @@ function handleUserMenuCommand(cmd: string) {
             v-model="cmdkQuery"
             type="text"
             class="cmdk-input"
-            placeholder="输入关键字检索核查模板、Skill 能力、API调用或导航模块..."
+            placeholder="输入关键字检索模板、技能、API 或页面..."
             autocomplete="off"
             @keydown="onCmdkInputKeydown"
           />
@@ -787,7 +789,7 @@ function handleUserMenuCommand(cmd: string) {
             </button>
           </template>
           <div v-else class="cmdk-empty">
-            未检索到与「{{ cmdkQuery }}」匹配的核查模板、Skill、API调用或导航模块
+            未检索到与「{{ cmdkQuery }}」匹配的模板、技能、API 或页面
           </div>
         </div>
 

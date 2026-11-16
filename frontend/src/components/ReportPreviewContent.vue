@@ -1,7 +1,7 @@
 <!--
   #Created By AiCoding(codex)
   报告渲染预览通用组件（复用在「试运行 · 报告预览」「正文 · 渲染预览」「运行记录 · 报告」）：
-  - 鼠标移入任意已填充字段值 / 默认值兜底 / 占位符时，立即在值上方悬浮展示对应的字段 Key（无原生 title 延迟、无遮挡裁剪）
+  - 鼠标移入任意已填充字段值 / 默认值 / 占位符时，立即在值上方悬浮展示对应的字段 Key（无原生 title 延迟、无遮挡裁剪）
   - 同名 Key 在报告中出现多处时同步柔和描边提示，点击可联动定位右侧证据或打开字段编辑抽屉
 -->
 <script setup lang="ts">
@@ -125,7 +125,7 @@ function buildTooltipMeta(seg: ReportSegment): { metaTag: string; subText: strin
 
   if (seg.kind === 'default') {
     return {
-      metaTag: props.hasRunResult ? '未找到 · 默认值兜底' : '默认值预览',
+      metaTag: props.hasRunResult ? '未找到 · 显示默认值' : '默认值预览',
       subText: f?.evidenceType ? `证据要求：${evLabel}` : '',
     }
   }
@@ -386,7 +386,7 @@ onBeforeUnmount(() => {
 }
 </style>
 
-<!-- 挂载至 body 的悬浮字段 Key 气泡（无 scoped，确保亮/暗双主题精确命中且不污染根元素） -->
+<!-- 挂载至 body 的悬浮字段 Key 气泡（无 scoped，确保亮/暗双主题精确匹配且不污染根元素） -->
 <style>
 .report-field-tooltip {
   position: fixed;

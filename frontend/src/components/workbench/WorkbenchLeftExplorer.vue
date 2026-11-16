@@ -1,5 +1,5 @@
 <!--
-  核查模板 IDE 工作台 · 左侧双列资源编排器（左一 50px 活动切换栏 + 左二可折叠资产树）
+  模板 IDE 工作台 · 左侧双列资源浏览器（左一 50px 活动切换栏 + 左二可折叠资产树）
   100% 对接 Pinia Store 真实后端数据，支持 SortableJS 字段拖拽重排与正文联动
   #Created By AiCoding(codex)
 -->
@@ -9,7 +9,7 @@ import Sortable from 'sortablejs'
 import { usePlatformStore } from '@/stores/platform'
 import type { EvidenceType, TemplateField } from '@/types/platform'
 
-type IdeLeftSection = 'fields' | 'inputs' | 'skills' | 'cases' | 'history'
+type IdeLeftSection = 'info' | 'fields' | 'inputs' | 'skills' | 'cases' | 'history'
 
 interface HistoryListItem {
   key: string
@@ -30,7 +30,7 @@ let sortableInstance: Sortable | null = null
 const tpl = computed(() => store.currentTemplate)
 const hasOnline = computed(() => Boolean(tpl.value.onlineRev) && tpl.value.onlineRev !== '—')
 
-/** 当前调试快照中的字段状态映射（存在快照时反映真实命中/缺失，否则反映正文引用状态） */
+/** 当前调试结果中的字段状态映射（有调试结果时反映真实找到/缺失，否则反映正文引用状态） */
 const runFieldMap = computed(() => {
   const map = new Map<string, TemplateField>()
   const list = store.dryRunResult?.fields || []
@@ -38,30 +38,36 @@ const runFieldMap = computed(() => {
   return map
 })
 
-/** 活动栏 5 大核心编排分类与真实计数 */
-const activityTabs = computed<Array<{ key: IdeLeftSection; label: string; title: string; count: number }>>(() => [
+/** 活动栏 5 大核心编辑分类与真实计数 */
+const activityTabs = computed<Array<{ key: IdeLeftSection; label: string; title: string; count: number | null }>>(() => [
+  {
+    key: 'info',
+    label: '信息',
+    title: '模板名称与说明（再次点击可折叠/展开列表）',
+    count: null,
+  },
   {
     key: 'fields',
     label: '字段',
-    title: '核查取证字段清单（再次点击可折叠/展开列表）',
+    title: '字段列表（再次点击可折叠/展开列表）',
     count: store.templateFields.length,
   },
   {
     key: 'inputs',
     label: '入参',
-    title: '调用入参契约（再次点击可折叠/展开列表）',
+    title: '入参（再次点击可折叠/展开列表）',
     count: store.templateInputs.length,
   },
   {
     key: 'skills',
-    label: '规程',
-    title: '已绑定 Skill 核查规程（再次点击可折叠/展开列表）',
+    label: '技能',
+    title: '已绑定技能（再次点击可折叠/展开列表）',
     count: store.templateSkills.length,
   },
   {
     key: 'cases',
     label: '用例',
-    title: '基准回归测试用例（再次点击可折叠/展开列表）',
+    title: '回归用例（再次点击可折叠/展开列表）',
     count: store.templateCases.length,
   },
   {
@@ -74,14 +80,16 @@ const activityTabs = computed<Array<{ key: IdeLeftSection; label: string; title:
 
 const sectionTitle = computed(() => {
   switch (store.ideLeftSection) {
+    case 'info':
+      return '基本信息'
     case 'fields':
       return `核查字段清单 (${store.templateFields.length})`
     case 'inputs':
-      return `调用入参契约 (${store.templateInputs.length})`
+      return `入参 (${store.templateInputs.length})`
     case 'skills':
-      return `已绑定规程 (${store.templateSkills.length})`
+      return `已绑定技能 (${store.templateSkills.length})`
     case 'cases':
-      return `基准回归用例 (${store.templateCases.length})`
+      return `回归用例 (${store.templateCases.length})`
     case 'history':
       return `版本修订历史 (${store.templateRevisions.length})`
     default:
@@ -109,11 +117,11 @@ const createBtnLabel = computed(() => {
 const searchPlaceholder = computed(() => {
   switch (store.ideLeftSection) {
     case 'fields':
-      return '过滤字段名称 / 取证说明...'
+      return '过滤字段名称 / 填写说明...'
     case 'inputs':
       return '过滤入参 Key / 说明...'
     case 'skills':
-      return '过滤规程名称 / 标识 / 接口...'
+      return '过滤技能名称 / 标识 / 接口...'
     case 'cases':
       return '过滤用例编号 / 名称...'
     case 'history':
@@ -154,7 +162,7 @@ const filteredInputs = computed(() => {
     )
 })
 
-/** 过滤后的已绑定 Skill 条目 */
+/** 过滤后的已绑定技能条目 */
 const filteredSkills = computed(() => {
   const q = normalizedQuery.value
   return store.templateSkills
@@ -209,7 +217,7 @@ const historyEntries = computed<HistoryListItem[]>(() => {
   if (hasOnline.value) {
     items.push({
       key: 'online',
-      revLabel: `线上基线 (${tpl.value.onlineRev})`,
+      revLabel: `线上版本 (${tpl.value.onlineRev})`,
       badgeText: 'LIVE',
       badgeTone: 'input',
       dotTone: 'ok',
@@ -257,14 +265,14 @@ function fieldDotMeta(field: TemplateField): { cls: string; title: string } {
         const n = Array.isArray(rf.runRows) ? rf.runRows.length : (rf.runValue || '').trim() === '[]' ? 0 : -1
         return {
           cls: 'ok',
-          title: n === 0 ? '当前快照已查证：无记录（0 行）' : n > 0 ? `当前快照已命中：共 ${n} 行` : '当前快照已命中',
+          title: n === 0 ? '调试结果：无记录（0 行）' : n > 0 ? `已找到：共 ${n} 行` : '已找到',
         }
       }
-      return { cls: 'ok', title: `当前快照已命中：${rf.runValue || '有效值'}` }
+      return { cls: 'ok', title: `已找到：${rf.runValue || '有效值'}` }
     }
     return {
       cls: 'warn',
-      title: rf.type === '列表' ? '当前快照缺失：未取到列表结果' : '当前快照未取到证据，按缺失兜底策略处理',
+      title: rf.type === '列表' ? '缺失：未取到列表结果' : '未取到证据，按缺失时处理方式处理',
     }
   }
   if ((field.bodyUsageCount ?? 0) > 0) {
@@ -467,14 +475,14 @@ onBeforeUnmount(() => {
   <aside
     class="wb-left-zone"
     :class="{ 'is-collapsed': store.ideLeftCollapsed }"
-    aria-label="左侧核查资源编排区"
+    aria-label="左侧资源区"
   >
     <!-- 左一窄列：50px 竖向活动栏 -->
     <div class="ide-activity-bar">
       <button
         type="button"
         class="act-back-btn"
-        title="返回核查模板列表"
+        title="返回模板列表"
         @click="handleBackClick"
       >
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -497,9 +505,23 @@ onBeforeUnmount(() => {
         :title="tabItem.title"
         @click="onSectionTabClick(tabItem.key)"
       >
+        <!-- 信息 SVG -->
+        <svg
+          v-if="tabItem.key === 'info'"
+          width="15"
+          height="15"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.85"
+        >
+          <circle cx="12" cy="12" r="10" />
+          <line x1="12" y1="16" x2="12" y2="12" />
+          <line x1="12" y1="8" x2="12.01" y2="8" />
+        </svg>
         <!-- 字段 SVG -->
         <svg
-          v-if="tabItem.key === 'fields'"
+          v-else-if="tabItem.key === 'fields'"
           width="15"
           height="15"
           viewBox="0 0 24 24"
@@ -534,7 +556,7 @@ onBeforeUnmount(() => {
           <line x1="9" y1="8" x2="15" y2="8" />
           <line x1="17" y1="16" x2="23" y2="16" />
         </svg>
-        <!-- 规程 SVG -->
+        <!-- 技能 SVG -->
         <svg
           v-else-if="tabItem.key === 'skills'"
           width="15"
@@ -575,7 +597,7 @@ onBeforeUnmount(() => {
         </svg>
 
         <span class="act-tab-label">{{ tabItem.label }}</span>
-        <span class="act-tab-count mono">{{ tabItem.count }}</span>
+        <span v-if="tabItem.count !== null" class="act-tab-count mono">{{ tabItem.count }}</span>
       </button>
     </div>
 
@@ -583,12 +605,17 @@ onBeforeUnmount(() => {
     <div v-if="!store.ideLeftCollapsed" class="ide-explorer">
       <div class="explorer-head">
         <span class="explorer-title">{{ sectionTitle }}</span>
-        <button type="button" class="ide-btn ide-btn-xs" @click="handleHeaderCreateAction">
+        <button
+          v-if="store.ideLeftSection !== 'info'"
+          type="button"
+          class="ide-btn ide-btn-xs"
+          @click="handleHeaderCreateAction"
+        >
           {{ createBtnLabel }}
         </button>
       </div>
 
-      <div class="explorer-search-bar">
+      <div v-if="store.ideLeftSection !== 'info'" class="explorer-search-bar">
         <input
           v-model="searchQuery"
           type="text"
@@ -606,8 +633,21 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
+      <!-- 0. 基本信息摘要（编辑在右侧属性配置区） -->
+      <div v-if="store.ideLeftSection === 'info'" class="explorer-list">
+        <div class="res-item active info-summary-item">
+          <div class="res-main">
+            <div class="res-name-row">
+              <span class="res-name">{{ store.templateName || '未命名模板' }}</span>
+              <span class="ev-micro-tag ev-hidden mono">#{{ store.currentTemplateId }}</span>
+            </div>
+            <div class="res-sub info-summary-desc">{{ store.templateDescription || '暂无模板说明，可在右侧填写' }}</div>
+          </div>
+        </div>
+      </div>
+
       <!-- 1. 字段清单 -->
-      <div v-if="store.ideLeftSection === 'fields'" class="explorer-list">
+      <div v-else-if="store.ideLeftSection === 'fields'" class="explorer-list">
         <!-- 未定义正文变量快捷补建提示 -->
         <div
           v-if="!normalizedQuery && store.undefinedBodyFields.length > 0"
@@ -637,7 +677,7 @@ onBeforeUnmount(() => {
           <span class="status-dot warn"></span>
           <div class="res-main">
             <div class="res-name-row">
-              <span class="res-name">{{ store.ideCreatingFieldDraft || '新建取证字段（待保存）' }}</span>
+              <span class="res-name">{{ store.ideCreatingFieldDraft || '新建字段（待保存）' }}</span>
               <span class="ev-micro-tag ev-quote">新建</span>
             </div>
             <div class="res-sub">请在右侧属性面板填写规则并应用</div>
@@ -700,11 +740,11 @@ onBeforeUnmount(() => {
         </div>
 
         <div v-if="filteredFields.length === 0" class="explorer-empty">
-          {{ normalizedQuery ? '无匹配的核查取证字段' : '暂无字段，点击右上角「+ 新建」添加' }}
+          {{ normalizedQuery ? '无匹配的字段' : '暂无字段，点击右上角「+ 新建」添加' }}
         </div>
       </div>
 
-      <!-- 2. 调用入参契约 -->
+      <!-- 2. 入参 -->
       <div v-else-if="store.ideLeftSection === 'inputs'" class="explorer-list">
         <div
           v-for="{ inp, realIdx } in filteredInputs"
@@ -732,11 +772,11 @@ onBeforeUnmount(() => {
         </div>
 
         <div v-if="filteredInputs.length === 0" class="explorer-empty">
-          {{ normalizedQuery ? '无匹配的调用入参' : '暂无入参契约，点击右上角「+ 新建」添加' }}
+          {{ normalizedQuery ? '无匹配的调用入参' : '暂无入参，点击右上角「+ 新建」添加' }}
         </div>
       </div>
 
-      <!-- 3. 已绑定 Skill 规程 -->
+      <!-- 3. 已绑定技能 -->
       <div v-else-if="store.ideLeftSection === 'skills'" class="explorer-list">
         <div
           v-for="{ id, item } in filteredSkills"
@@ -776,18 +816,18 @@ onBeforeUnmount(() => {
                   ? item.apis.length
                     ? item.apis.join(', ')
                     : item.id
-                  : `${id} · 规程库未找到`
+                  : `${id} · 技能不存在`
               }}
             </div>
           </div>
         </div>
 
         <div v-if="filteredSkills.length === 0" class="explorer-empty">
-          {{ normalizedQuery ? '无匹配的已绑定规程' : '暂未绑定核查规程，点击右上角「+ 绑定」选择' }}
+          {{ normalizedQuery ? '无匹配的已绑定技能' : '暂未绑定技能，点击右上角「+ 绑定」选择' }}
         </div>
       </div>
 
-      <!-- 4. 基准回归用例 -->
+      <!-- 4. 回归用例 -->
       <div v-else-if="store.ideLeftSection === 'cases'" class="explorer-list">
         <div
           v-if="store.ideSelectedCaseIdx < 0 && !normalizedQuery"
@@ -796,7 +836,7 @@ onBeforeUnmount(() => {
           <span class="status-dot warn"></span>
           <div class="res-main">
             <div class="res-name-row">
-              <span class="res-name">新建基准回归用例</span>
+              <span class="res-name">新建回归用例</span>
               <span class="ev-micro-tag ev-quote">新建</span>
             </div>
             <div class="res-sub">请在右侧属性面板填写并保存</div>
@@ -826,7 +866,7 @@ onBeforeUnmount(() => {
               <span class="ref-count-tag mono">{{ c.id }}</span>
             </div>
             <div class="res-sub">
-              {{ c.source || '手工沉淀' }} ·
+              {{ c.source || '手工新建' }} ·
               {{ Object.keys(c.expectedValues || {}).length || c.expectedCount || 0 }} 项期望
             </div>
           </div>
@@ -1371,6 +1411,11 @@ onBeforeUnmount(() => {
   font-size: 12px;
   color: var(--text-secondary);
   text-align: center;
+  line-height: 1.5;
+}
+.info-summary-desc {
+  white-space: normal;
+  word-break: break-all;
   line-height: 1.5;
 }
 </style>

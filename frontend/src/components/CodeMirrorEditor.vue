@@ -234,7 +234,7 @@ function resetEdit(customText?: string, silent = false) {
     suppressChangeEmit = false
   }
   if (!silent) {
-    store.showToast('已恢复为基准版本内容（可按 Ctrl+Z 撤销）', 'success')
+    store.showToast('已恢复为原始内容（可按 Ctrl+Z 撤销）', 'success')
   }
 }
 

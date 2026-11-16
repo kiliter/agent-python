@@ -1,9 +1,10 @@
 <!--
-  5.8 发布版本基线视图（生产版本基线时间线 + 紧急回切线上基线 + 版本间整体资产差异对比）
+  5.8 版本发布视图（线上版本时间线 + 紧急回退线上版本 + 版本间整体资产差异对比）
   时间线与差异均来自后端 /api/v1/releases 与 /api/v1/releases/diff。
   #Created By AiCoding(codex)
 -->
 <script setup lang="ts">
+import { NAV_LABELS } from '@/constants/terms'
 import { ref, computed, watch, onMounted } from 'vue'
 import { usePlatformStore } from '@/stores/platform'
 import type { ReleaseChange, ReleaseDiffItem } from '@/types/platform'
@@ -15,9 +16,9 @@ const diffVerB = ref('')
 
 /** 资源类型中文名 */
 const KIND_LABELS: Record<ReleaseDiffItem['kind'], string> = {
-  template: '核查模板',
-  skill: 'Skill 规程',
-  api: 'API调用',
+  template: NAV_LABELS.templates,
+  skill: NAV_LABELS.skills,
+  api: NAV_LABELS.apis,
   'system-prompt': '系统提示词',
 }
 
@@ -90,7 +91,7 @@ onMounted(() => {
   if (before === `${diffVerA.value}|${diffVerB.value}`) reloadDiff()
 })
 
-/** 已删除的 Skill / 接口无法再打开详情，模板下线后仍可查看 */
+/** 已删除的技能 / 接口无法再打开详情，模板下线后仍可查看 */
 function canOpen(row: ReleaseDiffItem) {
   return row.change !== 'removed' || row.kind === 'template' || row.kind === 'system-prompt'
 }
@@ -123,10 +124,10 @@ function openEmergencySwitch(rev: string) {
 
 <template>
   <div class="page-fill releases-page">
-    <!-- 顶部生产基线治理概览栏 -->
+    <!-- 顶部线上版本概览栏 -->
     <div class="rel-overview-bar">
       <div class="rel-ov-item">
-        <span class="rel-ov-label">当前线上生产基线</span>
+        <span class="rel-ov-label">当前线上版本</span>
         <div class="rel-ov-val-wrap">
           <span class="rel-live-dot"></span>
           <strong class="mono rel-ov-primary">{{ liveRelease?.rev || '未发布' }}</strong>
@@ -149,7 +150,7 @@ function openEmergencySwitch(rev: string) {
       <div class="rel-ov-divider"></div>
 
       <div class="rel-ov-item">
-        <span class="rel-ov-label">不可变基线快照总数</span>
+        <span class="rel-ov-label">历史版本总数</span>
         <div class="rel-ov-val-wrap">
           <strong class="mono">{{ store.globalReleases.length }}</strong>
           <span class="rel-ov-unit">个全局版本</span>
@@ -163,22 +164,22 @@ function openEmergencySwitch(rev: string) {
         <div class="rel-ov-val-wrap mono">
           <span v-if="diffVerA && diffVerB">{{ diffVerA }} → {{ diffVerB }}：</span>
           <strong>{{ diffSummary.total }}</strong>
-          <span class="rel-ov-unit">项资产</span>
+          <span class="rel-ov-unit">项资源</span>
         </div>
       </div>
     </div>
 
-    <!-- 双栏主体：左侧生产版本基线时间线 + 右侧版本间全量差异表 -->
+    <!-- 双栏主体：左侧线上版本时间线 + 右侧版本间全量差异表 -->
     <div class="rel-split-grid">
-      <!-- 左侧：生产版本基线时间线 -->
+      <!-- 左侧：线上版本时间线 -->
       <div class="card card-fill">
         <div class="card-header">
           <div class="card-title">
-            <span>生产版本基线时间线</span>
+            <span>线上版本时间线</span>
             <span class="chip-tag mono">{{ store.globalReleases.length }}</span>
           </div>
           <span style="font-size: 11.5px; color: var(--text-secondary)">
-            每次发布自动生成不可变快照，支持秒级回切
+            每次发布自动生成新版本，可随时回退
           </span>
         </div>
 
@@ -187,7 +188,7 @@ function openEmergencySwitch(rev: string) {
             v-if="store.globalReleases.length === 0"
             style="padding: 36px 20px; text-align: center; color: var(--text-secondary); font-size: 12.5px"
           >
-            暂无发布版本记录。发布核查模板、Skill 规程、API调用或系统提示词后将在此自动沉淀全局基线。
+            暂无发布版本记录。发布模板、技能、API 或系统提示词后将在此自动生成新版本。
           </div>
 
           <div v-else class="rel-timeline-track">
@@ -203,7 +204,7 @@ function openEmergencySwitch(rev: string) {
                 <span class="rel-rail-line"></span>
               </div>
 
-              <!-- 右侧基线卡片（当前线上生产基线突出 var(--primary) 左侧/顶部标识线） -->
+              <!-- 右侧版本卡片（当前线上版本突出 var(--primary) 左侧/顶部标识线） -->
               <div class="rel-baseline-card" :class="{ 'is-live-card': rel.isLive }">
                 <div class="rel-card-head">
                   <div class="rel-card-head-left">
@@ -211,7 +212,7 @@ function openEmergencySwitch(rev: string) {
                       {{ rel.rev }}
                     </span>
                     <span v-if="rel.isLive" class="rel-live-badge">
-                      ● 当前线上生产基线
+                      ● 当前线上版本
                     </span>
                     <span v-if="rel.type" class="chip-tag">{{ rel.type }}</span>
                     <span v-if="rel.base" class="rel-base-meta mono">
@@ -227,7 +228,7 @@ function openEmergencySwitch(rev: string) {
                 </div>
 
                 <div class="rel-card-body">
-                  <div class="rel-summary-title">{{ rel.summary || '常规版本基线发布' }}</div>
+                  <div class="rel-summary-title">{{ rel.summary || '常规版本发布' }}</div>
                   <div v-if="rel.note" class="rel-note-box">
                     <span class="rel-note-label">变更说明：</span>{{ rel.note }}
                   </div>
@@ -256,7 +257,7 @@ function openEmergencySwitch(rev: string) {
                         :class="{ 'is-picked': diffVerA === rel.rev }"
                         @click="diffVerA = rel.rev"
                       >
-                        设为对比基准 A
+                        设为对比版本 A
                       </button>
                       <span style="color: var(--border-color)">·</span>
                       <button
@@ -279,7 +280,7 @@ function openEmergencySwitch(rev: string) {
                       class="btn btn-sm btn-danger-ghost"
                       @click="openEmergencySwitch(rel.rev)"
                     >
-                      紧急回切至此版本
+                      紧急回退至此版本
                     </button>
                   </div>
                 </div>
@@ -293,13 +294,13 @@ function openEmergencySwitch(rev: string) {
       <div class="card card-fill">
         <div class="card-header rel-diff-header">
           <div class="card-title" style="flex-wrap: wrap; gap: 6px">
-            <span>基线间资产差异对比</span>
+            <span>版本差异对比</span>
             <select
               v-model="diffVerA"
               class="select mono"
               style="width: 88px"
               :disabled="!store.globalReleases.length"
-              aria-label="对比基准版本 A"
+              aria-label="对比版本 A"
             >
               <option v-for="rel in store.globalReleases" :key="rel.rev" :value="rel.rev">
                 {{ rel.rev }}
@@ -338,8 +339,8 @@ function openEmergencySwitch(rev: string) {
           <table class="data-table">
             <thead>
               <tr>
-                <th style="width: 96px; white-space: nowrap">资产类型</th>
-                <th>资产标识与名称</th>
+                <th style="width: 96px; white-space: nowrap">资源类型</th>
+                <th>资源标识与名称</th>
                 <th style="width: 72px; white-space: nowrap">变更</th>
                 <th>涉及底层文件</th>
                 <th style="width: 76px; min-width: 76px; text-align: right; white-space: nowrap">操作</th>
@@ -353,10 +354,10 @@ function openEmergencySwitch(rev: string) {
                 >
                   <template v-if="!store.globalReleases.length">暂无发布版本可供对比。</template>
                   <template v-else-if="diffVerA === diffVerB">
-                    当前基准与目标均为 <span class="mono">{{ diffVerA }}</span>，请选择两个不同的基线版本对比。
+                    两侧均为 <span class="mono">{{ diffVerA }}</span>，请选择两个不同的版本对比。
                   </template>
                   <template v-else>
-                    基线 <span class="mono">{{ diffVerA }}</span> 与 <span class="mono">{{ diffVerB }}</span> 之间无资产差异。
+                    版本 <span class="mono">{{ diffVerA }}</span> 与 <span class="mono">{{ diffVerB }}</span> 之间无差异。
                   </template>
                 </td>
               </tr>
@@ -529,7 +530,7 @@ function openEmergencySwitch(rev: string) {
   background: transparent;
 }
 
-/* 基线版本卡片 */
+/* 版本卡片 */
 .rel-baseline-card {
   flex: 1;
   min-width: 0;
@@ -546,7 +547,7 @@ function openEmergencySwitch(rev: string) {
   border-color: var(--primary-border);
 }
 
-/* 当前线上生产基线突出 var(--primary) 左侧标识线 */
+/* 当前线上版本突出 var(--primary) 左侧标识线 */
 .rel-baseline-card.is-live-card {
   border-color: var(--primary-border);
   border-left: 3px solid var(--primary);

@@ -5,7 +5,7 @@ description: 模板需要“受理渠道”（热线 / 掌上营业厅 / 其他�
 apis: []
 ---
 
-<!-- #Created By AiCoding(codex) 迁移自 Java skills/accept-type（SKILL.md + scripts/extract.groovy，dependencies: business-sms） -->
+<!-- #Created By AiCoding(codex) -->
 
 # 受理渠道
 

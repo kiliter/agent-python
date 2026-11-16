@@ -1,113 +1,338 @@
-# Implementation Plan: [FEATURE]
+# 设计文档（Feature Design Spec）：[FEATURE]
 
-**Branch**: `[###-feature-name]` | **Date**: [DATE] | **Spec**: [link]
+<!-- #Created By AiCoding(codex) -->
+<!-- SPECKIT_PLAN_LAYOUT: inline-v1 -->
 
-**Input**: Feature specification from `/specs/[###-feature-name]/spec.md`
+> **Spec Kit 使用约定**：本模板采用**单文件内联布局（inline-v1）**，研究决策、领域与存储模型、内部接口契约及验证指南全部内联维护在本文件四个锚点章节中，不另建 `research.md`、`data-model.md`、`contracts/` 或 `quickstart.md`。仅当 `spec.md` 第 8.2 节确认涉及三类外部独立交付物时，才生成对应独立文件并在本文件建立链接。生成时须将全部 `{...}` 占位符替换为具体结论；不适用章节保留标题并说明 `本需求不涉及` 及依据。
 
-**Note**: This template is filled in by the `/speckit.plan` command; its definition describes the execution workflow.
+---
 
-## Summary
+**分支**：`[###-feature-name]` | **日期**：[DATE] | **规格**：`./spec.md`
 
-[Extract from feature spec: primary requirement + technical approach from research]
+**输入**：`/specs/[###-feature-name]/spec.md`
 
-## Technical Context
+## 基本信息
 
-<!--
-  ACTION REQUIRED: Replace the content in this section with the technical details
-  for the project. The structure here is presented in advisory capacity to guide
-  the iteration process.
--->
+| 字段 | 内容 |
+| --- | --- |
+| 需求编号 | {与 spec.md 一致} |
+| 需求名称 | {与 spec.md 一致} |
+| 对应需求文档 | `./spec.md` |
+| 对应任务清单 | `./tasks.md` |
+| 设计文档版本 | {如 1.0} |
+| 设计人 | {工程师/AI} |
+| 核算工作量 | {如 XX.X 人天，若不按人天拆分则写“不涉及人天核算”} |
+| 状态 | {草稿 / 评审中 / 已确认 / 已交付归档} |
 
-**Language/Version**: [e.g., Python 3.11, Swift 5.9, Rust 1.75 or NEEDS CLARIFICATION]
+---
 
-**Primary Dependencies**: [e.g., FastAPI, UIKit, LLVM or NEEDS CLARIFICATION]
+## 1. 设计目标与范围 【核心】
 
-**Storage**: [if applicable, e.g., PostgreSQL, CoreData, files or N/A]
+### 1.1 设计目标（What / Why）
 
-**Testing**: [e.g., pytest, XCTest, cargo test or NEEDS CLARIFICATION]
+- **PLAN-GOAL-1**：{对应 `spec.md` 目标与 `SC-*` 的工程交付目标}
+- **PLAN-GOAL-2**：{关键架构非功能或可靠性目标}
 
-**Target Platform**: [e.g., Linux server, iOS 15+, WASM or NEEDS CLARIFICATION]
+### 1.2 设计范围（Scope）
 
-**Project Type**: [e.g., library/cli/web-service/mobile-app/compiler/desktop-app or NEEDS CLARIFICATION]
+**包含：**
 
-**Performance Goals**: [domain-specific, e.g., 1000 req/s, 10k lines/sec, 60 fps or NEEDS CLARIFICATION]
+- {本次设计落地的功能模块、文件与核心能力}
 
-**Constraints**: [domain-specific, e.g., <200ms p95, <100MB memory, offline-capable or NEEDS CLARIFICATION]
+**不包含：**
 
-**Scale/Scope**: [domain-specific, e.g., 10k users, 1M LOC, 50 screens or NEEDS CLARIFICATION]
+- {明确排除的非目标，避免实现扩展范围}
 
-## Constitution Check
+<a id="plan-research"></a>
 
-*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
+### 1.3 研究与关键决策（Decision Log）
 
-[Gates determined based on constitution file]
+> 记录技术调研依据、源码现状证据、关键设计取舍与备选方案对比。
 
-## Project Structure
+| ID | 决策点 | 备选方案 | 最终选择 | 依据与取舍理由 | 影响范围 |
+| --- | --- | --- | --- | --- | --- |
+| D1 | {决策议题} | {方案 A / 方案 B} | {最终方案} | {工程/性能/安全/零硬编码考量} | {受影响模块} |
 
-### Documentation (this feature)
+---
+
+### 1.4 技术背景与项目结构
+
+**语言/版本**：{如 Python 3.13（`>=3.12,<3.14`）/ Vue 3.5 + TypeScript 5.8}
+
+**主要依赖**：{如 FastAPI / Pydantic AI 2.67.0 / Jinja2 / httpx / Element Plus / CodeMirror 6}
+
+**存储**：{如 `DATA_DIR` 文件系统 + 内部 Git + 原子软链，或“本需求不涉及存储改造”}
+
+**测试**：{如 `uv run pytest` + `ScriptedModel` / `uvx ruff@0.11.0` / `vue-tsc` + `vite build`}
+
+**目标平台**：{如 Linux 容器（单进程 Uvicorn `workers=1`）与现代桌面浏览器}
+
+**项目类型**：{如 后端运行时模块 / Web 管理端前端 / 全栈迁移工具链}
+
+**约束与规模/范围**：{单进程并发约束、资源规模、工时分解口径等}
+
+**源代码结构（真实目录落点）**：
 
 ```text
-specs/[###-feature]/
-├── plan.md              # This file (/speckit.plan command output)
-├── research.md          # Phase 0 output (/speckit.plan command)
-├── data-model.md        # Phase 1 output (/speckit.plan command)
-├── quickstart.md        # Phase 1 output (/speckit.plan command)
-├── contracts/           # Phase 1 output (/speckit.plan command)
-└── tasks.md             # Phase 2 output (/speckit.tasks command - NOT created by /speckit.plan)
+{精确列出本需求涉及的 src/、frontend/、tests/、tools/、docs/ 文件路径}
 ```
 
-### Source Code (repository root)
-<!--
-  ACTION REQUIRED: Replace the placeholder tree below with the concrete layout
-  for this feature. Delete unused options and expand the chosen structure with
-  real paths (e.g., apps/admin, packages/something). The delivered plan must
-  not include Option labels.
--->
+**禁止修改范围**：
+
+- {明确不得修改的既有公共模块、隔离配置或外部契约}
+
+#### 文档结构（本需求）
 
 ```text
-# [REMOVE IF UNUSED] Option 1: Single project (DEFAULT)
-src/
-├── models/
-├── services/
-├── cli/
-└── lib/
-
-tests/
-├── contract/
-├── integration/
-└── unit/
-
-# [REMOVE IF UNUSED] Option 2: Web application (when "frontend" + "backend" detected)
-backend/
-├── src/
-│   ├── models/
-│   ├── services/
-│   └── api/
-└── tests/
-
-frontend/
-├── src/
-│   ├── components/
-│   ├── pages/
-│   └── services/
-└── tests/
-
-# [REMOVE IF UNUSED] Option 3: Mobile + API (when "iOS/Android" detected)
-api/
-└── [same as backend above]
-
-ios/ or android/
-└── [platform-specific structure: feature modules, UI flows, platform tests]
+specs/[###-feature-name]/
+├── spec.md    # specify/clarify：需求规格、范围边界与验收标准
+├── plan.md    # plan：研究决策、模型、内部契约与验证指南（inline-v1）
+└── tasks.md   # tasks：可执行任务清单、测试矩阵与验收证据
 ```
 
-**Structure Decision**: [Document the selected structure and reference the real
-directories captured above]
+| 设计产物 | 权威位置 |
+| --- | --- |
+| 研究结论与技术决策 | [1.3 研究与关键决策](#plan-research) |
+| 领域实体与存储设计 | [第 3–4 章](#plan-data-model) |
+| 内部接口与事件契约 | [第 5 章](#plan-contracts) |
+| 可执行验证指南 | [10.5 验证指南](#plan-quickstart) |
 
-## Complexity Tracking
+### 1.5 宪章检查
 
-> **Fill ONLY if Constitution Check has violations that must be justified**
+> 研究前与设计后对照 `.specify/memory/constitution.md` 核心原则逐项检查；`MUST` 违反项阻塞推进。
 
-| Violation | Why Needed | Simpler Alternative Rejected Because |
-|-----------|------------|-------------------------------------|
-| [e.g., 4th project] | [current need] | [why 3 projects insufficient] |
-| [e.g., Repository pattern] | [specific problem] | [why direct DB access insufficient] |
+| 质量门 | 研究前 | 设计后 | 核查证据 |
+| --- | --- | --- | --- |
+| 原则 I：平台零业务硬编码与声明式资源隔离 | {PASS/N/A} | {PASS/N/A} | {设计/源码依据} |
+| 原则 II：单智能体规划、确定性原语与强证据防幻觉 | {PASS/N/A} | {PASS/N/A} | {设计/核验机制依据} |
+| 原则 III：文件化 Git 原子发布与单进程并发安全（`workers=1`） | {PASS/N/A} | {PASS/N/A} | {锁/原子写/路径校验依据} |
+| 原则 IV–V：单文件内联设计、自动化测试隔离与 Mock 契约 | {PASS/N/A} | {PASS/N/A} | {单测/桩模型/对拍依据} |
+| 原则 VI–VII：安全脱敏、零硬编码凭证、事件与审计留痕 | {PASS/N/A} | {PASS/N/A} | {脱敏/鉴权/审计日志依据} |
+| 原则 VIII–X：最小改动、代码规范、Wiki 同步及三类外部交付物确认 | {PASS/N/A} | {PASS/N/A} | {检查命令/Wiki/外部交付结论} |
+
+### 1.6 复杂度跟踪
+
+| 偏离或额外复杂度 | 必要性说明 | 未采用更简方案的原因 |
+| --- | --- | --- |
+| {无偏离则写“无（严格遵守项目宪章与既有约束）”} | {原因} | {权衡依据} |
+
+### 1.7 Wiki 影响评估
+
+- **结论**：{涉及 / 不涉及，写明原因}
+- **受影响页面**：{逐项列出 `wiki/` 规范页面路径或写“无”}
+- **同步项**：{涉及时说明 `wiki/index.md` 与 `wiki/log.md` 更新及任务拆解映射}
+
+### 1.8 三类独立交付物设计检查
+
+| 独立交付物 | 涉及情况与依据 | 设计与变更摘要 | 验证与回退设计 | 关联问题 |
+| --- | --- | --- | --- | --- |
+| `接口文档.md` | {不涉及/涉及，写明依据与确认来源} | {不涉及或核心契约摘要} | {契约校验} | {Q-* 或无} |
+| `资源迁移与Seed清单.md` | {不涉及/涉及，写明依据} | {不涉及或迁移脚本/种子列表} | {静态与对拍验证} | {Q-* 或无} |
+| `部署与配置变更单.md` | {不涉及/涉及，写明依据} | {不涉及或环境/容器参数变更} | {配置/构建验证} | {Q-* 或无} |
+
+---
+
+## 2. 需求映射（Traceability） 【核心】
+
+| 规格编号 | 类型 | 需求摘要 | 设计章节映射 | 后续任务映射 |
+| --- | --- | --- | --- | --- |
+| US1 | 用户故事 | {摘要} | {第 x 节} | {tasks.md T*} |
+| FR-001 | 功能需求 | {摘要} | {第 x 节} | {tasks.md T*} |
+| NFR-001 | 非功能需求 | {摘要} | {第 11 章} | {tasks.md T*} |
+| EX-001 | 异常边界 | {摘要} | {第 6 章} | {tasks.md T*} |
+
+---
+
+<a id="plan-data-model"></a>
+
+## 3. 核心领域模型（Domain Model） 【核心】
+
+> 若本需求不涉及领域对象或状态机，写明“本需求不涉及新增或变更领域对象”。
+
+### 3.1 领域对象清单
+
+| 对象 / 类 | 所在文件 | 职责与核心属性 | 关键不变量（Invariant） |
+| --- | --- | --- | --- |
+| {Entity/Class} | {精确文件路径} | {核心字段说明} | {校验/不可变/并发约束} |
+
+### 3.2 状态机（如适用）
+
+> 不涉及状态流转时写明“本需求不涉及复杂状态机”。
+
+```text
+{StateA} --(Trigger/Condition)--> {StateB}
+```
+
+---
+
+## 4. 数据与存储设计（本需求范围） 【核心】
+
+> 聚焦 `DATA_DIR` 目录、YAML/JSON 文件格式、内存索引、LRU 缓存或异步写队列结构；不涉及存储变更时标注“本需求不涉及数据存储结构变更”。
+
+### 4.1 存储与缓存对象概览
+
+| 对象/路径 | 变更类型 | 数据格式与字段要点 | 并发/清理/恢复策略 | 关联需求 |
+| --- | --- | --- | --- | --- |
+| {路径或缓存对象} | {新增/修改/只读} | {结构说明} | {锁/原子写/LRU 容量/TTL} | {FR-*} |
+
+---
+
+<a id="plan-contracts"></a>
+
+## 5. 接口与契约设计（API / Tools / Events） 【核心】
+
+> 涵盖 HTTP/SSE 端点、Pydantic AI 工具/模型契约、`postMessage` 消息协议或命令行入口；不涉及对外接口时保留内部核心函数/工具契约或注明“本需求不涉及外部接口变更”。
+
+### 5.1 接口与契约清单
+
+| 契约编号 | 类型 | 名称 / Path | 方向 | 关键入参 / 载荷 | 关键出参 / 响应 / 事件 | 鉴权与幂等 | 关联需求 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| API-1 | {HTTP/SSE/Tool/CLI} | {端点或函数签名} | {调用方向} | {入参摘要} | {出参/事件流摘要} | {鉴权/锁/幂等} | {FR-*} |
+
+### 5.2 关键契约说明与错误语义
+
+- {说明参数校验、错误码映射（如 400/401/403/404/409/422/5xx）与兼容降级细节}
+
+---
+
+## 6. 业务流程设计（可直接编码） 【核心】
+
+### 6.1 核心执行流程
+
+```text
+1. {步骤 1：入口接收与前置校验}
+2. {步骤 2：快照捕获 / 资源或数据加载}
+3. {步骤 3：核心计算 / 核验 / 渲染处理}
+4. {步骤 4：持久化 / 审计 / SSE 或结果返回}
+```
+
+### 6.2 并发控制与异常降级策略
+
+| 异常/并发场景 | 检测时机 | 处理策略 | 是否中断主流程 | 可观测性输出 |
+| --- | --- | --- | --- | --- |
+| {如：证据退回/锁冲突/外部超时} | {校验/写盘/网络阶段} | {重试/退回/降级/返回错误码} | {是/否} | {过程事件/日志/审计记录} |
+
+---
+
+## 7. 权限与安全控制（本需求范围） 【补充】
+
+> 不涉及新增权限规则时注明“本需求沿用既有鉴权与路径安全约束”。
+
+| 控制点 | 适用角色/调用方 | 校验机制与边界 |
+| --- | --- | --- |
+| {如：`require_user` / `require_report_key` / 路径守卫} | {角色} | {PBKDF2 / HMAC / `ensure_within` 等} |
+
+---
+
+## 8. 前端 / 交互设计（如适用） 【补充】
+
+> 不涉及前端变更时注明“本需求不涉及前端页面或交互变更”。
+
+| 视图/组件 | 职责 | 关键状态与交互 | 关联接口 |
+| --- | --- | --- | --- |
+| {Vue 组件或入口} | {界面定位} | {状态管理、事件流或防抖校验} | {API-*} |
+
+---
+
+## 9. 配置与热更新开关 【补充】
+
+> 不涉及配置变更时注明“本需求不涉及新增环境变量或运行期热更新配置项”。
+
+| 配置项（Env / RuntimeConfig） | 类型 | 默认值 | 是否支持热更新 | 说明 |
+| --- | --- | --- | --- | --- |
+| {配置名} | {int/bool/str} | {默认值} | {是/否} | {用途与边界} |
+
+---
+
+## 10. 测试设计（Test Strategy） 【核心】
+
+### 10.1 测试范围与分层策略
+
+| 测试类型 | 覆盖范围 | 桩/隔离策略 | 重点验证场景 |
+| --- | --- | --- | --- |
+| 单元测试 | {核心类与纯函数} | {内存/临时目录/mock} | {正常分支、边界条件、异常错误码} |
+| 集成/回归测试 | {端到端管道与既有链路} | {`ScriptedModel`/`FunctionModel`/Mock 网关} | {端到端闭环与历史缺陷不回归} |
+
+### 10.2 回归范围
+
+- {明确受影响联动模块与需持续通过的既有测试套件}
+
+<a id="plan-quickstart"></a>
+
+### 10.5 验证指南
+
+- **环境与前置条件**：{Python 3.13 + `uv` 环境 / Node + npm（涉及前端时），无需外网大模型或真实内网网关}
+- **验证命令**：
+  ```bash
+  {如：uv run pytest tests/test_xxx.py -q}
+  {如：uvx ruff@0.11.0 check src tests}
+  ```
+- **预期结果**：{所有断言通过、0 error / 0 warning、构建产物无异常}
+
+---
+
+## 11. NFR 符合性自检 【核心】
+
+| 自检主题 | 宪章依据 | 是否涉及 | 落实位置与验证方式 |
+| --- | --- | --- | --- |
+| 零业务硬编码与资源隔离 | I | {是/否} | {资源模型/测试验证} |
+| 强证据防幻觉与确定性计算 | II | {是/否} | {校验逻辑/单测} |
+| 文件化存储与 `workers=1` 并发安全 | III | {是/否} | {锁与原子写入/并发测试} |
+| 安全编码、脱敏与零凭据硬编码 | VI | {是/否} | {防护与脱敏单测} |
+| 过程事件、阶段日志与审计留痕 | VII | {是/否} | {`EventSink`/`audit.jsonl` 验证} |
+
+---
+
+## 12. 发布与回退计划 【核心】
+
+- **发布前置与步骤**：{构建/测试通过 → 静态资源/镜像或资源快照发布 → 健康检查 `/healthz`}
+- **回退方案**：{通过 `releases/current` 软链接切换、配置修订 `cN` 回滚或容器镜像版本回退}
+
+---
+
+## 13. 实施切片与建议顺序（Implementation Slices） 【核心】
+
+> 供 `tasks.md` 细化拆解为 `T001...` 任务清单并核算工作量。
+
+| 切片 ID | 切片名称 | 对应 Phase / 任务范围 | 目标与涉及文件 | 核算工时（如适用） |
+| --- | --- | --- | --- | --- |
+| S-01 | {基础架构与领域骨架} | {Phase 1–2} | {文件清单} | {X.X 人天} |
+| S-02 | {核心业务故事闭环} | {Phase 3+} | {文件清单} | {X.X 人天} |
+| S-03 | {测试验收与工程收口} | {收尾 Phase} | {测试与检查清单} | {X.X 人天} |
+
+---
+
+## 14. 风险清单与缓解（Risks） 【补充】
+
+| 风险 ID | 风险描述 | 影响 | 概率 | 缓解措施 |
+| --- | --- | --- | --- | --- |
+| R-1 | {技术或业务风险} | {高/中/低} | {高/中/低} | {规避、降级或回归防护} |
+
+---
+
+## 15. 待确认事项（Design Open Questions） 【补充】
+
+> 若无未解决设计疑问，写明“设计阶段关键技术取舍已闭环，无未关闭 `DQ-*`”。
+
+| 编号 | 问题摘要 | 对应 Spec Q-* | 当前结论 | 状态 |
+| --- | --- | --- | --- | --- |
+| DQ-1 | {设计问题或无} | {Q-* 或无} | {结论} | {已关闭/待确认} |
+
+---
+
+## 附录 A：核心字段与状态约定（仅本需求）
+
+- {仅列本需求核心字段、常量或枚举取值，不重复项目全局常量}
+
+## 附录 B：AI 编码与交付约束
+
+1. 先阅读 `spec.md`、本 `plan.md` 与 `tasks.md`，按 `T001...` 顺序实施，不实现 Out of Scope 内容。
+2. 所有已勾选完成 `[X]` 的任务必须附有真实命令验证输出，严禁“仅写完未验证即标完成”。
+
+---
+
+## 变更记录（Changelog）
+
+| 版本 | 日期 | 变更人 | 变更内容 |
+| --- | --- | --- | --- |
+| 1.0 | {YYYY-MM-DD} | {姓名/AI} | {初始化/转换实施设计} |

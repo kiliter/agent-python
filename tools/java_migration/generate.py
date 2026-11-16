@@ -117,6 +117,12 @@ def load_template_ids() -> dict[str, int]:
     return {str(k): int(v) for k, v in data["templates"].items()}
 
 
+def load_template_descriptions() -> dict[int, str]:
+    """模板 ID → 模板说明（template_descriptions.yaml，描述模板适用场景与核查内容）。"""
+    data = yaml.safe_load((HERE / "template_descriptions.yaml").read_text(encoding="utf-8")) or {}
+    return {int(k): str(v).strip() for k, v in data.items()}
+
+
 def load_rules(code: str) -> dict[str, str]:
     """读取规则文件，返回 字段 → 规则原文（与 Java ClasspathAgentResourceSource 一样按 YAML 解析）。"""
     p = RULE_DIR / f"{code}.rule"
@@ -190,12 +196,8 @@ def build_field(name: str, code: str, catalog: dict, rules: dict[str, str], visi
     base.update((catalog.get("overrides") or {}).get(code, {}).get(name) or {})
     guide = _CJK_SPACE_RE.sub("", str(base.pop("guide", "")).strip())
     base.pop("skills", None)
-    rule = rules.get(name)
-    desc = guide
-    if rule:
-        desc = f"{guide}\n原规则（Java）：{rule.strip()}" if guide else f"原规则（Java）：{rule.strip()}"
-    elif not guide:
-        desc = f"从单据中摘取「{name}」。"
+    # 字段说明只写取值方法本身（guide），不再附加迁移前的原始规则文本
+    desc = guide or f"从单据中摘取「{name}」。"
     field: dict = {"name": name}
     if not visible:
         field["visible"] = False
@@ -290,7 +292,7 @@ def generate_one(path: Path, ids: dict[str, int], catalog: dict, mappings: dict[
     data = {
         "id": tid,
         "name": code,
-        "description": f"迁移自 Java 模板「{code}」（资源库模板 ID {tid}），正文与规则以 Java 为准。",
+        "description": load_template_descriptions().get(tid, ""),
         "skills": skills,
         "inputs": inputs,
         "fields": fields,
@@ -306,7 +308,7 @@ def generate_one(path: Path, ids: dict[str, int], catalog: dict, mappings: dict[
 
 def dump_yaml(data: dict) -> str:
     """输出 template.yaml（中文不转义、保持字段顺序）。"""
-    header = "# #Created By AiCoding(codex) 由 tools/java_migration/generate.py 从 Java 模板生成，请勿手工修改后再重新生成\n"
+    header = "# #Created By AiCoding(codex)\n"
     return header + yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=1000)
 
 

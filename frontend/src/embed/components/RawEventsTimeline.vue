@@ -100,7 +100,7 @@ async function onCopyJson(label: string, val: unknown) {
       </button>
     </div>
 
-    <!-- 空状态兜底 -->
+    <!-- 空状态默认 -->
     <div v-else-if="!props.events.length && !running" class="raw-state">
       <span>暂无原样运行事件记录</span>
     </div>
@@ -124,12 +124,12 @@ async function onCopyJson(label: string, val: unknown) {
               <!-- 1. run_started -->
               <div v-if="e.type === 'run_started'" class="init-box">
                 <div class="init-title">
-                  <span>核查模板：</span>
+                  <span>模板：</span>
                   <strong>#{{ e.templateId }} {{ e.templateName }}</strong>
                   <span v-if="e.rev" class="mini-chip mono">{{ e.rev }}</span>
                 </div>
                 <div class="init-row">
-                  <span class="init-label">允许 Skill：</span>
+                  <span class="init-label">允许技能：</span>
                   <span v-if="!(e.skills ?? []).length" class="muted">无</span>
                   <span v-for="s in e.skills ?? []" :key="s" class="skill-chip">
                     <BookOpen :size="10" />
@@ -265,7 +265,7 @@ async function onCopyJson(label: string, val: unknown) {
       <!-- 实时运行指示 -->
       <div v-if="running" class="live-indicator">
         <span class="pulse-dot"></span>
-        <span>智能体正在实时取证与推理中…</span>
+        <span>智能体正在取数与推理中…</span>
       </div>
     </div>
   </div>

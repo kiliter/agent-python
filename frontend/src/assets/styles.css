@@ -286,7 +286,7 @@ html, body {
   color: var(--text-primary);
 }
 
-/* 左侧权威主导航栏：无品牌方块图标，端庄政企中文排版 */
+/* 左侧权威主导航栏：端庄政企中文排版 + F2 品牌标志 */
 .sidebar {
   width: 220px;
   background: var(--sidebar-bg);
@@ -324,16 +324,14 @@ html, body {
   padding: 0;
 }
 
-.brand-collapsed-mark {
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  color: var(--sidebar-title);
+.brand-logo-mark {
+  flex-shrink: 0;
 }
 
 .brand-copy {
   display: flex;
   flex-direction: column;
+  flex: 1;
   gap: 1px;
   min-width: 0;
   line-height: 1.22;

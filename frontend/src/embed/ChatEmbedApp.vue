@@ -7,7 +7,7 @@
   3. 52px 极简毛玻璃顶栏：工单入参页内浮层、缩放切换、浏览全部模板、关闭窗口请求；
   4. 大尺寸报告预览弹窗、模板结构预览弹窗、全部模板检索弹窗（全部挂载于 .embed-stage 内并支持页内全屏切换）；
   5. postMessage 双端安全握手（锁定 lockedOrigin + 校验 event.source + initGen 竞态保护）与 X-Chat-Session-Id 会话绑定。
-  契约：docs/chat-embed-api.md
+  接口约定：docs/chat-embed-api.md
 -->
 <script setup lang="ts">
 import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, type CSSProperties } from 'vue'
@@ -56,6 +56,7 @@ import PreviewDialog from './components/PreviewDialog.vue'
 import TemplateStructureDialog from './components/TemplateStructureDialog.vue'
 import SwitchTemplateDialog from './components/SwitchTemplateDialog.vue'
 import StageConfirmDialog from './components/StageConfirmDialog.vue'
+import BrandMark from '@/components/BrandMark.vue'
 
 // ==================== 1. PC 宽屏等比例缩放 + 自适应一键切换 ====================
 const BASE_WIDTH = 1280
@@ -461,7 +462,7 @@ function parseIsoMs(iso: string | undefined): number | null {
 /**
  * 解析每条 assistant 文本消息关联的 AI 改写报告目标（run + versionNo）：
  * 1. 优先使用后端明确下发（含存量历史会话自动补全）的 rewriteRunId + rewriteVersionNo；
- * 2. 安全兜底：若某条助手文本消息未带 rewriteRunId，但正文中明确出现已有未绑定 rewrite 版本的 runId，
+ * 2. 安全默认：若某条助手文本消息未带 rewriteRunId，但正文中明确出现已有未绑定 rewrite 版本的 runId，
  *    或与未绑定 rewrite 版本创建时间相差 2 秒以内，自动一对一关联对应运行与改写版本号。
  */
 const rewriteTargetMap = computed<Record<string, RewriteTarget>>(() => {
@@ -491,7 +492,7 @@ const rewriteTargetMap = computed<Record<string, RewriteTarget>>(() => {
     boundKeys.add(`${run.runId}:${ver.no}`)
   }
 
-  // 第二遍：对未带 rewriteRunId 的助手消息执行安全兜底一对一匹配
+  // 第二遍：对未带 rewriteRunId 的助手消息执行安全默认一对一匹配
   for (const m of messages.value) {
     if (m.kind !== 'text' || m.role !== 'assistant' || m.rewriteRunId) continue
     const text = m.text || ''
@@ -1033,7 +1034,7 @@ async function sendChat(text: string, auto = false) {
   const s = session.value
   if (!s || sending.value) return
   sending.value = true
-  statusText.value = auto ? '正在分析工单单据并匹配最佳核查模板…' : '正在思考…'
+  statusText.value = auto ? '正在分析工单单据并匹配最佳模板…' : '正在思考…'
   const localId = !auto ? `local:${Date.now()}:${Math.random().toString(36).slice(2, 7)}` : ''
   if (localId) {
     messages.value.push({
@@ -1409,9 +1410,7 @@ onBeforeUnmount(() => {
         <header class="gpt-topbar">
           <div class="topbar-left">
             <div class="assistant-brand">
-              <span class="brand-dot-badge">
-                <Sparkles :size="14" />
-              </span>
+              <BrandMark :size="22" class="assistant-brand-logo" />
               <span class="brand-name">智能填报助手</span>
               <span v-if="latestRev" class="version-pill mono">{{ latestRev }}</span>
             </div>
@@ -1432,7 +1431,7 @@ onBeforeUnmount(() => {
               class="snapshot-pill"
               :class="session.target === 'draft' ? 'is-draft' : 'is-online'"
             >
-              {{ session.target === 'draft' ? '草稿叠加态' : '线上快照' }}
+              {{ session.target === 'draft' ? '草稿叠加态' : '线上版本' }}
             </span>
 
             <span v-if="isStreamReconnecting || reinitLoading" class="reconnect-pill">
@@ -1500,7 +1499,7 @@ onBeforeUnmount(() => {
               v-if="phase === 'ready' && session"
               type="button"
               class="topbar-pill-btn eb-tip eb-tip-right"
-              data-tip="浏览并切换全部在线核查模板"
+              data-tip="浏览并切换全部在线模板"
               @click="switchTplVisible = true"
             >
               <LayoutGrid :size="12" />
@@ -1693,7 +1692,7 @@ onBeforeUnmount(() => {
                 <Loader2 :size="26" class="spin accent-ic" />
               </div>
               <div class="state-title">正在准备智能填报对话</div>
-              <div class="state-desc">同步历史会话与在线模板快照…</div>
+              <div class="state-desc">同步历史会话与线上模板…</div>
             </template>
             <template v-else-if="phase === 'error'">
               <div class="loader-circle is-error">
@@ -1730,12 +1729,12 @@ onBeforeUnmount(() => {
 
               <!-- 空会话欢迎态 -->
               <div v-if="!messages.length && !sending" class="welcome-hero">
-                <div class="welcome-badge">
-                  <Sparkles :size="22" />
+                <div class="welcome-brand-wrap">
+                  <BrandMark :size="46" class="welcome-brand-logo" />
                 </div>
                 <h2 class="welcome-title">智能申告核查与报告填报助手</h2>
                 <p class="welcome-sub">
-                  自动结合工单入参与单据原文匹配核查模板、调取网关接口取证并经强证据核验生成申告报告
+                  自动结合工单入参与单据原文匹配模板、调用 API 取数并经强证据核验生成申告报告
                 </p>
 
                 <div class="welcome-pills">
@@ -1744,12 +1743,12 @@ onBeforeUnmount(() => {
                     class="welcome-pill"
                     @click="sendChat('', true)"
                   >
-                    <span>✦ 根据当前工单自动推荐核查模板</span>
+                    <span>✦ 根据当前工单自动推荐模板</span>
                   </button>
                   <button
                     type="button"
                     class="welcome-pill"
-                    @click="sendChat('请查看当前工单缺少哪些常见核查模板的必填参数')"
+                    @click="sendChat('请查看当前工单缺少哪些常见模板的必填参数')"
                   >
                     <span>查看当前工单缺少哪些必填参数</span>
                   </button>
@@ -1759,7 +1758,7 @@ onBeforeUnmount(() => {
                     @click="switchTplVisible = true"
                   >
                     <LayoutGrid :size="13" />
-                    <span>浏览全部核查模板</span>
+                    <span>浏览全部模板</span>
                   </button>
                 </div>
               </div>
@@ -1906,7 +1905,7 @@ onBeforeUnmount(() => {
                 </div>
               </div>
 
-              <!-- 宿主未自动关闭窗口时的复制兜底条 -->
+              <!-- 宿主未自动关闭窗口时的复制默认条 -->
               <div v-if="showCloseFallback && confirmedPayload" class="close-fallback-card">
                 <div class="cf-left">
                   <CircleCheck :size="16" class="cf-ic" />
@@ -1923,7 +1922,7 @@ onBeforeUnmount(() => {
             </div>
           </main>
 
-          <!-- ==================== 4. 底部悬浮大圆角输入舱（max-width: 840px） ==================== -->
+          <!-- ==================== 4. 底部悬浮大圆角输入框（max-width: 840px） ==================== -->
           <footer class="gpt-composer-footer">
             <div class="composer-container">
               <ChatInput
@@ -1941,7 +1940,7 @@ onBeforeUnmount(() => {
         </template>
       </div>
 
-      <!-- ==================== 5. 三大舞台内大尺寸弹窗（均支持页内全屏切换，绝不挂载到 document.body） ==================== -->
+      <!-- ==================== 5. 三大窗口内大尺寸弹窗（均支持页内全屏切换，绝不挂载到 document.body） ==================== -->
       <SwitchTemplateDialog
         :visible="switchTplVisible"
         :session-id="session?.sessionId || ''"
@@ -2077,15 +2076,7 @@ onBeforeUnmount(() => {
   gap: 6px;
 }
 
-.brand-dot-badge {
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
-  background: var(--gpt-btn-dark);
-  color: #ffffff;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+.assistant-brand-logo {
   flex-shrink: 0;
 }
 
@@ -2600,17 +2591,14 @@ onBeforeUnmount(() => {
   text-align: center;
   gap: 12px;
 }
-.welcome-badge {
-  width: 48px;
-  height: 48px;
-  border-radius: 50%;
-  background: var(--gpt-bg-subtle);
-  border: 1px solid var(--gpt-border);
-  color: var(--gpt-ink);
+.welcome-brand-wrap {
   display: flex;
   align-items: center;
   justify-content: center;
   margin-bottom: 4px;
+}
+.welcome-brand-logo {
+  filter: drop-shadow(0 4px 12px rgba(29, 78, 216, 0.18));
 }
 .welcome-title {
   margin: 0;
@@ -2849,7 +2837,7 @@ onBeforeUnmount(() => {
   background: var(--gpt-bg-muted);
 }
 
-/* ==================== 4. 底部紧凑悬浮输入舱 ==================== */
+/* ==================== 4. 底部紧凑悬浮输入框 ==================== */
 .gpt-composer-footer {
   flex-shrink: 0;
   padding: 6px 18px 8px;

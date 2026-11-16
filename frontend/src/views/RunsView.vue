@@ -1,5 +1,5 @@
 <!--
-  5.6 运行记录视图（独立列表页 + 数智稽核概览栏 + 独立详情页 4个页签：报告 / 字段结果与证据 / 智能体时间线 / 输入）
+  5.6 运行记录视图（独立列表页 + 概览栏 + 独立详情页 4个页签：报告 / 字段结果与证据 / 智能体时间线 / 输入）
   数据全部来自后端 /api/v1/runs，不含任何演示数据
   #Created By AiCoding(codex)
 -->
@@ -42,7 +42,7 @@ const querying = ref(false)
 /** 入参列表 */
 const inputEntries = computed(() => Object.entries(detail.value?.inputs ?? {}))
 
-// ==================== 列表态：运行稽核数智概览实时统计（基于 store.runs） ====================
+// ==================== 列表态：运行核查概览实时统计（基于 store.runs） ====================
 const totalRunsCount = computed(() => store.runs.length)
 const successRunsCount = computed(() => store.runs.filter(r => r.status === 'SUCCESS').length)
 const partialRunsCount = computed(() => store.runs.filter(r => r.status === 'PARTIAL').length)
@@ -316,12 +316,12 @@ async function convertToCase() {
 <template>
   <!-- ==================== 独立列表页 ==================== -->
   <div v-if="store.runsSubView === 'list'" class="page-fill runs-page">
-    <!-- 运行稽核数智概览栏（4 联紧凑型指标卡 + 纯内联 SVG 矢量微图） -->
+    <!-- 运行概览栏（4 联紧凑型指标卡 + 纯内联 SVG 矢量微图） -->
     <div class="ops-kpi-grid">
       <!-- 卡片 1：总运行笔数 -->
       <div class="ops-kpi-card">
         <div class="ops-kpi-meta">
-          <span class="ops-kpi-label">核查运行流水总数</span>
+          <span class="ops-kpi-label">运行记录总数</span>
           <div class="ops-kpi-val-row">
             <span class="ops-kpi-num mono">{{ totalRunsCount }}</span>
             <span class="ops-kpi-unit">笔</span>
@@ -355,7 +355,7 @@ async function convertToCase() {
           </div>
           <div class="ops-kpi-val-row">
             <span class="ops-kpi-num mono" style="color: var(--success)">{{ successRunsCount }}</span>
-            <span class="ops-kpi-unit">/ {{ totalRunsCount }} 笔全部命中</span>
+            <span class="ops-kpi-unit">/ {{ totalRunsCount }} 笔全部找到</span>
           </div>
           <div class="ops-linear-track" title="完全成功运行占比">
             <div
@@ -472,7 +472,7 @@ async function convertToCase() {
             v-model="store.runMobileSearch"
             class="input mono"
             style="width: 138px"
-            placeholder="手机号 / 流水号"
+            placeholder="手机号 / 编号"
             @input="scheduleDebouncedQuery"
             @keyup.enter="queryRuns"
           />
@@ -482,7 +482,7 @@ async function convertToCase() {
             style="width: 170px"
             @change="queryRuns"
           >
-            <option value="ALL">全部核查模板</option>
+            <option value="ALL">全部模板</option>
             <option v-for="t in store.templates" :key="t.id" :value="String(t.id)">
               {{ t.id }} {{ t.name }}
             </option>
@@ -507,7 +507,7 @@ async function convertToCase() {
             @keyup.enter="queryRuns"
           />
           <button class="btn btn-primary" :aria-busy="querying" @click="queryRuns">
-            {{ querying ? '查询中…' : '查询流水' }}
+            {{ querying ? '查询中…' : '查询' }}
           </button>
           <button class="btn" @click="resetRunFilters">重置</button>
         </div>
@@ -517,30 +517,30 @@ async function convertToCase() {
       </div>
     </div>
 
-    <!-- 运行流水台账表（内部滚动，表头吸顶） -->
+    <!-- 运行记录列表表（内部滚动，表头吸顶） -->
     <div class="card card-fill">
       <div class="table-scroll">
         <table class="data-table">
           <thead>
             <tr>
               <th style="width: 138px">开始时间</th>
-              <th style="width: 198px">运行流水号</th>
-              <th style="width: 168px">核查模板</th>
+              <th style="width: 198px">运行编号</th>
+              <th style="width: 168px">模板</th>
               <th style="width: 116px">业务号码</th>
               <th>受理业务名称</th>
               <th style="width: 106px">核验状态</th>
-              <th style="width: 142px">命中 / 总字段数</th>
+              <th style="width: 142px">已找到 / 总字段数</th>
               <th style="width: 82px">耗时</th>
               <th style="width: 82px">推理轮数</th>
-              <th style="width: 92px">基线版本</th>
+              <th style="width: 92px">版本</th>
             </tr>
           </thead>
           <tbody>
             <tr v-if="store.filteredRuns.length === 0">
               <td colspan="10" style="padding: 38px; text-align: center; color: var(--text-secondary)">
-                <template v-if="store.runs.length === 0">暂无运行流水记录</template>
+                <template v-if="store.runs.length === 0">暂无运行记录</template>
                 <template v-else>
-                  未检索到符合筛选条件的运行流水 ·
+                  未检索到符合筛选条件的运行记录 ·
                   <button class="btn-link" @click="resetRunFilters">重置筛选条件</button>
                 </template>
               </td>
@@ -611,14 +611,14 @@ async function convertToCase() {
     </div>
     <div class="card card-fill">
       <div class="card-scroll" style="text-align: center; color: var(--text-secondary); padding-top: 48px">
-        正在加载运行稽核详情…
+        正在加载运行详情…
       </div>
     </div>
   </div>
 
   <!-- ==================== 独立详情页 ==================== -->
   <div v-else class="page-fill runs-page">
-    <!-- 顶部权威详情控制舱与页签切换条 -->
+    <!-- 顶部权威详情控制区与页签切换条 -->
     <div class="ops-detail-head-card">
       <div class="ops-detail-top-bar">
         <div class="ops-detail-title-group">
@@ -628,15 +628,15 @@ async function convertToCase() {
           <span
             v-if="detail.record.templateId"
             class="chip-tag clickable"
-            title="所属核查模板（点击进入模板编排工作台）"
+            title="所属模板（点击进入模板编辑）"
             @click="store.openTemplateWorkbench(detail.record.templateId, 'body')"
           >
             {{ detail.record.template }}
           </span>
-          <span v-else class="chip-tag" title="所属核查模板">{{ detail.record.template }}</span>
+          <span v-else class="chip-tag" title="所属模板">{{ detail.record.template }}</span>
           <span class="chip-tag mono" title="核查总耗时">{{ detail.durationSec }}s</span>
           <span v-if="detail.model" class="chip-tag mono" title="执行大模型">{{ detail.model }}</span>
-          <span class="chip-tag mono" title="基线版本">{{ detail.rev }}</span>
+          <span class="chip-tag mono" title="版本">{{ detail.rev }}</span>
           <span class="chip-tag" title="触发入口">{{ detail.entry }}</span>
         </div>
         <div class="workbench-actions">
@@ -774,16 +774,16 @@ async function convertToCase() {
         <article class="official-audit-sheet">
           <header class="audit-sheet-meta">
             <div class="audit-sheet-meta-left mono">
-              <span>工单核查流水：<strong>{{ detail.runId }}</strong></span>
+              <span>运行编号：<strong>{{ detail.runId }}</strong></span>
               <span class="meta-sep">|</span>
-              <span>核查模板：{{ detail.record.template }}</span>
+              <span>模板：{{ detail.record.template }}</span>
               <template v-if="detail.record.busiName">
                 <span class="meta-sep">|</span>
                 <span>业务：{{ detail.record.busiName }}</span>
               </template>
             </div>
             <div class="audit-sheet-meta-right mono">
-              <span>基线版本：{{ detail.rev }}</span>
+              <span>版本：{{ detail.rev }}</span>
               <span class="meta-sep">|</span>
               <span>耗时：{{ detail.durationSec }}s</span>
             </div>
@@ -831,7 +831,7 @@ async function convertToCase() {
       <div class="card card-fill">
         <div class="card-header">
           <div class="card-title">
-            智能体执行时间线（共 {{ detail.rounds }} 轮，{{ detail.apiCallCount }} 次 API 调用）
+            智能体执行时间线（共 {{ detail.rounds }} 轮，{{ detail.apiCallCount }} 次 API）
           </div>
         </div>
         <div class="card-scroll">
@@ -897,7 +897,7 @@ async function convertToCase() {
   gap: 10px;
 }
 
-/* 4 联紧凑型运行稽核数智指标卡 */
+/* 4 联紧凑型运行核查指标卡 */
 .ops-kpi-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1054,7 +1054,7 @@ async function convertToCase() {
   border-radius: 99px;
 }
 
-/* 详情头部控制舱与底线激活页签 */
+/* 详情头部控制区与底线激活页签 */
 .ops-detail-head-card {
   background: var(--bg-surface);
   border: 1px solid var(--border-color);

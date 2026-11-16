@@ -75,3 +75,17 @@
 - 更新 [reference/configuration.md](reference/configuration.md) 与 [index.md](index.md)：将支持免重启热更新的运行期配置由 26 项扩展为 48 项（新增平台工具限额 3 项、网关并发与留存周期 3 项、聊天与上下文压缩配额 16 项），梳理 `Settings._fallback_blank_non_nullable_scalars`、`RuntimeConfig.from_storage_dict` / `apply_patch` 与消费侧 `cfg_int` / `cfg_float` / `_setting_int` 全链路默认值兜底、跨字段校验约束及仅保留 9 项启动期不变量边界。
 - 更新 [components/chat-embed.md](components/chat-embed.md) 与 [components/workbench-frontend.md](components/workbench-frontend.md)：记录 16 项聊天/压缩参数接入 `RuntimeConfig` 免重启热生效及 `manualCompactKeepRecent`/`manualCompactMinMessages` 联动 `ChatEmbedApp.vue` 手动压缩按钮状态；同步记录 `SettingsView.vue` 新增「聊天会话与滚动上下文压缩配额」「平台工具限额与历史数据留存」表单分组、空值默认兜底、「恢复默认参数」按钮与 48 项历史快照对比标签。
 
+
+## [2026-11-16] ingest | 前端界面术语统一为通俗叫法
+
+- 全量替换 `frontend/src`、`index.html`、`embed.html` 中的界面文案与注释：核查模板→模板、Skill 能力库/规程→技能、API调用/契约→API、运行流水记录→运行记录、基准回归测试→回归测试、发布版本基线→版本发布、引擎与系统设置→系统设置；同步清理基线、快照、编排、取证、命中、兜底、热更新、数智、中台、台账、极昼云台/省网大屏等表述。
+- 新增 `frontend/src/constants/terms.ts`（`NAV_LABELS` / `NAV_GROUP_LABELS`），由 `App.vue`、`stores/workspaceTabs.ts`、`ReleasesView.vue` 统一引用；⌘K 检索关键词保留旧叫法。
+- 更新 [components/workbench-frontend.md](components/workbench-frontend.md)：同步页面名称并新增「前端统一术语」对照表。
+
+## [2026-11-16] ingest | 工作台支持编辑模板名称与说明，内置资源去除 Java 迁移口径
+
+- 前端：模板编辑左侧活动栏新增「信息」分类（`IdeLeftSection = 'info'`），右侧属性区可编辑模板名称与说明，随「保存草稿」经 `PUT /templates/{id}/draft` 的 `name` / `description` 提交；「新建模板」弹窗新增选填「模板说明」。
+- 内置模板：33 个 `template.yaml` 的 `description` 改为描述模板适用场景与核查内容（来源 `tools/java_migration/template_descriptions.yaml`）；字段说明不再附带 `原规则（Java）：` 尾注，guide 中的“与 Java 一致”等表述改为直接描述取值方法；文件头不再声明“由 Java 模板生成”。
+- 生成与校验工具：`generate.py` 读取 `template_descriptions.yaml` 并停止拼接原规则；`verify_structure.py` 的 S4 改为校验“有 rule 的字段必须写有非空取值说明”。
+- 技能 / API / 系统提示词：清理 `SKILL.md` 头注释与正文中的“迁移自 Java / 与 Java 一致”说法、3 个接口契约 YAML 注释中的 Java 对照，删除系统提示词中关于“原规则（Java）”的说明。运行时 `prompt.py` / `chat/agent.py` 仍保留剥离 `原规则（Java）：` 尾注的兼容逻辑，用于已有数据目录中的历史模板。
+- 注意：内置资源只在新数据目录 `report-agent init` 时导入，已部署环境需在工作台逐个修改模板说明后发布。
