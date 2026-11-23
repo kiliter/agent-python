@@ -1,0 +1,49 @@
+name: 工作事项
+description: 用一张 Issue 跟踪一个需求、缺陷、优化或维护事项。
+body:
+  - type: dropdown
+    id: category
+    attributes:
+      label: 事项类型
+      options:
+        - 需求
+        - 缺陷
+        - 优化
+        - 维护
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 使用场景与现状
+      description: 说明谁在什么场景下遇到了什么问题。报告缺陷时，请补充复现步骤和实际结果。
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 期望结果与验收
+      description: 至少写一条完成后能观察或验证的结果，以及如何确认。
+      placeholder: 上传不支持的格式时，页面提示允许的格式，并允许重新选择文件。
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: 范围与约束
+      description: 可填写已知的涉及范围、不涉及范围、兼容要求或异常边界。
+
+  - type: input
+    id: external-ticket
+    attributes:
+      label: 外部工单编号
+      description: 如有外部工单，请填写 WZH 编号或其他工单编号。
+
+  - type: textarea
+    id: references
+    attributes:
+      label: 参考材料
+      description: 可附上需求原文、原型、现有 Spec、相关 Issue 或脱敏截图。
