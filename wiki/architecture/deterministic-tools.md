@@ -7,7 +7,7 @@ sources:
   - src/report_agent/runtime/tools.py
   - src/report_agent/runtime/text_tools.py
   - src/report_agent/runtime/evidence.py
-updated: 2026-11-13
+updated: 2026-11-26
 ---
 
 # 确定性平台工具设计
@@ -28,7 +28,7 @@ updated: 2026-11-13
 
 | 分类 | 工具名 | 参数签名（除 `ctx` 外） | 返回核心结构 | 典型使用场景 |
 |------|--------|------------------------|--------------|--------------|
-| **资源与网关** | `load_skill` | `name: str = "", names: list[str] \| None = None` | Markdown 文本（支持一次批量加载多个白名单内 `SKILL.md` 及关联接口提示） | 按需读取单个或多个 Skill 完整步骤，减少串行交互轮次 |
+| **资源与网关** | `load_skill` | `name: str = "", names: list[str] \| None = None, doc: str = "", docs: list[str] \| None = None` | Markdown 文本（L1 返回 `SKILL.md` + 子文档懒加载索引 + 关联接口；L2 传 `doc`/`docs` 仅返回按需加载的参考子文档） | 读取单个/多个 Skill 主说明，或按需懒加载长技能子目录参考细则 |
 | **资源与网关** | `call_api` | `name: str, args: dict` | `{callId, resultId, ok, count, columns, preview, note}` | 按契约校验参数后调用网关（同工作区幂等去重复用 `resultId`） |
 | **结构化检索** | `query_result` | `resultId="", where=None, orderBy=None, limit=20, columns=None, *, anyOf=None, resultIds=None` | 单表 `{callId, resultId, total, rows}`；多表 `{callId, resultIds, total, rows}`（每行含 `resultId` 与 0 起始 `row`） | 在单次或跨月多次结果集上校验列名、执行 AND/OR 过滤、前缀闭区间比较与稳定排序 |
 | **文本原语** | `normalize_text` | `text: str, extraChars: str = ""` | `{callId, value}` | NFKC 归一化 + 去除零宽字符、固定中英文标点及 `extraChars`（对齐 Java `StringCharCleaner`） |

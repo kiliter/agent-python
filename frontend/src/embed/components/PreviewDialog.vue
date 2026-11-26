@@ -137,7 +137,8 @@ async function onCopy() {
       <!-- 1. 唯一单行 40px IDE 顶栏（不换行，零冗余工具条/警示行） -->
       <header class="pm-header">
         <div class="pm-title-wrap">
-          <span class="tpl-badge mono">#{{ run.templateId }}</span>
+          <span v-if="run.isComposite" class="tpl-badge" style="background: #e0e7ff; color: #3730a3">复合汇总</span>
+          <span v-else class="tpl-badge mono">#{{ run.templateId }}</span>
           <h3 class="pm-title" :title="run.templateName">{{ run.templateName }}</h3>
 
           <span

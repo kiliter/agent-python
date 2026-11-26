@@ -31,7 +31,7 @@ sources:
   - frontend/src/types/platform.ts
   - docs/frontend-api-handoff.md
   - docs/chat-embed-api.md
-updated: 2026-11-13
+updated: 2026-11-26
 ---
 
 # Vue 3 资源工作台前端剖析
@@ -53,8 +53,8 @@ updated: 2026-11-13
 | `/workbench` | `TemplateWorkbenchView.vue` | **核心 IDE 式模板工作台**：左栏导航（字段 / 入参 / Skill / 用例 / 历史）、中栏双模式编辑器（代码 / 实时预览 / 分屏 / 版本 Diff）、右栏属性检查器与 SSE 试运行证据溯源 |
 | `/skills` | `SkillsView.vue` | 纯文本 `SKILL.md` 在线编辑器（含 11 个填报 Skill 与聊天路由 `template-router`）；「技能摘要」单行省略配 `<el-tooltip>` 悬浮查看全文，「被模板引用」采用全局 `.ref-popover-list` 限高滚动面板（`max-height: 240px`），避免列表过长撑大页面 |
 | `/apis` | `ApisView.vue` | 网关接口契约管理：可视化表单（`ApiVisualEditor`）与原始 YAML 双模式编辑及在线拨测；接口说明单行省略配 `<el-tooltip>` 悬浮提示，关联技能列与 `SkillsView.vue` 一致采用数量胶囊 + 限高滚动 `<el-popover>` |
-| `/runs` | `RunsView.vue` | 历史运行审计台账：多维检索（含 `聊天窗口` 入口）、查看单次运行的渲染报告、完整推理轨迹与证据定位，支持一键“保存为回归用例” |
-| `/regression` | `RegressionView.vue` | 模板回归测试用例管理与单条试跑验证 |
+| `/runs` | `RunsView.vue` | 历史运行审计台账：多维检索（含 `聊天窗口` 入口）、查看单次运行的渲染报告、完整推理轨迹与证据定位，支持一键“保存为回归用例”，以及**列表多选批量 / 详情页单条一键导出零外部依赖单页离线 ChatUI 模拟回放 HTML** |
+| `/regression` | `RegressionView.vue` | **全平台回归测试工作台**：统一管理「未绑定模板（自动路由）」与各模板回归用例，支持单版回归（线上 / 草稿 / 历史版本）与双版对比（草稿 vs 线上 / 历史 vs 历史）SSE 批量并发执行、4 项实时 KPI 统计、用例列表与逐字段差异对比双 Tab、路由偏差检测、一键采纳期望基线与历史回归批次切换回溯 |
 | `/releases` | `ReleasesView.vue` | 全局版本时间线（`r1`..`rN`）、版本间资源变更 Diff 对比及生产紧急版本切换（`emergency-switch`） |
 | `/chat-sim` | `ChatSimView.vue` | **嵌入式聊天窗口模拟联调台（PC 左右双栏工作台 + 右侧全屏聊天联动）**：左栏配置 `userId`/`orderId`/`target`/`apiKey`（挂载自动带出系统 Key、支持同步/复制/跳转系统设置）、通过 `ChatSimTemplatePicker.vue` 预填模板入参或载入回归用例、编辑 `inputs` 与 `document`，点击「打开聊天窗口」在右侧全屏承载 `/embed.html` 聊天窗口（`.main-wrapper.is-chat-fullscreen` 自动隐藏 `.topbar` 与全局页签栏以最大化可视区域，点击左侧导航或回传 `chat-close-request` 返回双栏联调台查看 `postMessage` 实时报文流与确认回传报告） |
 | `/settings` | `SettingsView.vue` | 系统提示词编辑与版本回退、48 项引擎/网关/工具/聊天与上下文压缩运行期配置在线热更新、一键恢复默认参数及 `c1`..`cN` 修订回滚 |

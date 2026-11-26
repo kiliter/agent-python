@@ -198,12 +198,22 @@ class ReasonBody(BaseModel):
     reason: str = ""
 
 
+class DeleteTemplateBody(BaseModel):
+    reason: str = ""
+    deleteCases: bool | None = None
+
+
 @router.post("/templates/{tid}/offline")
 def offline_template(request: Request, tid: int, body: ReasonBody | None = None) -> dict[str, Any]:
     _check_tid(tid)
     c = container(request)
     result = c.service.offline_template(tid, operator(request), (body.reason if body else ""))
-    return {"id": tid, "status": c.service.state(tpl_ref(tid)).status, "rev": result.entry["rev"]}
+    return {
+        "id": tid,
+        "status": c.service.state(tpl_ref(tid)).status,
+        "rev": result.entry["rev"],
+        "warnings": [i.to_dict() for i in result.warnings],
+    }
 
 
 @router.post("/templates/{tid}/restore")
@@ -212,6 +222,24 @@ def restore_template(request: Request, tid: int) -> dict[str, Any]:
     c = container(request)
     c.service.restore_template(tid, operator(request))
     return {"id": tid, "status": c.service.state(tpl_ref(tid)).status}
+
+
+@router.delete("/templates/{tid}")
+def delete_template(
+    request: Request,
+    tid: int,
+    deleteCases: bool = Query(True),
+    reason: str = Query(""),
+    body: DeleteTemplateBody | None = Body(default=None),
+) -> dict[str, Any]:
+    """直接删除模板（纯草稿立即删除，已发布则生成新版本移出快照；默认清理关联回归用例）。#Created By AiCoding(codex)"""
+    _check_tid(tid)
+    c = container(request)
+    eff_reason = (body.reason if body and body.reason else reason).strip()
+    eff_delete_cases = body.deleteCases if (body is not None and body.deleteCases is not None) else deleteCases
+    res = c.service.delete_template(tid, operator(request), eff_reason)
+    deleted_cases = c.cases.delete_all(tid) if eff_delete_cases else 0
+    return {**res, "deletedCases": deleted_cases}
 
 
 # ============================================================================ 工作台读取
@@ -287,7 +315,13 @@ def save_draft(request: Request, tid: int, body: DraftBody) -> dict[str, Any]:
     tpl = _apply_draft_body_patch(request, tid, base, body)
     meta = c.service.save_template(tpl, operator(request), expected_revision=expected_rev)
     issues = c.service.validate_template_working(tid, tpl)
-    return {"savedAt": fmt_time(meta["updatedAt"]), "draft": meta, "issues": [i.to_dict() for i in issues]}
+    cleared = bool(meta.get("cleared"))
+    return {
+        "savedAt": fmt_time(meta["updatedAt"]),
+        "draft": None if cleared else meta,
+        "cleared": cleared,
+        "issues": [i.to_dict() for i in issues],
+    }
 
 
 @router.post("/templates/{tid}/discard-draft")
@@ -630,7 +664,8 @@ def save_field(request: Request, tid: int, name: str, body: dict[str, Any]) -> d
     tpl = _working(request, tid)
     f = tpl.definition.field(new["name"])
     dto = field_to_dto(f, body_usage(tpl.body), ref_by_fields(tpl).get(f.name)) if f else dict(new)
-    return {**dto, "revision": meta["revision"], "draft": meta}
+    cleared = bool(meta.get("cleared"))
+    return {**dto, "revision": meta["revision"], "draft": None if cleared else meta, "cleared": cleared}
 
 
 class DeleteFieldBody(BaseModel):
@@ -673,7 +708,8 @@ def delete_field(
         return text
 
     meta = _mutate(request, tid, fn, expected_rev)
-    return {"deletedName": name, "revision": meta["revision"], "draft": meta}
+    cleared = bool(meta.get("cleared"))
+    return {"deletedName": name, "revision": meta["revision"], "draft": None if cleared else meta, "cleared": cleared}
 
 
 class BatchEvidenceBody(BaseModel):
@@ -704,7 +740,8 @@ def batch_evidence(request: Request, tid: int, body: BatchEvidenceBody) -> dict[
         return text
 
     meta = _mutate(request, tid, fn, expected_rev)
-    return {"updatedCount": count, "revision": meta["revision"], "draft": meta}
+    cleared = bool(meta.get("cleared"))
+    return {"updatedCount": count, "revision": meta["revision"], "draft": None if cleared else meta, "cleared": cleared}
 
 
 class OrderBody(BaseModel):
@@ -725,7 +762,8 @@ def reorder_fields(request: Request, tid: int, body: OrderBody) -> dict[str, Any
         return text
 
     meta = _mutate(request, tid, fn, expected_rev)
-    return {"names": body.names, "revision": meta["revision"], "draft": meta}
+    cleared = bool(meta.get("cleared"))
+    return {"names": body.names, "revision": meta["revision"], "draft": None if cleared else meta, "cleared": cleared}
 
 
 class SkillsBody(BaseModel):
@@ -744,7 +782,8 @@ def update_skills(request: Request, tid: int, body: SkillsBody) -> dict[str, Any
         return text
 
     meta = _mutate(request, tid, fn, expected_rev)
-    return {"skills": skills, "revision": meta["revision"], "draft": meta}
+    cleared = bool(meta.get("cleared"))
+    return {"skills": skills, "revision": meta["revision"], "draft": None if cleared else meta, "cleared": cleared}
 
 
 # ============================================================================ 用例

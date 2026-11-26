@@ -23,11 +23,18 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..domain.composite import COMPOSITE_TEMPLATE_FILE, COMPOSITE_TEMPLATE_KEY
 from ..domain.resources import SYSTEM_PROMPT_FILE, ResourceKind
 
 META_FILE = ".meta.json"
-KINDS: tuple[ResourceKind, ...] = ("template", "skill", "api", "system-prompt")
-KIND_LABEL = {"template": "模板", "skill": "Skill", "api": "接口", "system-prompt": "系统提示词"}
+KINDS: tuple[ResourceKind, ...] = ("template", "skill", "api", "system-prompt", "composite-template")
+KIND_LABEL = {
+    "template": "模板",
+    "skill": "Skill",
+    "api": "接口",
+    "system-prompt": "系统提示词",
+    "composite-template": "汇总大模板",
+}
 SYSTEM_PROMPT_KEY = "system-prompt"
 
 TEMPLATE_KEY_RE = re.compile(r"^[1-9]\d{0,9}$")
@@ -90,6 +97,8 @@ def is_valid_resource_key(kind: str, key: str) -> bool:
         return bool(API_NAME_RE.match(key))
     if kind == "system-prompt":
         return key == SYSTEM_PROMPT_KEY
+    if kind == "composite-template":
+        return key == COMPOSITE_TEMPLATE_KEY
     return False
 
 
@@ -115,13 +124,19 @@ class ResourceRef:
             return f"skills/{self.key}"
         if self.kind == "api":
             return f"apis/{self.key}.yaml"
+        if self.kind == "composite-template":
+            return COMPOSITE_TEMPLATE_FILE
         return SYSTEM_PROMPT_FILE
 
     def is_dir(self) -> bool:
         return self.kind in ("template", "skill")
 
     def label(self) -> str:
-        return f"{KIND_LABEL[self.kind]} {self.key}" if self.kind != "system-prompt" else "系统提示词"
+        if self.kind == "system-prompt":
+            return "系统提示词"
+        if self.kind == "composite-template":
+            return "汇总大模板"
+        return f"{KIND_LABEL[self.kind]} {self.key}"
 
 
 def ref_from_tree_path(path: str) -> ResourceRef | None:
@@ -136,6 +151,8 @@ def ref_from_tree_path(path: str) -> ResourceRef | None:
             return ResourceRef("api", parts[1][:-5])
         if path == SYSTEM_PROMPT_FILE:
             return ResourceRef("system-prompt", SYSTEM_PROMPT_KEY)
+        if path == COMPOSITE_TEMPLATE_FILE:
+            return ResourceRef("composite-template", COMPOSITE_TEMPLATE_KEY)
     except InvalidResource:
         return None
     return None
@@ -154,13 +171,17 @@ class DataLayout:
         self.runs = self.root / "runs"
         self.chats = self.root / "chats"
         self.cases = self.root / "cases"
+        self.regressions = self.root / "regressions"
         self.mock_gateway = self.root / "mock-gateway"
         self.config = self.root / "config"
         self.audit = self.root / "audit.jsonl"
 
     def ensure(self) -> None:
         """创建基础目录。"""
-        for p in (self.drafts, self.releases, self.runs, self.chats, self.cases, self.mock_gateway, self.config):
+        for p in (
+            self.drafts, self.releases, self.runs, self.chats,
+            self.cases, self.regressions, self.mock_gateway, self.config,
+        ):
             p.mkdir(parents=True, exist_ok=True)
 
     def release_dir(self, rev: str) -> Path:

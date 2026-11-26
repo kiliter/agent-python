@@ -23,8 +23,16 @@ from jinja2 import TemplateSyntaxError, meta, nodes
 from pydantic import ValidationError
 
 from .api_contract import ApiContract, parse_api_yaml
+from .composite import COMPOSITE_TEMPLATE_FILE, validate_composite_template
 from .jinja_env import BodySyntaxError, parse_body
-from .skill import SKILL_FILE, Skill, SkillParseError, parse_skill_markdown
+from .skill import (
+    SKILL_FILE,
+    Skill,
+    SkillParseError,
+    extract_md_doc_links,
+    load_skill_dir,
+    validate_skill_docs_map,
+)
 from .template import (BODY_FILE, OFFLINE_FILE, TEMPLATE_FILE, Template, TemplateDef, body_variable_lines,
                        parse_template_yaml, safe_regex_compile)
 
@@ -33,7 +41,7 @@ log = logging.getLogger(__name__)
 SYSTEM_PROMPT_FILE = "system-prompt.md"
 ROUTER_SKILL_ID = "template-router"
 _ROUTER_TPL_HEADING_RE = re.compile(r"^###\s+(\d{1,10})\b", re.MULTILINE)
-ResourceKind = Literal["template", "skill", "api", "system-prompt"]
+ResourceKind = Literal["template", "skill", "api", "system-prompt", "composite-template"]
 
 
 @dataclass
@@ -57,6 +65,7 @@ class ResourceSet:
     """一组资源。load_issues 记录目录中无法解析的文件。"""
 
     system_prompt: str = ""
+    composite_template: str = ""
     templates: dict[int, Template] = field(default_factory=dict)
     skills: dict[str, Skill] = field(default_factory=dict)
     apis: dict[str, ApiContract] = field(default_factory=dict)
@@ -68,11 +77,39 @@ class ResourceSet:
             return self.skills[ref]
         return next((s for s in self.skills.values() if s.title == ref), None)
 
-    def allowed_apis(self, template: Template) -> list[str]:
-        """模板可调用的接口：其 Skill 声明的接口并集（保持声明顺序）。"""
+    def global_report_skills(self) -> list[str]:
+        """所有作用域为 global 的全局填报 Skill（按标识升序，保证确定性顺序）。#Created By AiCoding(codex)"""
+        return [sid for sid in sorted(self.skills) if self.skills[sid].is_global]
+
+    def chat_skills(self) -> list[str]:
+        """所有作用域为 chat 的聊天助手专用 Skill（template-router 排在首位）。#Created By AiCoding(codex)"""
+        chat_ids = [sid for sid in sorted(self.skills) if self.skills[sid].is_chat]
+        if ROUTER_SKILL_ID in chat_ids:
+            chat_ids.remove(ROUTER_SKILL_ID)
+            chat_ids.insert(0, ROUTER_SKILL_ID)
+        return chat_ids
+
+    def allowed_skills(self, template: Template) -> list[str]:
+        """模板运行时可用 Skill：显式绑定的非聊天 Skill + 全部全局填报（scope=global）Skill（去重保序）。#Created By AiCoding(codex)"""
         seen: set[str] = set()
         out: list[str] = []
         for sid in template.definition.skills:
+            skill = self.skills.get(sid)
+            if skill is None or skill.is_chat or sid in seen:
+                continue
+            seen.add(sid)
+            out.append(sid)
+        for sid in self.global_report_skills():
+            if sid not in seen:
+                seen.add(sid)
+                out.append(sid)
+        return out
+
+    def allowed_apis(self, template: Template) -> list[str]:
+        """模板可调用的接口：其可用 Skill（含全局填报 Skill）声明的接口并集（保持声明顺序）。"""
+        seen: set[str] = set()
+        out: list[str] = []
+        for sid in self.allowed_skills(template):
             skill = self.skills.get(sid)
             for api in skill.meta.apis if skill else ():
                 if api in self.apis and api not in seen:
@@ -114,6 +151,16 @@ def load_resource_dir(root: Path) -> ResourceSet:
             except (ValueError, OSError) as exc:
                 rs.load_issues.append(Issue("error", "LOAD_FAILED", f"系统提示词无法读取：{exc}", "system-prompt", "system-prompt"))
 
+    ct = root / COMPOSITE_TEMPLATE_FILE
+    if ct.exists() or ct.is_symlink():
+        if ct.is_symlink() or not _within_root(ct, root_resolved):
+            rs.load_issues.append(Issue("error", "LOAD_FAILED", "汇总大模板路径越界", "composite-template", "composite-template"))
+        else:
+            try:
+                rs.composite_template = ct.read_text(encoding="utf-8")
+            except (ValueError, OSError) as exc:
+                rs.load_issues.append(Issue("error", "LOAD_FAILED", f"汇总大模板无法读取：{exc}", "composite-template", "composite-template"))
+
     for tdir in sorted((root / "templates").glob("*/")) if (root / "templates").exists() else []:
         if not _within_root(tdir, root_resolved):
             rs.load_issues.append(Issue("error", "LOAD_FAILED", f"模板 {tdir.name} 路径越界", "template", tdir.name))
@@ -148,7 +195,7 @@ def load_resource_dir(root: Path) -> ResourceSet:
             rs.load_issues.append(Issue("error", "LOAD_FAILED", f"Skill {sdir.name} 内部文件路径越界", "skill", sdir.name))
             continue
         try:
-            skill = parse_skill_markdown(skill_file.read_text(encoding="utf-8"))
+            skill = load_skill_dir(sdir, root_resolved=root_resolved)
             if skill.id != sdir.name:
                 raise ValueError(f"frontmatter name={skill.id} 与目录名 {sdir.name} 不一致")
             rs.skills[skill.id] = skill
@@ -406,24 +453,78 @@ def validate_template(tpl: Template, rs: ResourceSet) -> list[Issue]:
             add(level, code, msg, field=fname, line=line)
 
     for ref in d.skills:
-        if ref not in rs.skills:
+        skill_obj = rs.skills.get(ref)
+        if skill_obj is None:
             add("error", "SKILL_NOT_FOUND", f"引用的 Skill「{ref}」不存在或未发布")
-    if ROUTER_SKILL_ID in d.skills:
-        add("warning", "ROUTER_SKILL_IN_TEMPLATE",
-            f"「{ROUTER_SKILL_ID}」是聊天路由专用 Skill，不应关联到填报模板")
-    if not d.skills:
+        elif ref == ROUTER_SKILL_ID:
+            add("warning", "ROUTER_SKILL_IN_TEMPLATE",
+                f"「{ROUTER_SKILL_ID}」是聊天路由专用 Skill，不应关联到填报模板")
+        elif skill_obj.is_chat:
+            add("warning", "CHAT_SKILL_IN_TEMPLATE",
+                f"「{ref}」是聊天助手专用 Skill（scope: chat），不应关联到填报模板")
+        elif skill_obj.is_global:
+            add("warning", "GLOBAL_SKILL_REDUNDANT",
+                f"「{ref}」已设为全局填报 Skill（scope: global），所有模板自动持有，无需重复绑定")
+    if not d.skills and not rs.global_report_skills():
         add("warning", "NO_SKILL", "模板没有关联任何 Skill，模型只能从入参和单据中取值")
     return out
 
 
 def validate_skill(skill: Skill, rs: ResourceSet) -> list[Issue]:
-    """校验 Skill：引用的接口必须存在；若为聊天路由专用 Skill，交叉核验在线模板覆盖。"""
+    """校验 Skill：接口引用、多文件子文档路径与相对链接可达性、以及聊天专用 Skill 约束。#Created By AiCoding(codex)"""
     out: list[Issue] = []
     for api in skill.meta.apis:
         if api not in rs.apis:
             out.append(Issue("error", "API_NOT_FOUND", f"Skill 引用的接口「{api}」不存在或未发布", "skill", skill.id))
     if not skill.meta.description.strip():
         out.append(Issue("warning", "SKILL_NO_DESCRIPTION", "Skill 缺少 description，模型无法判断何时加载", "skill", skill.id))
+
+    # #Created By AiCoding(codex) 子文档路径/大小及相对 .md 链接可达性校验
+    docs_map: dict[str, str] = {}
+    try:
+        docs_map = validate_skill_docs_map(skill.docs)
+    except SkillParseError as exc:
+        out.append(Issue("error", "SKILL_DOC_INVALID", str(exc), "skill", skill.id))
+        docs_map = dict(skill.docs)
+
+    link_graph: dict[str, list[str]] = {}
+    all_sources: list[tuple[str, str]] = [(SKILL_FILE, skill.body), *sorted(docs_map.items())]
+    for src_path, src_text in all_sources:
+        valid_targets: list[str] = []
+        for raw_target, resolved in extract_md_doc_links(src_text, current_doc=src_path):
+            if resolved == SKILL_FILE or resolved in docs_map:
+                valid_targets.append(resolved)
+            else:
+                out.append(Issue(
+                    "error",
+                    "SKILL_DOC_NOT_FOUND",
+                    f"文档「{src_path}」引用了不存在或越界的子文档链接「{raw_target}」（解析路径：{resolved}）",
+                    "skill",
+                    skill.id,
+                    field=src_path,
+                ))
+        link_graph[src_path] = valid_targets
+
+    if docs_map:
+        reachable: set[str] = {SKILL_FILE}
+        queue: list[str] = [SKILL_FILE]
+        while queue:
+            cur = queue.pop(0)
+            for nxt in link_graph.get(cur, ()):
+                if nxt not in reachable:
+                    reachable.add(nxt)
+                    queue.append(nxt)
+        for doc_path in sorted(docs_map):
+            if doc_path not in reachable:
+                out.append(Issue(
+                    "warning",
+                    "SKILL_DOC_UNREFERENCED",
+                    f"子文档「{doc_path}」未被 {SKILL_FILE}（或任何可达子文档）通过 Markdown 链接引用，模型可能不会主动发现它",
+                    "skill",
+                    skill.id,
+                    field=doc_path,
+                ))
+
     if skill.id == ROUTER_SKILL_ID:
         if skill.meta.apis:
             out.append(Issue(
@@ -434,21 +535,23 @@ def validate_skill(skill: Skill, rs: ResourceSet) -> list[Issue]:
                 skill.id,
             ))
         covered_ids: set[int] = set()
-        for m in _ROUTER_TPL_HEADING_RE.finditer(skill.body):
-            tid = int(m.group(1))
-            if tid in covered_ids:
-                continue
-            covered_ids.add(tid)
-            tpl = rs.templates.get(tid)
-            if tpl is None or tpl.offline:
-                reason = "已下线" if tpl is not None and tpl.offline else "不存在或未发布"
-                out.append(Issue(
-                    "error",
-                    "ROUTER_TEMPLATE_NOT_FOUND",
-                    f"Skill「{ROUTER_SKILL_ID}」引用的模板「{tid}」{reason}",
-                    "skill",
-                    skill.id,
-                ))
+        # #Created By AiCoding(codex) 同时扫描 SKILL.md 与所有子文档中的 ### <ID> 标题，支持拆分子文档的路由技能
+        for scan_text in (skill.body, *docs_map.values()):
+            for m in _ROUTER_TPL_HEADING_RE.finditer(scan_text):
+                tid = int(m.group(1))
+                if tid in covered_ids:
+                    continue
+                covered_ids.add(tid)
+                tpl = rs.templates.get(tid)
+                if tpl is None or tpl.offline:
+                    reason = "已下线" if tpl is not None and tpl.offline else "不存在或未发布"
+                    out.append(Issue(
+                        "error",
+                        "ROUTER_TEMPLATE_NOT_FOUND",
+                        f"Skill「{ROUTER_SKILL_ID}」引用的模板「{tid}」{reason}",
+                        "skill",
+                        skill.id,
+                    ))
         for tpl in sorted(rs.templates.values(), key=lambda t: t.id):
             if not tpl.offline and tpl.id not in covered_ids:
                 out.append(Issue(
@@ -458,6 +561,14 @@ def validate_skill(skill: Skill, rs: ResourceSet) -> list[Issue]:
                     "skill",
                     skill.id,
                 ))
+    elif skill.is_chat and skill.meta.apis:
+        out.append(Issue(
+            "error",
+            "CHAT_SKILL_HAS_APIS",
+            f"聊天助手专用 Skill「{skill.id}」（scope: chat）不允许声明业务网关接口",
+            "skill",
+            skill.id,
+        ))
     return out
 
 
@@ -478,4 +589,7 @@ def validate_all(rs: ResourceSet) -> list[Issue]:
         issues.extend(validate_api(api))
     if not rs.system_prompt.strip():
         issues.append(Issue("error", "SYSTEM_PROMPT_EMPTY", "系统提示词不能为空", "system-prompt", "system-prompt"))
+    if rs.composite_template.strip():
+        for msg in validate_composite_template(rs.composite_template):
+            issues.append(Issue("error", "COMPOSITE_TEMPLATE_SYNTAX", msg, "composite-template", "composite-template"))
     return issues

@@ -10,6 +10,7 @@ import type {
   ReportConfirmedPayload,
   RunRawEventsResponse,
   RunStep,
+  SessionOrderItem,
   TemplateOption,
   TemplatePreview,
 } from './types'
@@ -190,6 +191,7 @@ export interface CreateSessionBody {
   inputs: Record<string, string>
   document: string
   target?: ChatTarget
+  items?: SessionOrderItem[]
 }
 
 /** 创建或恢复会话（同一 userId+orderId 恢复原会话） */
@@ -268,6 +270,33 @@ export function startRun(
   body: { templateId: number; inputs?: Record<string, string> },
 ): Promise<{ message: ChatMessage; session?: ChatSession }> {
   return requestJson('POST', `/sessions/${encodeURIComponent(sid)}/runs`, body)
+}
+
+export interface CompositeRunItemPayload {
+  templateId: number
+  label?: string
+  params?: Record<string, string>
+  document?: string
+}
+
+/** 发起多业务复合工单并发核查 + 汇总大模板拼装（可选同时大模型二次润色） */
+export function startCompositeRun(
+  sid: string,
+  body: {
+    items: CompositeRunItemPayload[]
+    polish?: boolean
+    polishInstruction?: string
+  },
+): Promise<{ message: ChatMessage; session?: ChatSession }> {
+  return requestJson('POST', `/sessions/${encodeURIComponent(sid)}/composite-runs`, body)
+}
+
+/** 对已完成运行（单模板或复合汇总）的原始报告执行大模型二次润色，追加为新版本 */
+export function polishRun(
+  runId: string,
+  instruction = '',
+): Promise<{ message: ChatMessage; versionNo: number; session?: ChatSession }> {
+  return requestJson('POST', `/runs/${encodeURIComponent(runId)}/polish`, { instruction })
 }
 
 export interface RunEventHandlers {

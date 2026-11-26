@@ -42,6 +42,9 @@ function sendChatInit(manual = false): boolean {
   if (payload.target === 'draft') {
     msg.target = 'draft'
   }
+  if (Array.isArray(payload.items) && payload.items.length > 0) {
+    msg.items = toPlainClone(payload.items)
+  }
 
   win.postMessage(msg, window.location.origin)
   tabsStore.markChatTabInitSent(props.tab.key, msg)

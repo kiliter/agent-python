@@ -5,9 +5,10 @@ tags: [guide, skill, api-contract, gateway, tools]
 sources:
   - src/report_agent/domain/skill.py
   - src/report_agent/domain/api_contract.py
+  - src/report_agent/gateway/http_client.py
   - src/report_agent/runtime/tools.py
   - src/report_agent/gateway/mock.py
-updated: 2026-11-12
+updated: 2026-11-26
 ---
 
 # 新增纯文本 Skill 与声明式网关接口契约指南
@@ -65,10 +66,57 @@ response:
     maxPreviewChars: 60
 ```
 
+### 常规 HTTP 接口示例（`connector: http`）
+
+若目标系统不经统一网关信封，可直接声明 `connector: http`，自行配置 `method`、`url`、`query`、`headers`、`bodyType`（`json` / `form` / `text` / `none`）与 `request`，响应解析继续复用 `response.success` / `noData` / `records`（并可通过 `response.format: auto | json | xml | text` 控制解析方式）：
+
+```yaml
+name: queryExtOrderHttp
+title: 订单中心 REST 查询
+description: 直连外部订单中心 HTTP 接口查询订单列表。
+connector: http
+method: POST
+url: https://orders.internal.example/api/v1/users/${手机号码}/orders
+bodyType: json
+timeoutMs: 8000
+retry:
+  maxAttempts: 2
+idempotent: true
+headers:
+  Authorization: Bearer ${令牌}
+query:
+  channel: app
+input:
+  type: object
+  required: [手机号码, 令牌]
+  additionalProperties: false
+  properties:
+    手机号码:
+      type: string
+      pattern: '^1\d{10}$'
+    令牌:
+      type: string
+request:
+  mobile: ${手机号码}
+  pageSize: 20
+response:
+  format: auto
+  success:
+    path: code
+    equals: '0'
+    missingAs: failure
+  records:
+    mode: list
+    path: data.items
+    columns:
+      orderId: 订单号
+      product.name: 商品名称
+```
+
 ### 契约调试技巧
 
-1. **放置本地 Mock 报文**：在 `DATA_DIR/mock-gateway/` 下放入 `queryUserContractInfo.xml`（正例）与 `queryUserContractInfo.13900000000.xml`（无数据/异常样例，按 `route_value` 路由）；
-2. **在线拨测**：在工作台「接口管理」页点击「在线测试」，输入手机号查看脱敏后的实际请求报文（验证 Jackson 3 XML 标签顺序与 `xsi:nil`）及抽取出的二维列数据。
+1. **放置本地 Mock 报文**：在 `DATA_DIR/mock-gateway/` 下放入 `queryUserContractInfo.xml`（正例）与 `queryUserContractInfo.13900000000.xml`（无数据/异常样例，按 `route_value` 路由）；常规 HTTP 接口支持 `.json` / `.xml` / `.txt` 样例文件；
+2. **在线拨测**：在工作台「接口管理」页点击「报文在线试调用」，输入参数查看脱敏后的实际请求报文（统一网关 XML/JSON 信封或常规 HTTP URL/请求头/请求体）及抽取出的二维列数据。
 
 ## 2. 第二步：编写纯文本 `SKILL.md`（`skills/<id>/SKILL.md`）
 

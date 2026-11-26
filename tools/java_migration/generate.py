@@ -44,6 +44,7 @@ INPUT_DEFS: dict[str, tuple[str, str]] = {
     "业务名称": ("本次争议的业务、套餐或活动名称", "5G智享套餐（个人版）"),
     "创建时间": ("工单创建时间 yyyyMMddHHmmss，短信类 Skill 以它为查询基准", "20261105103012"),
     "业务月份": ("业务办理日期 yyyyMMdd；受理渠道为热线、掌上营业厅时用作受理日期", "20261105"),
+    "申诉内容": ("客户申诉或投诉的原始诉求正文，辅助判断争议场景与核查重点", "用户反映未经本人允许开通业务，要求核查办理依据并处理。"),
     "deadlineDate": ("活动或合约到期截止日期（可选，如 yyyyMMdd 或 yyyy-MM-dd；未传时从订购短信提取最大合法日期）", "20271201"),
     "账单": ("账单起止月份，格式 yyyyMM$yyyyMM，起止月份均包含在查询范围内", "202610$202610"),
     "充值号码": ("充值的手机号码，11 位", "13900001234"),
@@ -281,7 +282,7 @@ def generate_one(path: Path, ids: dict[str, int], catalog: dict, mappings: dict[
                 skills.append(s)
     skills = expand_skill_deps(skills, deps)
 
-    need_inputs: set[str] = set()
+    need_inputs: set[str] = {"申诉内容"}
     for n in names + implicit:
         need_inputs.update(FIELD_INPUTS_OVERRIDE.get((code, n), FIELD_INPUTS.get(n, [])))
     for s in skills:

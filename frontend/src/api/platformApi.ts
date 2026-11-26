@@ -9,12 +9,20 @@ import type {
   ApiKeySettings,
   ApiTestCallResult,
   ApiValidateResult,
+  CompositeTemplatePreviewResult,
+  CompositeTemplateState,
   CurrentUser,
   DraftMeta,
   EvidenceType,
+  GlobalRegressionCase,
   ModelInfo,
   ProcessEvent,
+  RegressionBatchDetail,
+  RegressionBatchSummary,
   RegressionCase,
+  RegressionCaseResult,
+  RegressionDiff,
+  RegressionRunPayload,
   ReleaseDiffItem,
   ReleaseRevision,
   RenderPreview,
@@ -216,7 +224,8 @@ export interface SaveDraftPayload {
 
 export interface SaveResult {
   savedAt: string
-  draft: DraftMeta
+  draft: DraftMeta | null
+  cleared?: boolean
   issues?: ValidationIssue[]
 }
 
@@ -264,8 +273,14 @@ export const platformApi = {
   copyTemplate: (payload: { sourceId: number; newId: number; newName: string; copyCases?: boolean }) =>
     request<TemplateItem>('POST', `/templates/${payload.sourceId}/copy`, payload),
   offlineTemplate: (id: number, reason = '') =>
-    request<{ id: number; status: ResourceStatus; rev: string }>('POST', `/templates/${id}/offline`, { reason }),
+    request<{ id: number; status: ResourceStatus; rev: string; warnings?: ValidationIssue[] }>('POST', `/templates/${id}/offline`, { reason }),
   restoreTemplate: (id: number) => request<{ id: number; status: ResourceStatus }>('POST', `/templates/${id}/restore`),
+  deleteTemplate: (id: number, reason = '', deleteCases = true) =>
+    request<{ id: number; deleted: boolean; rev: string | null; deletedCases?: number; warnings?: ValidationIssue[] }>(
+      'DELETE',
+      `/templates/${id}`,
+      { reason, deleteCases },
+    ),
 
   // ==================== 模板工作台 ====================
   getTemplate: (id: number, version = 'working') =>
@@ -289,6 +304,7 @@ export const platformApi = {
       rev: string
       targetRev: string
       targetOffline?: boolean
+      cleared?: boolean
       warning?: string
       item: TemplateItem
       detail: TemplateDetail
@@ -308,13 +324,13 @@ export const platformApi = {
       ...(fields !== undefined ? { fields } : {}),
     }),
   saveTemplateField: (id: number, field: TemplateField, originalName?: string, revision?: number | null) =>
-    request<TemplateField & { revision?: number; draft?: DraftMeta }>(
+    request<TemplateField & { revision?: number | null; draft?: DraftMeta | null; cleared?: boolean }>(
       'PUT',
       `/templates/${id}/fields/${enc(field.name)}`,
       { ...field, originalName, ...(revision !== undefined ? { revision } : {}) },
     ),
   deleteTemplateField: (id: number, name: string, revision?: number | null) =>
-    request<{ deletedName: string; revision?: number; draft?: DraftMeta }>(
+    request<{ deletedName: string; revision?: number | null; draft?: DraftMeta | null; cleared?: boolean }>(
       'DELETE',
       `/templates/${id}/fields/${enc(name)}${query({ revision })}`,
       revision !== undefined ? { revision } : undefined,
@@ -325,19 +341,19 @@ export const platformApi = {
     evidenceType: EvidenceType,
     revision?: number | null,
   ) =>
-    request<{ updatedCount: number; revision?: number; draft?: DraftMeta }>(
+    request<{ updatedCount: number; revision?: number | null; draft?: DraftMeta | null; cleared?: boolean }>(
       'POST',
       `/templates/${id}/fields/batch-evidence`,
       { fieldNames, evidenceType, ...(revision !== undefined ? { revision } : {}) },
     ),
   reorderFields: (id: number, names: string[], revision?: number | null) =>
-    request<{ names: string[]; revision?: number; draft?: DraftMeta }>(
+    request<{ names: string[]; revision?: number | null; draft?: DraftMeta | null; cleared?: boolean }>(
       'PUT',
       `/templates/${id}/fields-order`,
       { names, ...(revision !== undefined ? { revision } : {}) },
     ),
   updateTemplateSkills: (id: number, skills: string[], revision?: number | null) =>
-    request<{ skills: string[]; revision?: number; draft?: DraftMeta }>(
+    request<{ skills: string[]; revision?: number | null; draft?: DraftMeta | null; cleared?: boolean }>(
       'PUT',
       `/templates/${id}/skills`,
       { skills, ...(revision !== undefined ? { revision } : {}) },
@@ -352,6 +368,141 @@ export const platformApi = {
   deleteTemplateCase: (id: number, caseId: string) =>
     request<{ deletedId: string }>('DELETE', `/templates/${id}/cases/${enc(caseId)}`),
 
+  // ==================== 全平台回归测试 ====================
+  fetchRegressionCases: (params?: { scope?: string; q?: string }) =>
+    request<GlobalRegressionCase[]>('GET', `/regression/cases${query(params as Record<string, string>)}`),
+  createRegressionCaseGlobal: (payload: {
+    templateId?: number | null
+    id?: string
+    name: string
+    source?: string
+    inputs?: Record<string, string>
+    documentText?: string
+    expectedValues?: Record<string, string>
+    expectedTemplateId?: number | null
+    mobile?: string
+    busiName?: string
+    createTime?: string
+    busiMonth?: string
+    appealContent?: string
+  }) => request<GlobalRegressionCase>('POST', '/regression/cases', payload),
+  updateRegressionCaseGlobal: (
+    scope: string,
+    caseId: string,
+    payload: {
+      targetTemplateId?: number | null
+      changeScope?: boolean
+      name?: string
+      source?: string
+      inputs?: Record<string, string>
+      documentText?: string
+      expectedValues?: Record<string, string>
+      expectedTemplateId?: number | null
+      clearExpectedTemplate?: boolean
+      mobile?: string
+      busiName?: string
+      createTime?: string
+      busiMonth?: string
+      appealContent?: string
+    },
+  ) =>
+    request<GlobalRegressionCase>('PUT', `/regression/cases/${enc(scope)}/${enc(caseId)}`, payload),
+  deleteRegressionCaseGlobal: (scope: string, caseId: string) =>
+    request<{ deletedScope: string; deletedId: string }>(
+      'DELETE',
+      `/regression/cases/${enc(scope)}/${enc(caseId)}`,
+    ),
+  adoptRegressionBaseline: (
+    scope: string,
+    caseId: string,
+    payload: { runId: string; adoptFields?: boolean; adoptTemplate?: boolean; onlyField?: string },
+  ) =>
+    request<GlobalRegressionCase>(
+      'POST',
+      `/regression/cases/${enc(scope)}/${enc(caseId)}/adopt-baseline`,
+      payload,
+    ),
+  fetchRegressionBatches: (limit = 30) =>
+    request<RegressionBatchSummary[]>('GET', `/regression/batches${query({ limit })}`),
+  getRegressionBatch: (batchId: string) =>
+    request<RegressionBatchDetail>('GET', `/regression/batches/${enc(batchId)}`),
+  streamRegressionRun: async (
+    payload: RegressionRunPayload,
+    handlers: {
+      onStart?: (data: {
+        batchId: string
+        mode: 'single' | 'compare'
+        targetA: string
+        targetALabel: string
+        targetB: string | null
+        targetBLabel: string | null
+        totalCases: number
+        startedAt: string
+      }) => void
+      onCaseStart?: (data: {
+        batchId: string
+        index: number
+        total: number
+        scope: string
+        caseId: string
+        caseName: string
+      }) => void
+      onCaseDone?: (data: {
+        batchId: string
+        done: number
+        total: number
+        result: RegressionCaseResult
+        diffs: RegressionDiff[]
+      }) => void
+      onDone?: (batch: RegressionBatchDetail) => void
+    },
+    signal?: AbortSignal,
+  ): Promise<RegressionBatchDetail> => {
+    let resp: Response
+    try {
+      resp = await fetch(`${API_BASE}/regression/run/stream`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...authHeaders() },
+        body: JSON.stringify(payload),
+        signal,
+      })
+    } catch (err) {
+      if ((err as { name?: string })?.name === 'AbortError') throw err
+      throw new ApiError(0, 'NETWORK_ERROR', `无法连接后端服务：${(err as Error).message}`)
+    }
+    if (!resp.ok || !resp.body) {
+      const err = await parseError(resp)
+      if (resp.status === 401) window.dispatchEvent(new CustomEvent('auth:unauthorized'))
+      throw err
+    }
+    let finalBatch: RegressionBatchDetail | undefined
+    await readSseStream(
+      resp,
+      frame => {
+        const data = parseSseJson<Record<string, unknown>>(frame.data)
+        if (!data) return false
+        if (frame.event === 'batch_start') {
+          handlers.onStart?.(data as Parameters<NonNullable<typeof handlers.onStart>>[0])
+        } else if (frame.event === 'case_start') {
+          handlers.onCaseStart?.(data as Parameters<NonNullable<typeof handlers.onCaseStart>>[0])
+        } else if (frame.event === 'case_done') {
+          handlers.onCaseDone?.(data as Parameters<NonNullable<typeof handlers.onCaseDone>>[0])
+        } else if (frame.event === 'batch_done') {
+          finalBatch = data as unknown as RegressionBatchDetail
+          handlers.onDone?.(finalBatch)
+          return true
+        } else if (frame.event === 'error') {
+          throw new ApiError(400, String(data.code || 'REGRESSION_ERROR'), String(data.message || '回归执行失败'), data)
+        }
+        return false
+      },
+      signal,
+    )
+    if (finalBatch) return finalBatch
+    throw new ApiError(0, 'STREAM_CLOSED', '回归执行连接意外中断')
+  },
+
   // ==================== 试运行 ====================
   executeDryRun: (id: number, payload: DryRunPayload) =>
     request<RunDetail>('POST', `/templates/${id}/dryrun`, payload),
@@ -364,22 +515,39 @@ export const platformApi = {
 
   // ==================== 技能库 ====================
   fetchSkills: () => request<SkillItem[]>('GET', '/skills'),
-  createSkill: (payload: { id: string; name: string; description: string; apis?: string[] }) =>
-    request<SkillItem>('POST', '/skills', payload),
+  createSkill: (payload: {
+    id: string
+    name: string
+    description: string
+    scope?: 'template' | 'global' | 'chat'
+    apis?: string[]
+  }) => request<SkillItem>('POST', '/skills', payload),
   getSkill: (id: string, version = 'working') => request<SkillDetail>('GET', `/skills/${enc(id)}${query({ version })}`),
-  saveSkillDraft: (id: string, markdown: string, revision?: number | null) =>
-    request<SaveResult>('PUT', `/skills/${enc(id)}/draft`, { markdown, revision }),
+  saveSkillDraft: (id: string, markdown: string, revision?: number | null, docs?: Record<string, string>) =>
+    request<SaveResult & { docs?: Record<string, string> }>('PUT', `/skills/${enc(id)}/draft`, {
+      markdown,
+      revision,
+      ...(docs !== undefined ? { docs } : {}),
+    }),
   discardSkillDraft: (id: string) =>
-    request<{ markdown: string | null; deleted: boolean }>('POST', `/skills/${enc(id)}/discard-draft`),
+    request<{ markdown: string | null; docs?: Record<string, string>; deleted: boolean }>(
+      'POST',
+      `/skills/${enc(id)}/discard-draft`,
+    ),
+  deleteSkill: (id: string, reason = '') =>
+    request<{ id: string; deleted: boolean; rev: string | null }>('DELETE', `/skills/${enc(id)}`, { reason }),
   validateSkill: (id: string) => request<ValidationResult>('POST', `/skills/${enc(id)}/validate`),
   publishSkill: (id: string, note: string) =>
     request<PublishResult & { id: string; item: SkillItem }>('POST', `/skills/${enc(id)}/publish`, { note }),
   fetchSkillRevisions: (id: string) => request<Revision[]>('GET', `/skills/${enc(id)}/revisions`),
   rollbackSkill: (id: string, targetRev: string, mode: 'draft_only' | 'publish_now' = 'draft_only', reason = '') =>
-    request<{ rev: string; item: SkillItem; markdown: string }>('POST', `/skills/${enc(id)}/rollback`,
-      { targetRev, mode, reason }),
+    request<{ rev: string; cleared?: boolean; item: SkillItem; markdown: string; docs?: Record<string, string> }>(
+      'POST',
+      `/skills/${enc(id)}/rollback`,
+      { targetRev, mode, reason },
+    ),
 
-  // ==================== API（统一网关 XML / JSON 配置） ====================
+  // ==================== API（统一网关 XML / JSON 与常规 HTTP 配置） ====================
   fetchApis: () => request<ApiItem[]>('GET', '/apis'),
   createApi: (payload: {
     name: string
@@ -387,20 +555,25 @@ export const platformApi = {
     description: string
     processCode?: string
     connector?: ApiConnector
-    format?: 'xml' | 'json' | 'XML' | 'JSON'
+    format?: 'xml' | 'json' | 'http' | 'XML' | 'JSON' | 'HTTP'
+    method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH'
+    url?: string
+    bodyType?: 'json' | 'form' | 'text' | 'none'
   }) => request<ApiItem>('POST', '/apis', payload),
   getApi: (name: string, version = 'working') => request<ApiDetail>('GET', `/apis/${enc(name)}${query({ version })}`),
   saveApiDraft: (name: string, payload: { yamlText?: string; api?: Partial<ApiItem>; revision?: number | null }) =>
     request<SaveResult>('PUT', `/apis/${enc(name)}/draft`, payload),
   discardApiDraft: (name: string) =>
     request<{ yamlText: string | null; deleted: boolean }>('POST', `/apis/${enc(name)}/discard-draft`),
+  deleteApi: (name: string, reason = '') =>
+    request<{ name: string; deleted: boolean; rev: string | null }>('DELETE', `/apis/${enc(name)}`, { reason }),
   validateApi: (name: string, yamlText?: string, sampleParams: Record<string, string> = {}) =>
     request<ApiValidateResult>('POST', `/apis/${enc(name)}/validate`, { yamlText, sampleParams }),
   publishApi: (name: string, note = '') =>
     request<PublishResult & { name: string; item: ApiItem }>('POST', `/apis/${enc(name)}/publish`, { note }),
   fetchApiRevisions: (name: string) => request<Revision[]>('GET', `/apis/${enc(name)}/revisions`),
   rollbackApi: (name: string, targetRev: string, mode: 'draft_only' | 'publish_now' = 'draft_only', reason = '') =>
-    request<{ rev: string; item: ApiItem; yamlText: string }>('POST', `/apis/${enc(name)}/rollback`,
+    request<{ rev: string; cleared?: boolean; item: ApiItem; yamlText: string }>('POST', `/apis/${enc(name)}/rollback`,
       { targetRev, mode, reason }),
   testCallApi: (name: string, params: Record<string, string>, yamlText?: string) =>
     request<ApiTestCallResult>('POST', `/apis/${enc(name)}/test-call`, { params, yamlText }),
@@ -408,6 +581,50 @@ export const platformApi = {
   // ==================== 运行记录 ====================
   fetchRuns: (params?: RunsQuery) => request<RunRecord[]>('GET', `/runs${query(params as Record<string, string>)}`),
   getRun: (runId: string) => request<RunDetail>('GET', `/runs/${enc(runId)}`),
+  generateMissingFieldsAiSummary: (runId: string, force = false) =>
+    request<import('@/types/platform').MissingFieldsSummary>(
+      'POST',
+      `/runs/${enc(runId)}/missing-summary/ai`,
+      { force },
+    ),
+  exportRunsHtml: async (
+    runIds: string[],
+    title?: string,
+  ): Promise<{ blob: Blob; filename: string; count: number }> => {
+    let resp: Response
+    try {
+      resp = await fetch(`${API_BASE}/runs/export-html`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', Accept: 'text/html', ...authHeaders() },
+        body: JSON.stringify({ runIds, ...(title ? { title } : {}) }),
+      })
+    } catch (err) {
+      throw new ApiError(0, 'NETWORK_ERROR', `无法连接后端服务：${(err as Error).message}`)
+    }
+    if (!resp.ok) {
+      const err = await parseError(resp)
+      if (resp.status === 401) window.dispatchEvent(new CustomEvent('auth:unauthorized'))
+      throw err
+    }
+    const cd = resp.headers.get('Content-Disposition') || ''
+    const utf8Match = cd.match(/filename\*=UTF-8''([^;]+)/i)
+    const plainMatch = cd.match(/filename="([^"]+)"/i)
+    const fallbackName = runIds.length === 1 ? `agent-replay-${runIds[0]}.html` : `agent-replay-${runIds.length}条.html`
+    let filename = fallbackName
+    if (utf8Match?.[1]) {
+      try {
+        filename = decodeURIComponent(utf8Match[1])
+      } catch {
+        filename = fallbackName
+      }
+    } else if (plainMatch?.[1]) {
+      filename = plainMatch[1]
+    }
+    const count = Number(resp.headers.get('X-Exported-Count') || runIds.length) || runIds.length
+    const blob = await resp.blob()
+    return { blob, filename, count }
+  },
 
   // ==================== 发布版本 ====================
   fetchReleases: () => request<ReleaseRevision[]>('GET', '/releases'),
@@ -420,7 +637,7 @@ export const platformApi = {
   fetchSystemPrompt: (version?: string) =>
     request<SystemPromptState>('GET', `/settings/system-prompt${query({ version })}`),
   saveSystemPromptDraft: (sysPromptText: string, revision?: number | null) =>
-    request<SystemPromptState & { status: ResourceStatus }>('PUT', '/settings/system-prompt/draft',
+    request<SystemPromptState & { status: ResourceStatus; cleared?: boolean }>('PUT', '/settings/system-prompt/draft',
       { sysPromptText, revision }),
   publishSystemPrompt: (sysPromptText?: string, note = '', revision?: number | null) =>
     request<{ status: ResourceStatus; rev: string }>('POST', '/settings/system-prompt/publish', {
@@ -430,9 +647,42 @@ export const platformApi = {
     }),
   discardSystemPromptDraft: () => request<SystemPromptState>('POST', '/settings/system-prompt/discard-draft'),
   rollbackSystemPrompt: (targetRev: string, mode: 'draft_only' | 'publish_now' = 'draft_only', reason = '') =>
-    request<SystemPromptState & { status: ResourceStatus; rev?: string }>('POST', '/settings/system-prompt/rollback',
-      { targetRev, mode, reason }),
+    request<SystemPromptState & { status: ResourceStatus; rev?: string; cleared?: boolean }>(
+      'POST',
+      '/settings/system-prompt/rollback',
+      { targetRev, mode, reason },
+    ),
   fetchSystemPromptRevisions: () => request<Revision[]>('GET', '/settings/system-prompt/revisions'),
+  fetchCompositeTemplate: (version?: string) =>
+    request<CompositeTemplateState>('GET', `/settings/composite-template${query({ version })}`),
+  saveCompositeTemplateDraft: (templateText: string, revision?: number | null) =>
+    request<CompositeTemplateState & { cleared?: boolean }>('PUT', '/settings/composite-template/draft', {
+      templateText,
+      revision,
+    }),
+  publishCompositeTemplate: (templateText?: string, note = '', revision?: number | null) =>
+    request<{ status: ResourceStatus; rev: string }>('POST', '/settings/composite-template/publish', {
+      templateText,
+      note,
+      ...(revision !== undefined ? { revision } : {}),
+    }),
+  discardCompositeTemplateDraft: () =>
+    request<CompositeTemplateState>('POST', '/settings/composite-template/discard-draft'),
+  rollbackCompositeTemplate: (
+    targetRev: string,
+    mode: 'draft_only' | 'publish_now' = 'draft_only',
+    reason = '',
+  ) =>
+    request<CompositeTemplateState & { rev?: string; cleared?: boolean }>(
+      'POST',
+      '/settings/composite-template/rollback',
+      { targetRev, mode, reason },
+    ),
+  fetchCompositeTemplateRevisions: () => request<Revision[]>('GET', '/settings/composite-template/revisions'),
+  previewCompositeTemplate: (templateText?: string) =>
+    request<CompositeTemplatePreviewResult>('POST', '/settings/composite-template/preview', {
+      ...(templateText !== undefined ? { templateText } : {}),
+    }),
   fetchModelInfo: () => request<ModelInfo>('GET', '/settings/model'),
   fetchRuntimeConfig: () => request<RuntimeConfigState>('GET', '/settings/runtime'),
   updateRuntimeConfig: (payload: RuntimeConfigUpdatePayload) =>

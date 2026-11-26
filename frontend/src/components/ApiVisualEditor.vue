@@ -20,6 +20,7 @@ import {
   Sliders,
   FileJson,
   FileCode,
+  Globe,
   Sparkles,
   ChevronDown,
   ChevronRight,
@@ -30,7 +31,10 @@ import { platformApi } from '@/api/platformApi'
 import type { ApiTestCallResult } from '@/types/platform'
 import CodeMirrorEditor from '@/components/CodeMirrorEditor.vue'
 
-type ConnectorKind = 'unified-gateway-xml' | 'unified-gateway-json'
+type ConnectorKind = 'unified-gateway-xml' | 'unified-gateway-json' | 'http'
+type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH'
+type HttpBodyType = 'json' | 'form' | 'text' | 'none'
+type HttpResponseFormat = 'auto' | 'json' | 'xml' | 'text'
 type RecordsMode = 'auto' | 'object' | 'list' | 'scalar' | 'none'
 type ParamValueType = 'string' | 'integer' | 'number' | 'boolean'
 type ContentFieldType = 'string' | 'number' | 'boolean' | 'json'
@@ -48,6 +52,12 @@ interface InputParamRow {
 }
 
 interface HeaderRow {
+  uid: string
+  key: string
+  value: string
+}
+
+interface QueryRow {
   uid: string
   key: string
   value: string
@@ -77,7 +87,7 @@ interface ValidateApiResp {
   ok: boolean
   errors: string[]
   connector?: ConnectorKind
-  format?: 'xml' | 'json'
+  format?: 'xml' | 'json' | 'http'
   requestPreview?: string
 }
 
@@ -132,6 +142,10 @@ const KNOWN_ROOT_KEYS = new Set([
   'description',
   'connector',
   'processCode',
+  'method',
+  'url',
+  'query',
+  'bodyType',
   'timeoutMs',
   'retry',
   'idempotent',
@@ -140,6 +154,34 @@ const KNOWN_ROOT_KEYS = new Set([
   'request',
   'response',
 ])
+
+const HTTP_METHODS: HttpMethod[] = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH']
+const HTTP_BODY_TYPES: Array<{ value: HttpBodyType; label: string }> = [
+  { value: 'json', label: 'JSON' },
+  { value: 'form', label: '表单 (Form)' },
+  { value: 'text', label: '纯文本 (Text)' },
+  { value: 'none', label: '无请求体 (None)' },
+]
+const HTTP_RESPONSE_FORMATS: Array<{ value: HttpResponseFormat; label: string }> = [
+  { value: 'auto', label: '自动识别 (auto)' },
+  { value: 'json', label: 'JSON' },
+  { value: 'xml', label: 'XML' },
+  { value: 'text', label: '纯文本 (text)' },
+]
+const SENSITIVE_KEY_WORDS = [
+  'authorization',
+  'cookie',
+  'token',
+  'secret',
+  'password',
+  'passwd',
+  'apikey',
+  'api-key',
+  'api_key',
+  'credential',
+  'sign',
+  'signature',
+]
 
 const ENVELOPE_KEYS = [
   'route_type',
@@ -194,6 +236,7 @@ const contentSubMode = ref<'table' | 'json'>('table')
 const previewCollapsed = ref(false)
 const activeEnvelopeField = ref<EnvelopeKey>('route_value')
 const activeContentRowUid = ref<string | null>(null)
+const activeQueryRowUid = ref<string | null>(null)
 
 const yamlParseError = ref<string | null>(null)
 const contentJsonText = ref('{\n}')
@@ -217,6 +260,12 @@ const form = reactive({
   description: '',
   connector: 'unified-gateway-xml' as ConnectorKind,
   processCode: '',
+  method: 'POST' as HttpMethod,
+  url: '',
+  bodyType: 'json' as HttpBodyType,
+  hadQueryKey: false,
+  queryRows: [] as QueryRow[],
+  textBody: '',
   timeoutMs: 10000,
   maxAttempts: 1,
   idempotent: true,
@@ -239,6 +288,8 @@ const form = reactive({
   requestExtra: {} as Record<string, unknown>,
   contentRows: [] as ContentFieldRow[],
   // 响应解析
+  responseFormat: 'auto' as HttpResponseFormat,
+  hadResponseFormatKey: false,
   successEnabled: true,
   successPath: 'operation_out.response.resp_code',
   successEquals: '0000',
@@ -257,6 +308,8 @@ const form = reactive({
   leadingCommentBlock: '',
   rootExtra: {} as Record<string, unknown>,
 })
+
+const isHttpConnector = computed(() => form.connector === 'http')
 
 let lastEmittedYaml = ''
 let syncingFromProps = false
@@ -394,8 +447,31 @@ function parseYamlIntoForm(rawYaml: string) {
     form.title = typeof doc.title === 'string' ? doc.title : ''
     form.description = typeof doc.description === 'string' ? doc.description : ''
     form.connector =
-      doc.connector === 'unified-gateway-json' ? 'unified-gateway-json' : 'unified-gateway-xml'
-    form.processCode = typeof doc.processCode === 'string' ? doc.processCode : form.name
+      doc.connector === 'http'
+        ? 'http'
+        : doc.connector === 'unified-gateway-json'
+          ? 'unified-gateway-json'
+          : 'unified-gateway-xml'
+    form.processCode =
+      typeof doc.processCode === 'string'
+        ? doc.processCode
+        : form.connector === 'http'
+          ? ''
+          : form.name
+    const rawMethod = typeof doc.method === 'string' ? doc.method.trim().toUpperCase() : 'POST'
+    form.method = HTTP_METHODS.includes(rawMethod as HttpMethod) ? (rawMethod as HttpMethod) : 'POST'
+    form.url = typeof doc.url === 'string' ? doc.url : ''
+    const rawBodyType = typeof doc.bodyType === 'string' ? doc.bodyType.trim().toLowerCase() : 'json'
+    form.bodyType = (
+      ['json', 'form', 'text', 'none'].includes(rawBodyType) ? rawBodyType : 'json'
+    ) as HttpBodyType
+    form.hadQueryKey = 'query' in doc
+    const rawQuery = isPlainObject(doc.query) ? doc.query : {}
+    form.queryRows = Object.entries(rawQuery).map(([qk, qv]) => ({
+      uid: nextUid('qry'),
+      key: qk,
+      value: qv === null || qv === undefined ? '' : String(qv),
+    }))
     form.timeoutMs =
       typeof doc.timeoutMs === 'number' && Number.isFinite(doc.timeoutMs) ? doc.timeoutMs : 10000
 
@@ -455,37 +531,76 @@ function parseYamlIntoForm(rawYaml: string) {
       }
     })
 
-    // request 信封与 content
-    const rawReq = isPlainObject(doc.request) ? doc.request : {}
-    const presentSet = new Set<EnvelopeKey>()
-    for (const ek of ENVELOPE_KEYS) {
-      if (ek in rawReq && rawReq[ek] !== null && rawReq[ek] !== undefined) {
-        form.envelope[ek] = String(rawReq[ek])
-        presentSet.add(ek)
+    // request（常规 HTTP 直接承载请求体；统一网关拆分为信封属性 + content）
+    if (form.connector === 'http') {
+      for (const ek of ENVELOPE_KEYS) form.envelope[ek] = ''
+      form.envelopePresentKeys = new Set<EnvelopeKey>()
+      form.requestExtra = {}
+      if (form.bodyType === 'text') {
+        form.textBody = typeof doc.request === 'string' ? doc.request : ''
+        form.contentRows = []
+        contentJsonText.value = '{\n}'
+        contentJsonError.value = null
+      } else if (form.bodyType === 'none') {
+        form.textBody = ''
+        form.contentRows = []
+        contentJsonText.value = '{\n}'
+        contentJsonError.value = null
+      } else if (isPlainObject(doc.request)) {
+        form.textBody = ''
+        form.contentRows = flattenContentObject(doc.request)
+        contentJsonText.value = JSON.stringify(doc.request, null, 2)
+        contentJsonError.value = null
+      } else if (Array.isArray(doc.request)) {
+        form.textBody = ''
+        form.contentRows = []
+        contentSubMode.value = 'json'
+        contentJsonText.value = JSON.stringify(doc.request, null, 2)
+        contentJsonError.value = null
       } else {
-        form.envelope[ek] = ''
+        form.textBody = ''
+        form.contentRows = []
+        contentJsonText.value = '{\n}'
+        contentJsonError.value = null
       }
-    }
-    form.envelopePresentKeys = presentSet
-
-    const nextReqExtra: Record<string, unknown> = {}
-    for (const [rk, rv] of Object.entries(rawReq)) {
-      if (rk !== 'content' && !(ENVELOPE_KEYS as readonly string[]).includes(rk)) {
-        nextReqExtra[rk] = rv
+    } else {
+      form.textBody = ''
+      const rawReq = isPlainObject(doc.request) ? doc.request : {}
+      const presentSet = new Set<EnvelopeKey>()
+      for (const ek of ENVELOPE_KEYS) {
+        if (ek in rawReq && rawReq[ek] !== null && rawReq[ek] !== undefined) {
+          form.envelope[ek] = String(rawReq[ek])
+          presentSet.add(ek)
+        } else {
+          form.envelope[ek] = ''
+        }
       }
-    }
-    form.requestExtra = nextReqExtra
+      form.envelopePresentKeys = presentSet
 
-    const rawContent = isPlainObject(rawReq.content) ? rawReq.content : {}
-    form.contentRows = flattenContentObject(rawContent)
-    contentJsonText.value = JSON.stringify(rawContent, null, 2)
-    contentJsonError.value = null
+      const nextReqExtra: Record<string, unknown> = {}
+      for (const [rk, rv] of Object.entries(rawReq)) {
+        if (rk !== 'content' && !(ENVELOPE_KEYS as readonly string[]).includes(rk)) {
+          nextReqExtra[rk] = rv
+        }
+      }
+      form.requestExtra = nextReqExtra
+
+      const rawContent = isPlainObject(rawReq.content) ? rawReq.content : {}
+      form.contentRows = flattenContentObject(rawContent)
+      contentJsonText.value = JSON.stringify(rawContent, null, 2)
+      contentJsonError.value = null
+    }
 
     // response 映射
     const rawResp = isPlainObject(doc.response) ? doc.response : {}
+    form.hadResponseFormatKey = 'format' in rawResp
+    const rawRespFmt = typeof rawResp.format === 'string' ? rawResp.format.trim().toLowerCase() : 'auto'
+    form.responseFormat = (
+      ['auto', 'json', 'xml', 'text'].includes(rawRespFmt) ? rawRespFmt : 'auto'
+    ) as HttpResponseFormat
     const nextRespExtra: Record<string, unknown> = {}
     for (const [rk, rv] of Object.entries(rawResp)) {
-      if (!['success', 'noData', 'records', 'summary'].includes(rk)) {
+      if (!['format', 'success', 'noData', 'records', 'summary'].includes(rk)) {
         nextRespExtra[rk] = rv
       }
     }
@@ -533,7 +648,8 @@ function parseYamlIntoForm(rawYaml: string) {
     } else if (rawRecords.path === null) {
       form.recordsPath = ''
     } else {
-      form.recordsPath = form.recordsMode === 'none' ? '' : 'operation_out.content'
+      form.recordsPath =
+        form.recordsMode === 'none' || form.connector === 'http' ? '' : 'operation_out.content'
     }
     form.recordsFlatten = rawRecords.flatten === true
     const nextRecExtra: Record<string, unknown> = {}
@@ -573,13 +689,19 @@ function emitSerializedYaml() {
     title: form.title,
     description: form.description,
     connector: form.connector,
-    processCode: form.processCode.trim(),
-    timeoutMs: Math.max(100, Math.min(120000, Number(form.timeoutMs) || 10000)),
-    retry: {
-      maxAttempts: Math.max(1, Math.min(5, Math.round(Number(form.maxAttempts) || 1))),
-    },
-    idempotent: Boolean(form.idempotent),
   }
+  if (form.connector === 'http') {
+    out.method = form.method
+    out.url = form.url.trim()
+    out.bodyType = form.bodyType
+  } else {
+    out.processCode = form.processCode.trim()
+  }
+  out.timeoutMs = Math.max(100, Math.min(120000, Number(form.timeoutMs) || 10000))
+  out.retry = {
+    maxAttempts: Math.max(1, Math.min(5, Math.round(Number(form.maxAttempts) || 1))),
+  }
+  out.idempotent = Boolean(form.idempotent)
 
   // headers（有有效键或原本声明过 headers 时输出）
   const cleanHeaders: Record<string, string> = {}
@@ -590,6 +712,18 @@ function emitSerializedYaml() {
   if (Object.keys(cleanHeaders).length > 0 || form.hadHeadersKey) {
     if (Object.keys(cleanHeaders).length > 0) {
       out.headers = cleanHeaders
+    }
+  }
+
+  // query（仅常规 HTTP 使用）
+  if (form.connector === 'http') {
+    const cleanQuery: Record<string, string> = {}
+    for (const q of form.queryRows) {
+      const qk = q.key.trim()
+      if (qk) cleanQuery[qk] = q.value
+    }
+    if (Object.keys(cleanQuery).length > 0) {
+      out.query = cleanQuery
     }
   }
 
@@ -627,27 +761,59 @@ function emitSerializedYaml() {
   out.input = inputObj
 
   // request
-  const reqObj: Record<string, unknown> = {}
-  for (const ek of ENVELOPE_KEYS) {
-    const val = form.envelope[ek]
-    if (val !== '' || (ek === 'operator_id' && form.envelopePresentKeys.has(ek))) {
-      reqObj[ek] = val
+  if (form.connector === 'http') {
+    if (form.bodyType === 'none') {
+      out.request = {}
+    } else if (form.bodyType === 'text') {
+      out.request = form.textBody
+    } else if (form.bodyType === 'form') {
+      const formObj: Record<string, unknown> = {}
+      for (const row of form.contentRows) {
+        const rk = row.path.trim()
+        if (rk) formObj[rk] = row.value
+      }
+      out.request = formObj
+    } else {
+      // json 请求体支持顶层对象或数组
+      if (contentSubMode.value === 'json' && !contentJsonError.value) {
+        try {
+          out.request = JSON.parse(contentJsonText.value || '{}')
+        } catch {
+          out.request = buildContentObjectFromRows(form.contentRows)
+        }
+      } else {
+        const bodyObj = buildContentObjectFromRows(form.contentRows)
+        out.request = bodyObj
+        contentJsonText.value = JSON.stringify(bodyObj, null, 2)
+        contentJsonError.value = null
+      }
     }
-  }
-  for (const [rk, rv] of Object.entries(form.requestExtra)) {
-    reqObj[rk] = rv
-  }
-  const contentObj = buildContentObjectFromRows(form.contentRows)
-  reqObj.content = contentObj
-  out.request = reqObj
+  } else {
+    const reqObj: Record<string, unknown> = {}
+    for (const ek of ENVELOPE_KEYS) {
+      const val = form.envelope[ek]
+      if (val !== '' || (ek === 'operator_id' && form.envelopePresentKeys.has(ek))) {
+        reqObj[ek] = val
+      }
+    }
+    for (const [rk, rv] of Object.entries(form.requestExtra)) {
+      reqObj[rk] = rv
+    }
+    const contentObj = buildContentObjectFromRows(form.contentRows)
+    reqObj.content = contentObj
+    out.request = reqObj
 
-  if (contentSubMode.value !== 'json') {
-    contentJsonText.value = JSON.stringify(contentObj, null, 2)
-    contentJsonError.value = null
+    if (contentSubMode.value !== 'json') {
+      contentJsonText.value = JSON.stringify(contentObj, null, 2)
+      contentJsonError.value = null
+    }
   }
 
   // response
   const respObj: Record<string, unknown> = {}
+  if (form.connector === 'http' && (form.responseFormat !== 'auto' || form.hadResponseFormatKey)) {
+    respObj.format = form.responseFormat
+  }
   if (form.successEnabled && form.successPath.trim()) {
     respObj.success = {
       path: form.successPath.trim(),
@@ -694,8 +860,15 @@ function emitSerializedYaml() {
   }
   respObj.records = recordsObj
 
+  const rawMaxChars = Number(form.maxPreviewChars)
+  const normalizedMaxChars =
+    Number.isFinite(rawMaxChars) && Math.round(rawMaxChars) === -1
+      ? -1
+      : Number.isFinite(rawMaxChars) && Math.round(rawMaxChars) >= 1
+        ? Math.round(rawMaxChars)
+        : 60
   const summaryObj: Record<string, unknown> = {
-    maxPreviewChars: Math.max(10, Math.round(Number(form.maxPreviewChars) || 60)),
+    maxPreviewChars: normalizedMaxChars,
   }
   const pRows = Number(form.previewRowsText.trim())
   if (form.previewRowsText.trim() !== '' && Number.isFinite(pRows) && pRows > 0) {
@@ -761,12 +934,28 @@ const usedPlaceholders = computed<string[]>(() => {
   for (const h of form.headers) {
     if (h.key.trim()) collectPlaceholdersFromAny(h.value, used)
   }
-  for (const ek of ENVELOPE_KEYS) {
-    collectPlaceholdersFromAny(form.envelope[ek], used)
-  }
-  collectPlaceholdersFromAny(form.requestExtra, used)
-  for (const row of form.contentRows) {
-    if (row.path.trim()) collectPlaceholdersFromAny(row.value, used)
+  if (form.connector === 'http') {
+    collectPlaceholdersFromAny(form.url, used)
+    for (const q of form.queryRows) {
+      if (q.key.trim()) collectPlaceholdersFromAny(q.value, used)
+    }
+    if (form.bodyType === 'text') {
+      collectPlaceholdersFromAny(form.textBody, used)
+    } else if (form.bodyType === 'json' && contentSubMode.value === 'json') {
+      collectPlaceholdersFromAny(contentJsonText.value, used)
+    } else if (form.bodyType !== 'none') {
+      for (const row of form.contentRows) {
+        if (row.path.trim()) collectPlaceholdersFromAny(row.value, used)
+      }
+    }
+  } else {
+    for (const ek of ENVELOPE_KEYS) {
+      collectPlaceholdersFromAny(form.envelope[ek], used)
+    }
+    collectPlaceholdersFromAny(form.requestExtra, used)
+    for (const row of form.contentRows) {
+      if (row.path.trim()) collectPlaceholdersFromAny(row.value, used)
+    }
   }
   return [...used]
 })
@@ -782,8 +971,19 @@ const localErrors = computed<string[]>(() => {
     errs.push(`YAML 语法解析失败：${yamlParseError.value}`)
     return errs
   }
-  if (!form.processCode.trim()) {
-    errs.push('交易编码 (processCode) 不能为空')
+  if (form.connector === 'http') {
+    const rawUrl = form.url.trim()
+    if (!rawUrl) {
+      errs.push('HTTP 接口目标 URL 不能为空')
+    } else if (/[\r\n]/.test(rawUrl)) {
+      errs.push('HTTP 接口目标 URL 不能包含换行符')
+    } else if (!/^https?:\/\//i.test(rawUrl)) {
+      errs.push('HTTP 接口目标 URL 必须以 http:// 或 https:// 开头')
+    }
+  } else {
+    if (!form.processCode.trim()) {
+      errs.push('交易编码 (processCode) 不能为空')
+    }
   }
   if (
     form.recordsMode === 'list' &&
@@ -829,7 +1029,7 @@ const localErrors = computed<string[]>(() => {
     }
   }
 
-  // XML 模式下校验标签合法性
+  // XML 模式下校验标签合法性；JSON / HTTP 校验空键名
   if (form.connector === 'unified-gateway-xml') {
     for (const row of form.contentRows) {
       const p = row.path.trim()
@@ -840,7 +1040,7 @@ const localErrors = computed<string[]>(() => {
         }
       }
     }
-  } else {
+  } else if (form.connector === 'unified-gateway-json' || form.bodyType === 'json') {
     for (const row of form.contentRows) {
       const p = row.path.trim()
       if (p && p.split('.').some(seg => !seg.trim())) {
@@ -860,8 +1060,17 @@ const localErrors = computed<string[]>(() => {
     errs.push(`请求模板引用了未在动态入参声明的变量 ${wrapPlaceholder(missingRef)}`)
   }
 
-  if (contentSubMode.value === 'json' && contentJsonError.value) {
+  if (
+    contentSubMode.value === 'json' &&
+    contentJsonError.value &&
+    (form.connector !== 'http' || form.bodyType === 'json')
+  ) {
     errs.push(`请求体 JSON 模板语法有误：${contentJsonError.value}`)
+  }
+
+  const maxCharsNum = Number(form.maxPreviewChars)
+  if (!Number.isFinite(maxCharsNum) || (Math.round(maxCharsNum) !== -1 && Math.round(maxCharsNum) < 1)) {
+    errs.push('模型摘要单格截断字数 (maxPreviewChars) 须为正整数或 -1（-1 表示不限制）')
   }
 
   return errs
@@ -934,9 +1143,81 @@ function maskJsonTree(node: unknown, keyHint = ''): unknown {
   return node
 }
 
+function isSensitiveKeyName(key: string): boolean {
+  const low = key.trim().toLowerCase()
+  return SENSITIVE_KEY_WORDS.some(w => low.includes(w))
+}
+
+function maskHeaderPreviewVal(key: string, val: string): string {
+  if (/^\$\{[^}]+\}$/.test(val.trim())) return val
+  if (isSensitiveKeyName(key) && val.trim() !== '') return '***'
+  return maskPhoneIfLiteral(key, val)
+}
+
 const gatewayEnvelopePreview = computed<string>(() => {
   if (remoteValidation.value?.requestPreview) {
     return remoteValidation.value.requestPreview
+  }
+
+  if (form.connector === 'http') {
+    const baseUrl = form.url.trim() || 'https://api.example.com/v1/resource'
+    const queryPairs = form.queryRows
+      .filter(q => q.key.trim() !== '')
+      .map(q => `${q.key.trim()}=${maskHeaderPreviewVal(q.key, q.value)}`)
+    const fullUrl =
+      queryPairs.length > 0
+        ? `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}${queryPairs.join('&')}`
+        : baseUrl
+    const defaultHeaders: Record<string, string> =
+      form.bodyType === 'json'
+        ? { 'Content-Type': 'application/json; charset=utf-8', Accept: 'application/json, */*' }
+        : form.bodyType === 'form'
+          ? {
+              'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8',
+              Accept: 'application/json, */*',
+            }
+          : form.bodyType === 'text'
+            ? { 'Content-Type': 'text/plain; charset=utf-8', Accept: '*/*' }
+            : { Accept: 'application/json, */*' }
+    const mergedHeaders: Record<string, string> = { ...defaultHeaders }
+    for (const h of form.headers) {
+      const hk = h.key.trim()
+      if (!hk) continue
+      const existing = Object.keys(mergedHeaders).find(k => k.toLowerCase() === hk.toLowerCase())
+      if (existing) delete mergedHeaders[existing]
+      mergedHeaders[hk] = maskHeaderPreviewVal(hk, h.value)
+    }
+    const lines = [`${form.method} ${fullUrl}`]
+    for (const [hk, hv] of Object.entries(mergedHeaders)) {
+      lines.push(`${hk}: ${hv}`)
+    }
+    if (form.bodyType === 'json') {
+      let bodyTree: unknown
+      if (contentSubMode.value === 'json' && !contentJsonError.value) {
+        try {
+          bodyTree = JSON.parse(contentJsonText.value || '{}')
+        } catch {
+          bodyTree = buildContentObjectFromRows(form.contentRows)
+        }
+      } else {
+        bodyTree = buildContentObjectFromRows(form.contentRows)
+      }
+      lines.push('')
+      lines.push(JSON.stringify(maskJsonTree(bodyTree), null, 2))
+    } else if (form.bodyType === 'form') {
+      const formLine = form.contentRows
+        .filter(r => r.path.trim() !== '')
+        .map(r => `${r.path.trim()}=${maskHeaderPreviewVal(r.path, r.value)}`)
+        .join('&')
+      if (formLine) {
+        lines.push('')
+        lines.push(formLine)
+      }
+    } else if (form.bodyType === 'text' && form.textBody) {
+      lines.push('')
+      lines.push(form.textBody)
+    }
+    return lines.join('\n')
   }
 
   const contentObj = buildContentObjectFromRows(form.contentRows)
@@ -993,7 +1274,74 @@ const gatewayEnvelopePreview = computed<string>(() => {
 // ==================== 表单交互动作 ====================
 function setConnector(next: ConnectorKind) {
   if (form.connector === next) return
+  const prev = form.connector
   form.connector = next
+  if (next === 'http' && prev !== 'http') {
+    if (!form.url.trim()) {
+      form.url = 'https://api.example.com/v1/resource'
+    }
+    if (form.recordsPath.trim() === 'operation_out.content') {
+      form.recordsPath = ''
+    }
+    if (form.successPath.trim() === 'operation_out.response.resp_code') {
+      form.successEnabled = false
+    }
+  } else if (next !== 'http' && prev === 'http') {
+    if (!form.processCode.trim()) {
+      form.processCode = form.name || props.apiName || ''
+    }
+    if (!form.recordsPath.trim() && form.recordsMode !== 'none') {
+      form.recordsPath = 'operation_out.content'
+    }
+  }
+  emitSerializedYaml()
+}
+
+function setHttpBodyType(next: HttpBodyType) {
+  if (form.bodyType === next) return
+  form.bodyType = next
+  if (next === 'json') {
+    const obj = buildContentObjectFromRows(form.contentRows)
+    contentJsonText.value = JSON.stringify(obj, null, 2)
+    contentJsonError.value = null
+  }
+  emitSerializedYaml()
+}
+
+function addQueryRow() {
+  const row: QueryRow = { uid: nextUid('qry'), key: '', value: '' }
+  form.queryRows.push(row)
+  activeQueryRowUid.value = row.uid
+}
+
+function removeQueryRow(idx: number) {
+  form.queryRows.splice(idx, 1)
+  emitSerializedYaml()
+}
+
+function insertVarIntoQuery(paramName: string) {
+  const token = wrapPlaceholder(paramName)
+  const hit = form.queryRows.find(q => q.uid === activeQueryRowUid.value)
+  if (hit) {
+    hit.value = token
+    if (!hit.key.trim()) hit.key = paramName
+  } else {
+    const row: QueryRow = { uid: nextUid('qry'), key: paramName, value: token }
+    form.queryRows.push(row)
+    activeQueryRowUid.value = row.uid
+  }
+  emitSerializedYaml()
+}
+
+function insertVarIntoUrl(paramName: string) {
+  const token = wrapPlaceholder(paramName)
+  form.url = `${form.url}${token}`
+  emitSerializedYaml()
+}
+
+function insertVarIntoTextBody(paramName: string) {
+  const token = wrapPlaceholder(paramName)
+  form.textBody = `${form.textBody}${token}`
   emitSerializedYaml()
 }
 
@@ -1141,6 +1489,18 @@ function onContentJsonInput(nextJson: string) {
   contentJsonText.value = nextJson
   try {
     const parsed = JSON.parse(nextJson || '{}')
+    if (form.connector === 'http') {
+      if (!isPlainObject(parsed) && !Array.isArray(parsed)) {
+        contentJsonError.value = 'HTTP JSON 请求体顶层需为 JSON 对象 {} 或数组 []'
+        return
+      }
+      contentJsonError.value = null
+      if (isPlainObject(parsed)) {
+        form.contentRows = flattenContentObject(parsed)
+      }
+      emitSerializedYaml()
+      return
+    }
     if (!isPlainObject(parsed)) {
       contentJsonError.value = 'request.content 顶层必须是 JSON 对象 {}'
       return
@@ -1821,9 +2181,9 @@ defineExpose({
         </button>
       </div>
 
-      <!-- 1. 顶部类 Apifox 协议与交易编码栏 -->
+      <!-- 1. 顶部类 Apifox 协议与交易编码 / URL 栏 -->
       <div class="ave-endpoint-bar" :class="{ 'is-disabled': !!yamlParseError }">
-        <div class="ave-proto-switch" role="radiogroup" aria-label="统一网关报文协议格式">
+        <div class="ave-proto-switch" role="radiogroup" aria-label="接口连接协议">
           <button
             type="button"
             class="ave-proto-btn"
@@ -1844,9 +2204,39 @@ defineExpose({
             <FileJson :size="13" />
             <span>GATEWAY · JSON</span>
           </button>
+          <button
+            type="button"
+            class="ave-proto-btn"
+            :class="{ 'is-active-http': form.connector === 'http' }"
+            :disabled="!!yamlParseError"
+            @click="setConnector('http')"
+          >
+            <Globe :size="13" />
+            <span>常规 HTTP</span>
+          </button>
         </div>
 
-        <div class="ave-endpoint-box">
+        <div v-if="isHttpConnector" class="ave-endpoint-box">
+          <select
+            v-model="form.method"
+            class="ave-method-select mono"
+            aria-label="HTTP 请求方式"
+            :disabled="!!yamlParseError"
+            @change="emitSerializedYaml"
+          >
+            <option v-for="m in HTTP_METHODS" :key="m" :value="m">{{ m }}</option>
+          </select>
+          <span class="ave-sep-pipe">|</span>
+          <input
+            v-model="form.url"
+            type="text"
+            class="ave-bare-input mono"
+            placeholder="https://api.example.com/v1/resource（支持 ${参数}）"
+            :disabled="!!yamlParseError"
+            @input="emitSerializedYaml"
+          />
+        </div>
+        <div v-else class="ave-endpoint-box">
           <span class="ave-http-method mono">POST</span>
           <span class="ave-http-path mono">/openapi_3</span>
           <span class="ave-sep-pipe">|</span>
@@ -1897,7 +2287,13 @@ defineExpose({
               <div class="ave-pop-body">
                 <div v-if="combinedErrors.length === 0" class="ave-val-pass">
                   <CheckCircle2 :size="14" />
-                  <span>JSON Schema 入参、占位符映射与 {{ form.connector === 'unified-gateway-json' ? 'JSON' : 'XML' }} 网关信封全部校验通过</span>
+                  <span>
+                    {{
+                      isHttpConnector
+                        ? 'JSON Schema 入参、目标 URL、请求头、请求体与占位符映射全部校验通过'
+                        : `JSON Schema 入参、占位符映射与 ${form.connector === 'unified-gateway-json' ? 'JSON' : 'XML'} 网关信封全部校验通过`
+                    }}
+                  </span>
                 </div>
                 <div v-else class="ave-val-list">
                   <div v-for="(err, idx) in combinedErrors" :key="idx" class="ave-val-item">
@@ -1950,8 +2346,10 @@ defineExpose({
           :class="{ active: activeTab === 'request' }"
           @click="activeTab = 'request'"
         >
-          <span>② 请求头与报文体</span>
-          <span class="ave-count-pill mono">{{ form.contentRows.length + form.headers.length }}</span>
+          <span>{{ isHttpConnector ? '② 请求参数、请求头与请求体' : '② 请求头与报文体' }}</span>
+          <span class="ave-count-pill mono">
+            {{ form.contentRows.length + form.headers.length + (isHttpConnector ? form.queryRows.length : 0) }}
+          </span>
         </button>
         <button
           type="button"
@@ -2124,7 +2522,10 @@ defineExpose({
               <div class="ave-panel-head">
                 <div class="ave-panel-title-wrap">
                   <span class="ave-panel-title">自定义安全请求头 (headers)</span>
-                  <span class="ave-panel-sub">
+                  <span v-if="isHttpConnector" class="ave-panel-sub">
+                    按请求体类型自动补充默认 Content-Type，自定义值可覆盖；Authorization / Token / Cookie 等凭证预览自动脱敏（禁止覆盖 Host / Content-Length）
+                  </span>
+                  <span v-else class="ave-panel-sub">
                     平台自动注入
                     <code class="mono">{{ form.connector === 'unified-gateway-json' ? 'application/json' : 'application/xml' }}</code>
                     ，可按需附加业务 Header（禁止覆盖 Host / Content-Length）
@@ -2151,7 +2552,7 @@ defineExpose({
                           v-model="h.key"
                           type="text"
                           class="ave-cell-input mono"
-                          placeholder="如 X-Busi-Channel"
+                          :placeholder="isHttpConnector ? '如 Authorization 或 X-Api-Key' : '如 X-Busi-Channel'"
                           @input="emitSerializedYaml"
                         />
                       </td>
@@ -2175,8 +2576,82 @@ defineExpose({
               </div>
             </div>
 
+            <!-- B-HTTP. URL 快捷插值与查询参数 (query) -->
+            <div v-if="isHttpConnector" class="ave-panel-card">
+              <div class="ave-panel-head">
+                <div class="ave-panel-title-wrap">
+                  <span class="ave-panel-title">URL 路径变量与查询参数 (query)</span>
+                  <span class="ave-panel-sub">发送时自动按 UTF-8 URL 编码拼接至目标地址，支持动态入参与 <code class="mono">${$now}</code></span>
+                </div>
+                <button type="button" class="ave-btn ave-btn-xs" @click="addQueryRow">
+                  <Plus :size="12" />
+                  <span>添加 Query 参数</span>
+                </button>
+              </div>
+
+              <div class="ave-var-bar ave-var-bar-sub">
+                <span class="ave-var-bar-lbl">快捷插入入参至 Query（按住 Shift 点按插入 URL）：</span>
+                <span v-if="declaredParamNames.length === 0" class="ave-muted">（尚未声明动态入参）</span>
+                <button
+                  v-for="pName in declaredParamNames"
+                  :key="'qry-var-' + pName"
+                  type="button"
+                  class="ave-var-chip mono"
+                  @click="$event.shiftKey ? insertVarIntoUrl(pName) : insertVarIntoQuery(pName)"
+                >
+                  + {{ wrapPlaceholder(pName) }}
+                </button>
+              </div>
+
+              <div v-if="form.queryRows.length > 0" class="ave-table-wrap">
+                <table class="ave-grid-table">
+                  <thead>
+                    <tr>
+                      <th style="width: 38%">Query 参数名</th>
+                      <th>参数值（固定值或 {{ wrapPlaceholder('参数名') }}）</th>
+                      <th style="width: 48px; text-align: right">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr
+                      v-for="(q, qIdx) in form.queryRows"
+                      :key="q.uid"
+                      :class="{ 'is-focused-row': activeQueryRowUid === q.uid }"
+                      @click="activeQueryRowUid = q.uid"
+                    >
+                      <td>
+                        <input
+                          v-model="q.key"
+                          type="text"
+                          class="ave-cell-input mono is-key"
+                          placeholder="如 mobile 或 pageNo"
+                          @focus="activeQueryRowUid = q.uid"
+                          @input="emitSerializedYaml"
+                        />
+                      </td>
+                      <td>
+                        <input
+                          v-model="q.value"
+                          type="text"
+                          class="ave-cell-input mono"
+                          placeholder="固定值或 ${参数名}"
+                          @focus="activeQueryRowUid = q.uid"
+                          @input="emitSerializedYaml"
+                        />
+                      </td>
+                      <td style="text-align: right">
+                        <button type="button" class="ave-icon-btn is-danger" @click.stop="removeQueryRow(qIdx)">
+                          <Trash2 :size="13" />
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
             <!-- B. 统一网关路由信封配置 -->
-            <div class="ave-panel-card">
+            <div v-else class="ave-panel-card">
               <div class="ave-panel-head">
                 <div class="ave-panel-title-wrap">
                   <span class="ave-panel-title">网关路由信封配置 (operation_in 顶层属性)</span>
@@ -2270,15 +2745,35 @@ defineExpose({
               </div>
             </div>
 
-            <!-- C. 业务请求体 (request.content) -->
+            <!-- C. 业务请求体 (常规 HTTP request / 统一网关 request.content) -->
             <div class="ave-panel-card">
               <div class="ave-panel-head">
                 <div class="ave-panel-title-wrap">
-                  <span class="ave-panel-title">业务请求体 (request.content)</span>
-                  <span class="ave-panel-sub">支持点分嵌套子路径（如 <code class="mono">query.startTime</code>）与 JSON 模板双模式无缝切换</span>
+                  <span class="ave-panel-title">
+                    {{ isHttpConnector ? 'HTTP 请求体 (request)' : '业务请求体 (request.content)' }}
+                  </span>
+                  <span class="ave-panel-sub">
+                    {{
+                      isHttpConnector
+                        ? '支持 JSON（对象/数组）、表单 (application/x-www-form-urlencoded)、纯文本及无请求体四种模式'
+                        : '支持点分嵌套子路径（如 query.startTime）与 JSON 模板双模式无缝切换'
+                    }}
+                  </span>
                 </div>
                 <div class="ave-head-right">
-                  <div class="ave-mini-seg">
+                  <div v-if="isHttpConnector" class="ave-mini-seg" role="radiogroup" aria-label="HTTP 请求体格式">
+                    <button
+                      v-for="bt in HTTP_BODY_TYPES"
+                      :key="bt.value"
+                      type="button"
+                      class="ave-mini-seg-btn"
+                      :class="{ active: form.bodyType === bt.value }"
+                      @click="setHttpBodyType(bt.value)"
+                    >
+                      {{ bt.label }}
+                    </button>
+                  </div>
+                  <div v-if="!isHttpConnector || form.bodyType === 'json'" class="ave-mini-seg">
                     <button
                       type="button"
                       class="ave-mini-seg-btn"
@@ -2297,122 +2792,161 @@ defineExpose({
                     </button>
                   </div>
                   <button
-                    v-if="contentSubMode === 'table'"
+                    v-if="(!isHttpConnector || form.bodyType === 'json' || form.bodyType === 'form') && (contentSubMode === 'table' || form.bodyType === 'form')"
                     type="button"
                     class="ave-btn ave-btn-primary"
                     @click="addContentFieldRow"
                   >
                     <Plus :size="13" />
-                    <span>新增报文体字段</span>
+                    <span>{{ isHttpConnector && form.bodyType === 'form' ? '新增表单项' : '新增报文体字段' }}</span>
                   </button>
                 </div>
               </div>
 
-              <div class="ave-var-bar ave-var-bar-sub">
-                <span class="ave-var-bar-lbl">一键插入动态入参变量：</span>
-                <span v-if="declaredParamNames.length === 0" class="ave-muted">（尚未声明动态入参）</span>
-                <button
-                  v-for="pName in declaredParamNames"
-                  :key="'cnt-var-' + pName"
-                  type="button"
-                  class="ave-var-chip mono"
-                  @click="insertVarIntoContent(pName)"
-                >
-                  + {{ wrapPlaceholder(pName) }}
-                </button>
-              </div>
-
-              <div v-if="contentSubMode === 'table'" class="ave-table-wrap">
-                <table class="ave-grid-table">
-                  <thead>
-                    <tr>
-                      <th style="width: 36%">字段路径 (支持 a.b 嵌套)</th>
-                      <th style="width: 108px">值类型</th>
-                      <th>参数值 / 占位符（如 {{ wrapPlaceholder('手机号码') }} 或固定值）</th>
-                      <th style="width: 48px; text-align: right">操作</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-if="form.contentRows.length === 0">
-                      <td colspan="4" class="ave-empty-td">
-                        <span>request.content 当前为空对象</span>
-                        <button type="button" class="ave-btn ave-btn-xs" @click="addContentFieldRow">
-                          <Plus :size="12" />
-                          <span>添加首个业务字段</span>
-                        </button>
-                      </td>
-                    </tr>
-                    <tr
-                      v-for="(cRow, cIdx) in form.contentRows"
-                      :key="cRow.uid"
-                      :class="{ 'is-focused-row': activeContentRowUid === cRow.uid }"
-                      @click="activeContentRowUid = cRow.uid"
-                    >
-                      <td>
-                        <input
-                          v-model="cRow.path"
-                          type="text"
-                          class="ave-cell-input mono is-key"
-                          placeholder="如 userMobile 或 query.startTime"
-                          @focus="activeContentRowUid = cRow.uid"
-                          @input="emitSerializedYaml"
-                        />
-                      </td>
-                      <td>
-                        <select v-model="cRow.valueType" class="ave-cell-select mono" @change="emitSerializedYaml">
-                          <option value="string">string</option>
-                          <option value="number">number</option>
-                          <option value="boolean">boolean</option>
-                          <option value="json">array/obj</option>
-                        </select>
-                      </td>
-                      <td>
-                        <select
-                          v-if="cRow.valueType === 'boolean' && !cRow.value.includes('${')"
-                          v-model="cRow.value"
-                          class="ave-cell-select mono"
-                          @change="emitSerializedYaml"
-                        >
-                          <option value="true">true</option>
-                          <option value="false">false</option>
-                        </select>
-                        <input
-                          v-else
-                          v-model="cRow.value"
-                          type="text"
-                          class="ave-cell-input mono"
-                          placeholder="输入固定值或点击上方 +${参数} 插入"
-                          @focus="activeContentRowUid = cRow.uid"
-                          @input="emitSerializedYaml"
-                        />
-                      </td>
-                      <td style="text-align: right">
-                        <button type="button" class="ave-icon-btn is-danger" @click.stop="removeContentFieldRow(cIdx)">
-                          <Trash2 :size="13" />
-                        </button>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-
-              <div v-else class="ave-json-editor-box">
-                <div v-if="contentJsonError" class="ave-inline-err mono">
-                  JSON 语法提示：{{ contentJsonError }}
+              <!-- HTTP none 模式 -->
+              <div v-if="isHttpConnector && form.bodyType === 'none'" class="ave-mode-callout is-none" style="margin: 10px 12px">
+                <div class="ave-callout-title">无请求体 (bodyType: none)</div>
+                <div class="ave-callout-desc">
+                  适用于 <code class="mono">GET</code> / <code class="mono">DELETE</code> 等仅靠 URL 路径、Query 参数与请求头传递参数的常规 HTTP 接口，发送时不携带 Body。
                 </div>
-                <CodeMirrorEditor
-                  :model-value="contentJsonText"
-                  lang="json"
-                  min-height="170px"
-                  max-height="280px"
-                  @update:model-value="onContentJsonInput"
-                  @save="emit('save')"
-                />
               </div>
+
+              <!-- HTTP text 模式 -->
+              <template v-else-if="isHttpConnector && form.bodyType === 'text'">
+                <div class="ave-var-bar ave-var-bar-sub">
+                  <span class="ave-var-bar-lbl">一键插入动态入参至文本请求体：</span>
+                  <span v-if="declaredParamNames.length === 0" class="ave-muted">（尚未声明动态入参）</span>
+                  <button
+                    v-for="pName in declaredParamNames"
+                    :key="'txt-var-' + pName"
+                    type="button"
+                    class="ave-var-chip mono"
+                    @click="insertVarIntoTextBody(pName)"
+                  >
+                    + {{ wrapPlaceholder(pName) }}
+                  </button>
+                </div>
+                <div style="padding: 10px 12px">
+                  <textarea
+                    v-model="form.textBody"
+                    class="ave-textarea mono"
+                    rows="6"
+                    placeholder="输入原始文本 / 自定义 XML / SOAP / NDJSON 等请求体内容，支持 ${参数名} 与 ${$now} 占位符"
+                    @input="emitSerializedYaml"
+                  ></textarea>
+                </div>
+              </template>
+
+              <!-- HTTP form / json 或统一网关 content 模式 -->
+              <template v-else>
+                <div class="ave-var-bar ave-var-bar-sub">
+                  <span class="ave-var-bar-lbl">一键插入动态入参变量：</span>
+                  <span v-if="declaredParamNames.length === 0" class="ave-muted">（尚未声明动态入参）</span>
+                  <button
+                    v-for="pName in declaredParamNames"
+                    :key="'cnt-var-' + pName"
+                    type="button"
+                    class="ave-var-chip mono"
+                    @click="insertVarIntoContent(pName)"
+                  >
+                    + {{ wrapPlaceholder(pName) }}
+                  </button>
+                </div>
+
+                <div v-if="(isHttpConnector && form.bodyType === 'form') || contentSubMode === 'table'" class="ave-table-wrap">
+                  <table class="ave-grid-table">
+                    <thead>
+                      <tr>
+                        <th style="width: 36%">
+                          {{ isHttpConnector && form.bodyType === 'form' ? '表单字段名 (Key)' : '字段路径 (支持 a.b 嵌套)' }}
+                        </th>
+                        <th v-if="!(isHttpConnector && form.bodyType === 'form')" style="width: 108px">值类型</th>
+                        <th>参数值 / 占位符（如 {{ wrapPlaceholder('手机号码') }} 或固定值）</th>
+                        <th style="width: 48px; text-align: right">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-if="form.contentRows.length === 0">
+                        <td :colspan="isHttpConnector && form.bodyType === 'form' ? 3 : 4" class="ave-empty-td">
+                          <span>{{ isHttpConnector ? '请求体当前为空' : 'request.content 当前为空对象' }}</span>
+                          <button type="button" class="ave-btn ave-btn-xs" @click="addContentFieldRow">
+                            <Plus :size="12" />
+                            <span>添加首个业务字段</span>
+                          </button>
+                        </td>
+                      </tr>
+                      <tr
+                        v-for="(cRow, cIdx) in form.contentRows"
+                        :key="cRow.uid"
+                        :class="{ 'is-focused-row': activeContentRowUid === cRow.uid }"
+                        @click="activeContentRowUid = cRow.uid"
+                      >
+                        <td>
+                          <input
+                            v-model="cRow.path"
+                            type="text"
+                            class="ave-cell-input mono is-key"
+                            :placeholder="isHttpConnector && form.bodyType === 'form' ? '如 userMobile' : '如 userMobile 或 query.startTime'"
+                            @focus="activeContentRowUid = cRow.uid"
+                            @input="emitSerializedYaml"
+                          />
+                        </td>
+                        <td v-if="!(isHttpConnector && form.bodyType === 'form')">
+                          <select v-model="cRow.valueType" class="ave-cell-select mono" @change="emitSerializedYaml">
+                            <option value="string">string</option>
+                            <option value="number">number</option>
+                            <option value="boolean">boolean</option>
+                            <option value="json">array/obj</option>
+                          </select>
+                        </td>
+                        <td>
+                          <select
+                            v-if="!(isHttpConnector && form.bodyType === 'form') && cRow.valueType === 'boolean' && !cRow.value.includes('${')"
+                            v-model="cRow.value"
+                            class="ave-cell-select mono"
+                            @change="emitSerializedYaml"
+                          >
+                            <option value="true">true</option>
+                            <option value="false">false</option>
+                          </select>
+                          <input
+                            v-else
+                            v-model="cRow.value"
+                            type="text"
+                            class="ave-cell-input mono"
+                            placeholder="输入固定值或点击上方 +${参数} 插入"
+                            @focus="activeContentRowUid = cRow.uid"
+                            @input="emitSerializedYaml"
+                          />
+                        </td>
+                        <td style="text-align: right">
+                          <button type="button" class="ave-icon-btn is-danger" @click.stop="removeContentFieldRow(cIdx)">
+                            <Trash2 :size="13" />
+                          </button>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div v-else class="ave-json-editor-box">
+                  <div v-if="contentJsonError" class="ave-inline-err mono">
+                    JSON 语法提示：{{ contentJsonError }}
+                  </div>
+                  <CodeMirrorEditor
+                    :model-value="contentJsonText"
+                    lang="json"
+                    min-height="170px"
+                    max-height="280px"
+                    @update:model-value="onContentJsonInput"
+                    @save="emit('save')"
+                  />
+                </div>
+              </template>
             </div>
           </div>
 
-          <!-- D. 右侧/下方可折叠常驻「网关组装报文实时预览（XML / JSON）」 -->
+          <!-- D. 右侧/下方可折叠常驻「请求实时预览（XML / JSON / HTTP）」 -->
           <div class="ave-preview-aside" :class="{ 'is-collapsed': previewCollapsed }">
             <div class="ave-preview-head">
               <button
@@ -2422,18 +2956,24 @@ defineExpose({
               >
                 <ChevronRight v-if="previewCollapsed" :size="14" />
                 <ChevronDown v-else :size="14" />
-                <span>网关组装报文实时预览</span>
+                <span>{{ isHttpConnector ? 'HTTP 请求实时预览' : '网关组装报文实时预览' }}</span>
                 <span
                   class="ave-proto-tag mono"
-                  :class="form.connector === 'unified-gateway-json' ? 'is-json' : 'is-xml'"
+                  :class="
+                    isHttpConnector
+                      ? 'is-http'
+                      : form.connector === 'unified-gateway-json'
+                        ? 'is-json'
+                        : 'is-xml'
+                  "
                 >
-                  {{ form.connector === 'unified-gateway-json' ? 'JSON' : 'XML' }}
+                  {{ isHttpConnector ? form.method : form.connector === 'unified-gateway-json' ? 'JSON' : 'XML' }}
                 </span>
               </button>
               <button
                 type="button"
                 class="ave-btn ave-btn-xs"
-                @click="store.copyText(gatewayEnvelopePreview, '已复制脱敏网关请求预览报文')"
+                @click="store.copyText(gatewayEnvelopePreview, '已复制脱敏请求预览报文')"
               >
                 <Copy :size="12" />
                 <span>复制报文</span>
@@ -2441,7 +2981,12 @@ defineExpose({
             </div>
             <div v-show="!previewCollapsed" class="ave-preview-body">
               <div class="ave-preview-note">
-                已按统一网关 <code class="mono">operation_in</code> 规范实时组装脱敏信封（未填动态入参保留占位符）
+                <template v-if="isHttpConnector">
+                  已按常规 HTTP 配置实时组装脱敏请求（凭证头与敏感参数自动掩码，未填动态入参保留占位符）
+                </template>
+                <template v-else>
+                  已按统一网关 <code class="mono">operation_in</code> 规范实时组装脱敏信封（未填动态入参保留占位符）
+                </template>
               </div>
               <pre class="ave-preview-code mono">{{ gatewayEnvelopePreview }}</pre>
             </div>
@@ -2450,6 +2995,32 @@ defineExpose({
 
         <!-- ==================== Tab ③ 响应解析与字段映射 (response) ==================== -->
         <div v-else-if="activeTab === 'response'" class="ave-section-stack">
+          <!-- 0. 常规 HTTP 响应体解析格式 (response.format) -->
+          <div v-if="isHttpConnector" class="ave-panel-card">
+            <div class="ave-panel-head">
+              <div class="ave-panel-title-wrap">
+                <span class="ave-panel-title">响应体解析格式 (response.format)</span>
+                <span class="ave-panel-sub">默认按响应 Content-Type 与正文自动识别 JSON / XML / 纯文本，也可强制指定</span>
+              </div>
+              <div class="ave-mini-seg" role="radiogroup" aria-label="响应体解析格式">
+                <button
+                  v-for="rf in HTTP_RESPONSE_FORMATS"
+                  :key="rf.value"
+                  type="button"
+                  class="ave-mini-seg-btn"
+                  :class="{ active: form.responseFormat === rf.value }"
+                  @click="
+                    form.responseFormat = rf.value;
+                    form.hadResponseFormatKey = true;
+                    emitSerializedYaml()
+                  "
+                >
+                  {{ rf.label }}
+                </button>
+              </div>
+            </div>
+          </div>
+
           <!-- A. 成功判定 (response.success) -->
           <div class="ave-panel-card">
             <div class="ave-panel-head">
@@ -2699,13 +3270,16 @@ defineExpose({
                   />
                 </div>
                 <div>
-                  <label class="ave-lbl">模型摘要单格截断字数 (maxPreviewChars)</label>
+                  <label class="ave-lbl">
+                    模型摘要单格截断字数 (maxPreviewChars)
+                    <span class="ave-lbl-hint">（-1 不限制）</span>
+                  </label>
                   <input
                     v-model.number="form.maxPreviewChars"
                     type="number"
-                    min="10"
-                    max="2000"
+                    min="-1"
                     class="ave-input mono"
+                    placeholder="-1 表示不限制，默认 60"
                     @input="emitSerializedYaml"
                   />
                 </div>
@@ -3051,6 +3625,27 @@ defineExpose({
   color: var(--success);
   font-weight: 600;
   box-shadow: var(--shadow-sm);
+}
+
+.ave-proto-btn.is-active-http {
+  background: var(--bg-elevated, var(--bg-surface));
+  color: #6d28d9;
+  font-weight: 600;
+  box-shadow: var(--shadow-sm);
+}
+
+.ave-method-select {
+  height: 22px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 4px;
+  background: rgba(124, 58, 237, 0.12);
+  color: #6d28d9;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  outline: none;
+  flex-shrink: 0;
 }
 
 .ave-endpoint-box {
@@ -3467,6 +4062,11 @@ defineExpose({
 .ave-proto-tag.is-json {
   background: var(--success-bg);
   color: var(--success);
+}
+
+.ave-proto-tag.is-http {
+  background: rgba(124, 58, 237, 0.12);
+  color: #6d28d9;
 }
 
 .ave-preview-body {

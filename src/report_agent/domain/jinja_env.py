@@ -481,6 +481,223 @@ def printed_variables(body: str) -> set[str]:
     return names
 
 
+_COMPARE_OPS = {
+    "eq": "==",
+    "ne": "!=",
+    "gt": ">",
+    "gteq": ">=",
+    "lt": "<",
+    "lteq": "<=",
+    "in": "in",
+    "notin": "not in",
+}
+
+
+def _collect_loaded_vars(node: nodes.Node, local_vars: frozenset[str], undeclared: set[str]) -> set[str]:
+    """收集 AST 子树中引用的顶层模板变量（排除循环/set 局部变量）。#Created By AiCoding(codex)"""
+    found: set[str] = set()
+    for n in node.find_all(nodes.Name):
+        if n.ctx == "load" and n.name not in local_vars and n.name in undeclared:
+            found.add(n.name)
+    return found
+
+
+def _uses_local_var(node: nodes.Node, local_vars: frozenset[str]) -> bool:
+    """判断表达式是否引用了循环/赋值等局部绑定变量。"""
+    if not local_vars:
+        return False
+    return any(n.ctx == "load" and n.name in local_vars for n in node.find_all(nodes.Name))
+
+
+def _format_const(value: Any) -> str:
+    if value is None:
+        return "none"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return f'"{value}"'
+    return str(value)
+
+
+def _format_cond_expr(node: nodes.Node) -> str | None:
+    """将 Jinja2 条件 AST 格式化为简洁可读的条件文本；遇到无法静态表达的节点返回 None。#Created By AiCoding(codex)"""
+    if isinstance(node, nodes.Name):
+        return node.name
+    if isinstance(node, nodes.Const):
+        return _format_const(node.value)
+    if isinstance(node, nodes.Getattr):
+        base = _format_cond_expr(node.node)
+        return f"{base}.{node.attr}" if base else None
+    if isinstance(node, nodes.Compare):
+        left = _format_cond_expr(node.expr)
+        if not left:
+            return None
+        parts = [left]
+        for op in node.ops:
+            sym = _COMPARE_OPS.get(op.op)
+            right = _format_cond_expr(op.expr)
+            if not sym or not right:
+                return None
+            parts.append(f"{sym} {right}")
+        return " ".join(parts)
+    if isinstance(node, nodes.Test):
+        target = _format_cond_expr(node.node)
+        if not target:
+            return None
+        if node.args or node.kwargs:
+            return None
+        return f"{target} is {node.name}"
+    if isinstance(node, nodes.Not):
+        if isinstance(node.node, nodes.Test) and not node.node.args and not node.node.kwargs:
+            target = _format_cond_expr(node.node.node)
+            return f"{target} is not {node.node.name}" if target else None
+        inner = _format_cond_expr(node.node)
+        return f"not ({inner})" if inner else None
+    if isinstance(node, nodes.And):
+        left = _format_cond_expr(node.left)
+        right = _format_cond_expr(node.right)
+        if not left or not right:
+            return None
+        if isinstance(node.left, nodes.Or):
+            left = f"({left})"
+        if isinstance(node.right, nodes.Or):
+            right = f"({right})"
+        return f"{left} and {right}"
+    if isinstance(node, nodes.Or):
+        left = _format_cond_expr(node.left)
+        right = _format_cond_expr(node.right)
+        if not left or not right:
+            return None
+        return f"{left} or {right}"
+    if isinstance(node, nodes.Filter):
+        base = _format_cond_expr(node.node)
+        if not base or node.args or node.kwargs:
+            return None
+        return f"{base}|{node.name}"
+    return None
+
+
+def _target_names(node: nodes.Node) -> set[str]:
+    """提取 for / assign 目标中绑定的局部变量名。"""
+    return {n.name for n in node.find_all(nodes.Name) if n.ctx == "store"}
+
+
+@lru_cache(maxsize=256)
+def body_field_conditions(body: str) -> dict[str, tuple[str, tuple[str, ...]]]:
+    """静态分析正文 Jinja2 AST，提取仅在条件分支中使用的字段及其展示条件。
+
+    #Created By AiCoding(codex)
+    返回：{字段名: (可读展示条件文本, 条件所依赖的控制字段名元组)}。
+    保守原则（保证永不误跳过必查字段）：
+    1. 只要字段在任一无条件位置出现（含直接输出、顶层 if 条件求值、无条件 for 迭代），均不放入返回表；
+    2. 在 if/elif 条件表达式中出现的字段本身（如「违约责任 is defined」），会先以外层守卫记录一次使用，
+       从而防止自保护字段误判为“可跳过”；
+    3. 仅依赖外层顶层字段的条件才纳入守卫；引用了循环局部变量的 if 条件不作为外层字段的跳过条件；
+    4. else 分支保守继承外层条件（不凭否定条件跳过），避免误漏兜底分支。
+    """
+    if not body or not body.strip():
+        return {}
+    try:
+        tree = parse_body(body)
+        undeclared = set(meta.find_undeclared_variables(tree))
+    except (BodySyntaxError, TemplateSyntaxError):
+        return {}
+    if not undeclared:
+        return {}
+
+    # 每个变量记录每次出现的守卫：(条件文本元组, 依赖控制变量集合)；None 表示无条件出现
+    occurrences: dict[str, list[tuple[tuple[str, ...], frozenset[str]] | None]] = {}
+
+    def _record(var_names: Iterable[str], guard_terms: tuple[str, ...], guard_vars: frozenset[str]) -> None:
+        entry = None if not guard_terms else (guard_terms, guard_vars)
+        for v in var_names:
+            occurrences.setdefault(v, []).append(entry)
+
+    def _walk(
+        stmts: Sequence[nodes.Node],
+        guard_terms: tuple[str, ...],
+        guard_vars: frozenset[str],
+        local_vars: frozenset[str],
+    ) -> None:
+        cur_locals = set(local_vars)
+        for stmt in stmts:
+            if isinstance(stmt, nodes.Output):
+                _record(_collect_loaded_vars(stmt, frozenset(cur_locals), undeclared), guard_terms, guard_vars)
+            elif isinstance(stmt, nodes.If):
+                # 主 if 条件表达式本身在外层守卫下求值
+                test_vars = _collect_loaded_vars(stmt.test, frozenset(cur_locals), undeclared)
+                _record(test_vars, guard_terms, guard_vars)
+
+                cond_text = None if _uses_local_var(stmt.test, frozenset(cur_locals)) else _format_cond_expr(stmt.test)
+                if cond_text and test_vars:
+                    body_terms = (*guard_terms, cond_text)
+                    body_vars = guard_vars | frozenset(test_vars)
+                else:
+                    body_terms, body_vars = guard_terms, guard_vars
+                _walk(stmt.body, body_terms, body_vars, frozenset(cur_locals))
+
+                # elif 分支：elif 条件自身为进入该分支的必要条件（满足 Soundness，条件不成立绝不进入）
+                for elif_node in stmt.elif_:
+                    e_vars = _collect_loaded_vars(elif_node.test, frozenset(cur_locals), undeclared)
+                    _record(e_vars, guard_terms, guard_vars)
+                    e_text = (
+                        None
+                        if _uses_local_var(elif_node.test, frozenset(cur_locals))
+                        else _format_cond_expr(elif_node.test)
+                    )
+                    if e_text and e_vars:
+                        e_body_terms = (*guard_terms, e_text)
+                        e_body_vars = guard_vars | frozenset(e_vars)
+                    else:
+                        e_body_terms, e_body_vars = guard_terms, guard_vars
+                    _walk(elif_node.body, e_body_terms, e_body_vars, frozenset(cur_locals))
+
+                # else 分支保守沿用外层守卫，避免复杂否定条件导致误跳过
+                if stmt.else_:
+                    _walk(stmt.else_, guard_terms, guard_vars, frozenset(cur_locals))
+            elif isinstance(stmt, nodes.For):
+                _record(_collect_loaded_vars(stmt.iter, frozenset(cur_locals), undeclared), guard_terms, guard_vars)
+                loop_locals = frozenset(cur_locals | _target_names(stmt.target) | {"loop"})
+                _walk(stmt.body, guard_terms, guard_vars, loop_locals)
+                if stmt.else_:
+                    _walk(stmt.else_, guard_terms, guard_vars, frozenset(cur_locals))
+            elif isinstance(stmt, nodes.Assign):
+                _record(_collect_loaded_vars(stmt.node, frozenset(cur_locals), undeclared), guard_terms, guard_vars)
+                cur_locals.update(_target_names(stmt.target))
+            elif isinstance(stmt, nodes.AssignBlock):
+                _walk(stmt.body, guard_terms, guard_vars, frozenset(cur_locals))
+                cur_locals.update(_target_names(stmt.target))
+            else:
+                _record(_collect_loaded_vars(stmt, frozenset(cur_locals), undeclared), guard_terms, guard_vars)
+
+    _walk(tree.body, (), frozenset(), frozenset())
+
+    result: dict[str, tuple[str, tuple[str, ...]]] = {}
+    for var_name, occs in occurrences.items():
+        if not occs or any(o is None for o in occs):
+            continue
+        branch_texts: list[str] = []
+        dep_vars: list[str] = []
+        for occ in occs:
+            assert occ is not None
+            terms, gvars = occ
+            # 自依赖保护：若字段名自身出现在守卫控制变量中，必须视为无条件必查
+            if var_name in gvars:
+                branch_texts = []
+                break
+            joined = " and ".join(f"({t})" if " or " in t and len(terms) > 1 else t for t in terms)
+            if joined not in branch_texts:
+                branch_texts.append(joined)
+            for gv in sorted(gvars):
+                if gv not in dep_vars:
+                    dep_vars.append(gv)
+        if not branch_texts:
+            continue
+        cond_str = branch_texts[0] if len(branch_texts) == 1 else " 或 ".join(f"({b})" for b in branch_texts)
+        result[var_name] = (cond_str, tuple(dep_vars))
+    return result
+
+
 @lru_cache(maxsize=256)
 def _compile_body_template(body: str, strict_undefined: bool = False) -> JinjaTemplate:
     """预编译并缓存 Jinja2 模板对象（上限 256 个），消除每次渲染重编译 AST 的开销。#Created By AiCoding(codex)"""

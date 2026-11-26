@@ -21,6 +21,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai import ModelRetry, RunContext, Tool, ToolDefinition
 
+from ..domain.skill import Skill, SkillParseError, extract_doc_title, normalize_skill_doc_path
 from ..gateway.base import ApiCallResult
 from .deps import RunDeps
 from .text_tools import (
@@ -77,26 +78,72 @@ def _cell_text(row: dict[str, Any], col: str) -> str:
     return "" if val is None else str(val)
 
 
+def render_skill_docs_index(skill: Skill) -> str:
+    """生成 Skill 子目录参考文档的按需懒加载索引（无子文档时返回空串）。#Created By AiCoding(codex)"""
+    if not skill.docs:
+        return ""
+    lines = [
+        f"- `{path}`：{extract_doc_title(content, fallback=path)}"
+        for path, content in sorted(skill.docs.items())
+    ]
+    return (
+        "## 可按需加载的参考文档\n"
+        f"以下细则文档未随主说明一次性展开；仅当当前场景命中对应条目时，再调用 "
+        f"`load_skill(name=\"{skill.id}\", docs=[\"路径\"])` 按需加载：\n"
+        + "\n".join(lines)
+        + "\n"
+    )
+
+
+def render_skill_doc_block(skill: Skill, doc_path: str) -> str:
+    """组装单篇 Skill 子文档的正文块。#Created By AiCoding(codex)"""
+    return f"# Skill：{skill.title}（{skill.id}） / {doc_path}\n\n{skill.docs[doc_path].strip()}\n"
+
+
 def _render_skill_block(deps: RunDeps, skill_id: str) -> str:
-    """组装单个 Skill 的说明文本及关联接口提示。#Created By AiCoding(codex)"""
+    """组装单个 Skill 的说明文本、子文档懒加载索引及关联接口提示。#Created By AiCoding(codex)"""
     skill = deps.resources.skills[skill_id]
     apis = [a for a in skill.meta.apis if a in deps.resources.apis]
     api_lines = "\n".join(
         f"- {a}（{deps.resources.apis[a].title}）参数：{deps.resources.apis[a].param_hint()}"
         for a in apis
     )
-    return f"# Skill：{skill.title}（{skill.id}）\n\n{skill.body}\n\n" + (
-        f"## 本 Skill 可调用的接口\n{api_lines}\n" if api_lines else ""
-    )
+    parts = [f"# Skill：{skill.title}（{skill.id}）\n\n{skill.body}"]
+    docs_index = render_skill_docs_index(skill)
+    if docs_index:
+        parts.append(docs_index.rstrip())
+    if api_lines:
+        parts.append(f"## 本 Skill 可调用的接口\n{api_lines}")
+    return "\n\n".join(parts) + "\n"
+
+
+def _collect_doc_requests(doc: str, docs: list[str] | None) -> list[str]:
+    """收集并去重模型请求的原始子文档路径参数。#Created By AiCoding(codex)"""
+    raw_docs: list[str] = []
+    if doc and str(doc).strip():
+        raw_docs.append(str(doc).strip())
+    if docs:
+        for item in docs:
+            if item is not None and str(item).strip():
+                raw_docs.append(str(item).strip())
+    return list(dict.fromkeys(raw_docs))
 
 
 # ============================================================================ load_skill
-async def load_skill(ctx: RunContext[RunDeps], name: str = "", names: list[str] | None = None) -> str:
-    """读取一个或多个 Skill 的完整说明。需要查询或判断某类字段前先读取对应 Skill。#Created By AiCoding(codex)
+async def load_skill(
+    ctx: RunContext[RunDeps],
+    name: str = "",
+    names: list[str] | None = None,
+    doc: str = "",
+    docs: list[str] | None = None,
+) -> str:
+    """读取一个或多个 Skill 的主说明，或按需懒加载指定 Skill 子目录下的参考文档。#Created By AiCoding(codex)
 
     Args:
         name: 单个 Skill 标识，只能是“可用 Skill”中列出的标识。
-        names: 可选批量加载的 Skill 标识列表，一次返回多个 Skill 的说明。
+        names: 可选批量加载的 Skill 标识列表，一次返回多个 Skill 的主说明。
+        doc: 可选，单个参考子文档的相对路径（如 references/broadband.md），仅与单个 name 搭配使用。
+        docs: 可选，批量按需加载的参考子文档相对路径列表，仅与单个 name 搭配使用。
     """
     deps = ctx.deps
     raw_names: list[str] = []
@@ -107,9 +154,12 @@ async def load_skill(ctx: RunContext[RunDeps], name: str = "", names: list[str] 
             if item is not None and str(item).strip():
                 raw_names.append(str(item).strip())
     req_names = list(dict.fromkeys(raw_names))
+    raw_docs = _collect_doc_requests(doc, docs)
 
     if not req_names:
-        rec_args = {"name": name} if names is None else {"name": name, "names": list(names)}
+        rec_args: dict[str, Any] = {"name": name} if names is None else {"name": name, "names": list(names)}
+        if raw_docs:
+            rec_args["docs"] = raw_docs
         msg = f"请指定要加载的 Skill（name 或 names），可用：{deps.allowed_skills}"
         return _fail_or_retry(ctx, "load_skill", rec_args, msg, f"错误：{msg}")
 
@@ -118,12 +168,49 @@ async def load_skill(ctx: RunContext[RunDeps], name: str = "", names: list[str] 
         rec_args = {"name": name} if names is None else (
             {"name": name, "names": list(names)} if name else {"names": list(names)}
         )
+        if raw_docs:
+            rec_args["docs"] = raw_docs
         msg = (
             f"Skill「{bad[0]}」不可用，只能加载：{deps.allowed_skills}"
             if len(bad) == 1
             else f"Skill {bad} 不可用，只能加载：{deps.allowed_skills}"
         )
         return _fail_or_retry(ctx, "load_skill", rec_args, msg, f"错误：{msg}")
+
+    # #Created By AiCoding(codex) L2：按需懒加载指定 Skill 的子目录参考文档
+    if raw_docs:
+        if len(req_names) != 1:
+            rec_args = {"names": req_names, "docs": raw_docs}
+            msg = "按需加载子文档（doc / docs）时必须通过 name 指定单个 Skill"
+            return _fail_or_retry(ctx, "load_skill", rec_args, msg, f"错误：{msg}")
+        sid = req_names[0]
+        skill = deps.resources.skills[sid]
+        rec_args = {"name": sid, "doc": raw_docs[0]} if (docs is None and len(raw_docs) == 1) else {
+            "name": sid,
+            "docs": raw_docs,
+        }
+        available = sorted(skill.docs)
+        if not available:
+            msg = f"Skill「{sid}」没有可按需加载的子文档"
+            return _fail_or_retry(ctx, "load_skill", rec_args, msg, f"错误：{msg}")
+        norm_docs: list[str] = []
+        for raw_d in raw_docs:
+            try:
+                norm_d = normalize_skill_doc_path(raw_d)
+            except SkillParseError as exc:
+                msg = f"子文档路径「{raw_d}」不合法（{exc}），Skill「{sid}」可用子文档：{available}"
+                return _fail_or_retry(ctx, "load_skill", rec_args, msg, f"错误：{msg}")
+            if norm_d not in norm_docs:
+                norm_docs.append(norm_d)
+        missing = [d for d in norm_docs if d not in skill.docs]
+        if missing:
+            msg = f"Skill「{sid}」中不存在子文档 {missing}，可用子文档：{available}"
+            return _fail_or_retry(ctx, "load_skill", rec_args, msg, f"错误：{msg}")
+        if sid not in deps.workspace.loaded_skills:
+            deps.workspace.loaded_skills.append(sid)
+        summary = {"title": skill.title, "docs": norm_docs}
+        _record(ctx, "load_skill", rec_args, summary, summary=summary)
+        return "\n---\n\n".join(render_skill_doc_block(skill, d) for d in norm_docs)
 
     for s in req_names:
         if s not in deps.workspace.loaded_skills:
@@ -171,18 +258,24 @@ async def _prepare_load_skill(ctx: RunContext[RunDeps], tool_def: ToolDefinition
 def _format_api_success_payload(contract: Any, result: ApiResult, default_preview_rows: int) -> dict[str, Any]:
     """根据已缓存或新获取的成功 ApiResult 生成返回给模型的摘要字典（不含 callId）。#Created By AiCoding(codex)"""
     max_chars = contract.response.summary.maxPreviewChars
+    unlimited_chars = max_chars == -1 or max_chars < 0
     n_preview = contract.preview_rows(default_preview_rows)
     preview = []
     for i, rec in enumerate(result.records[:n_preview]):
-        clipped = {
-            k: ("" if v is None else (str(v) if len(str(v)) <= max_chars else str(v)[:max_chars] + "…"))
-            for k, v in rec.items()
-        }
+        if unlimited_chars:
+            clipped = {k: ("" if v is None else str(v)) for k, v in rec.items()}
+        else:
+            clipped = {
+                k: ("" if v is None else (str(v) if len(str(v)) <= max_chars else str(v)[:max_chars] + "…"))
+                for k, v in rec.items()
+            }
         preview.append({**clipped, "row": i})
     if contract.response.records.mode == "none" and result.ok and not result.no_data:
         note = "接口调用成功（该契约声明无业务记录体）"
     elif not result.records:
         note = "没有记录"
+    elif unlimited_chars and len(result.records) <= n_preview:
+        note = "已返回全部完整记录（未截断），可直接判断和引用"
     else:
         note = "预览内容已截断；判断和引用前必须用 query_result 读取完整列值"
     return {

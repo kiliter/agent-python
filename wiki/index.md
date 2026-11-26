@@ -5,7 +5,7 @@ tags: [index, catalog, navigation]
 sources:
   - wiki/SCHEMA.md
   - AGENTS.md
-updated: 2026-11-13
+updated: 2026-11-26
 ---
 
 # 项目知识库总目录（`report-agent`）
@@ -21,7 +21,7 @@ updated: 2026-11-13
 
 ## 核心架构（`architecture/`）
 
-- [architecture/request-pipeline.md](architecture/request-pipeline.md) — 单智能体请求全链路管道（快照锁定 → 动态 Schema → 工具循环 → 证据校验与级联降级 → 渲染与三级状态 `SUCCESS` / `PARTIAL` / `FAILED`）。
+- [architecture/request-pipeline.md](architecture/request-pipeline.md) — 单智能体请求全链路管道（快照锁定 → 可选 `TemplateRouter` 自动模板路由 → 动态 Schema → 工具循环 → 证据校验与级联降级 → 渲染与三级状态 `SUCCESS` / `PARTIAL` / `FAILED`）。
 - [architecture/evidence-system.md](architecture/evidence-system.md) — `quote` / `input` / `derive` 强证据核验机制、`VALUE_TOOLS`、列表逐行核验与空数组 `found: []` vs `not_found` 校验契约。
 - [architecture/template-and-rendering.md](architecture/template-and-rendering.md) — `template.yaml` + `body.md.j2` 资源模型、`TrackedValue` / `TrackedList` 实际展示分支追踪及 Pebble 兼容渲染细节。
 - [architecture/resource-release-and-store.md](architecture/resource-release-and-store.md) — 文件系统存储布局、内部 Git 版本库、`releases/current` 原子软链接切换、草稿叠加视图与异步运行记录落盘。
@@ -31,8 +31,8 @@ updated: 2026-11-13
 
 - [components/agent-runner.md](components/agent-runner.md) — `runtime/runner.py`、`output_model.py`、`prompt.py`、`render.py` 与 `workspace.py` 的单智能体执行引擎实现。
 - [components/platform-tools.md](components/platform-tools.md) — `runtime/tools.py` 与 `runtime/text_tools.py` 中 12 个平台工具、多结果集 `query_result` 过滤引擎与防 ReDoS 实现。
-- [components/gateway-and-api-contract.md](components/gateway-and-api-contract.md) — `domain/api_contract.py` 声明式网关契约、`${$now}` 占位符、XML（Jackson 3 风格）与 JSON 双协议连接器、Mock 网关及热更新引用计数排空。
-- [components/api-and-auth.md](components/api-and-auth.md) — FastAPI REST / SSE 路由分层（工作台、上游报告与嵌入式聊天）、会话 Cookie 与 `X-API-Key` 鉴权体系、防暴力破解及运行期配置热重载接口。
+- [components/gateway-and-api-contract.md](components/gateway-and-api-contract.md) — `domain/api_contract.py` 声明式网关契约、`${$now}` 占位符、统一网关 XML/JSON 与常规 HTTP 直连（`connector: http`）连接器、Mock 网关及热更新引用计数排空。
+- [components/api-and-auth.md](components/api-and-auth.md) — FastAPI REST / SSE 路由分层（工作台、上游单/复合报告及可选 `templateId` 自动路由、嵌入式聊天）、会话 Cookie 与 `X-API-Key` 鉴权体系、防暴力破解及运行期配置热重载接口。
 - [components/chat-embed.md](components/chat-embed.md) — 嵌入式聊天选模板窗口（`embed.html` + `/api/v1/chat/*`）：`postMessage` 握手与 `origin` 锁定、`ChatStore` 会话演进、`ChatAgent` 结构化路由、`StepMapper` 脱敏进度流与确认审计。
 - [components/workbench-frontend.md](components/workbench-frontend.md) — `frontend/` Vue 3 + Pinia + CodeMirror 6 资源工作台与多页构建架构（含聊天窗口模拟联调视图）、证据溯源面板与乐观锁交互。
 
@@ -50,7 +50,7 @@ updated: 2026-11-13
 - [skills/billing-cycle-sms.md](skills/billing-cycle-sms.md) — `billing-cycle-sms`：用 `expand_period` 展开账单起止月份逐月查短信，聚合生成“活动到期套餐资费变更 / 语音超额提醒 / 流量超额提醒” 5 列列表字段（支持 0 行 `found: []`）。
 - [skills/qry-balance.md](skills/qry-balance.md) — `qry-balance`：用 `expand_period` 逐账期调用 `BOSS_QryBalanceFlowLog`，跨结果集 `query_result(resultIds=..., between)` 过滤并倒序生成 4 列充值流水列表（已修复 Java R8 年月回溯缺陷）。
 - [skills/pretty-number-info.md](skills/pretty-number-info.md) — `pretty-number-info`：调用 `cc_pretty_num_info_query` 并核验本机号码、`grade` 非空及多档次活动名顿号拼接，产出靓号等级、靓号活动名称与手机号类别（已修复 Java R5 四项缺陷）。
-- [skills/template-router.md](skills/template-router.md) — `template-router`：嵌入式聊天窗口专用模板路由知识库，按 `### <ID>` 维护 33 个在线模板分流规则并由 `validate_skill` 双向交叉校验。
+- [skills/template-router.md](skills/template-router.md) — `template-router`：嵌入式聊天选模板与上游未传 `templateId` 自动路由共用的模板路由知识库，L1/L2 懒加载覆盖 33 个在线模板并由 `validate_skill` 双向交叉校验。
 
 ## 架构决策记录（`decisions/`）
 

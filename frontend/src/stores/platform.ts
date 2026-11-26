@@ -5,6 +5,7 @@
 import { defineStore } from 'pinia'
 import { computed, markRaw, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import YAML from 'yaml'
 import { ApiError, errorMessage, platformApi, type DryRunPayload } from '@/api/platformApi'
 import { copyToClipboard } from '@/utils/clipboard'
 import { analyzeJinjaBody, renameJinjaBodyVariable } from '@/utils/jinjaBody'
@@ -13,15 +14,22 @@ import type {
   ApiEditMode,
   ApiItem,
   ApiTestCallResult,
+  CompositeTemplatePreviewResult,
+  CompositeTemplateState,
   CurrentUser,
   DocumentLine,
   DraftMeta,
   EvidenceType,
+  GlobalRegressionCase,
   ModelInfo,
   NavKey,
   ProcessEvent,
+  RegressionBatchDetail,
+  RegressionBatchSummary,
   RegressionCase,
+  RegressionCaseResult,
   RegressionDiff,
+  RegressionRunPayload,
   ReleaseDiffItem,
   ReleaseRevision,
   ResourceStatus,
@@ -48,7 +56,7 @@ export type IdeLeftSection = 'info' | 'fields' | 'inputs' | 'skills' | 'cases' |
 export type IdeCenterMode = 'code' | 'preview' | 'split' | 'diff'
 export type IdeRightMode = 'inspector' | 'evidence'
 export type IdeDebugTab = 'inputs' | 'timeline' | 'fields'
-export type SettingsSubView = 'workspace' | 'prompt-rollback' | 'runtime-rollback'
+export type SettingsSubView = 'workspace' | 'composite-template' | 'prompt-rollback' | 'runtime-rollback'
 export type DrawerType = null | 'reg-diff-detail'
 export type ModalType =
   | null
@@ -128,7 +136,7 @@ export const usePlatformStore = defineStore('platform', () => {
 
   const runsSubView = ref<'list' | 'detail'>('list')
   const selectedRunId = ref<string>('')
-  const runDetailTab = ref<'report' | 'fields' | 'timeline' | 'input'>('report')
+  const runDetailTab = ref<'report' | 'fields' | 'missing' | 'timeline' | 'input'>('report')
 
   // ======================================================================== 2. 抽屉与弹窗
   const activeDrawer = ref<DrawerType>(null)
@@ -224,12 +232,17 @@ export const usePlatformStore = defineStore('platform', () => {
   const templateRevisions = ref<Revision[]>([])
   const templateDiff = ref<TemplateDiff | null>(null)
   const bodyText = ref<string>('')
+  const templateSavedSnapshot = ref<string>('')
   const hasUnsavedChanges = ref<boolean>(false)
   const checkedFieldIndices = ref<number[]>([])
 
   const skills = ref<SkillItem[]>([])
   const skillMarkdown = ref<string>('')
   const skillOnlineMarkdown = ref<string>('')
+  const skillSavedMarkdown = ref<string>('')
+  const skillDocs = ref<Record<string, string>>({})
+  const skillOnlineDocs = ref<Record<string, string>>({})
+  const skillSavedDocs = ref<Record<string, string>>({})
   const skillDraftRevision = ref<number | null>(null)
   const skillRevisions = ref<Revision[]>([])
   const skillDirty = ref<boolean>(false)
@@ -237,6 +250,7 @@ export const usePlatformStore = defineStore('platform', () => {
   const apis = ref<ApiItem[]>([])
   const apiYamlText = ref<string>('')
   const apiOnlineYaml = ref<string>('')
+  const apiSavedYaml = ref<string>('')
   const apiDraftRevision = ref<number | null>(null)
   const apiRevisions = ref<Revision[]>([])
   const apiTestResult = ref<ApiTestCallResult | null>(null)
@@ -245,10 +259,19 @@ export const usePlatformStore = defineStore('platform', () => {
   const runs = ref<RunRecord[]>([])
   const runDetail = ref<RunDetail | null>(null)
 
+  const regressionCases = ref<GlobalRegressionCase[]>([])
+  const regressionBatches = ref<RegressionBatchSummary[]>([])
+  const activeRegressionBatch = ref<RegressionBatchDetail | null>(null)
   const regressionDiffs = ref<RegressionDiff[]>([])
+  const regressionResults = ref<RegressionCaseResult[]>([])
+  const isRegressionRunning = ref<boolean>(false)
+  const regressionProgress = ref<{ done: number; total: number; currentLabel: string }>({
+    done: 0, total: 0, currentLabel: '',
+  })
   const regSelectedTemplates = ref<number[]>([])
-  const regCompareMode = ref<string>('draft_vs_online')
+  const regCompareMode = ref<string>('single_online')
   const regScopeFilter = ref<string>('all')
+  let regressionAbortController: AbortController | null = null
 
   const globalReleases = ref<ReleaseRevision[]>([])
   const releaseDiff = ref<ReleaseDiffItem[]>([])
@@ -257,6 +280,10 @@ export const usePlatformStore = defineStore('platform', () => {
   const sysPromptText = ref<string>('')
   const sysPromptStatus = ref<ResourceStatus>('PUBLISHED')
   const sysPromptRevisions = ref<Revision[]>([])
+  const compositeTemplateState = ref<CompositeTemplateState | null>(null)
+  const compositeTemplateText = ref<string>('')
+  const compositeTemplateStatus = ref<ResourceStatus>('PUBLISHED')
+  const compositeTemplateRevisions = ref<Revision[]>([])
   const modelInfo = ref<ModelInfo | null>(null)
   const settingsSubView = ref<SettingsSubView>('workspace')
   const settingsTargetPromptRev = ref<string>('')
@@ -656,7 +683,7 @@ export const usePlatformStore = defineStore('platform', () => {
     else if (nav === 'runs') await refreshRuns()
     else if (nav === 'releases') await refreshReleases()
     else if (nav === 'settings') await loadSettings()
-    else if (nav === 'regression') await refreshTemplates()
+    else if (nav === 'regression') await loadRegressionWorkspace()
   }
 
   function getDirtyEditorLabel(target?: {
@@ -684,6 +711,12 @@ export const usePlatformStore = defineStore('platform', () => {
       if (sysPromptState.value !== null && sysPromptText.value !== sysPromptState.value.sysPromptText) {
         return '当前全局系统提示词有未保存的修改'
       }
+      if (
+        compositeTemplateState.value !== null &&
+        compositeTemplateText.value !== compositeTemplateState.value.templateText
+      ) {
+        return '当前多业务汇总大模板有未保存的修改'
+      }
       if (runtimeFormDirty.value) {
         return '当前引擎与网关运行配置有未保存的修改'
       }
@@ -701,6 +734,9 @@ export const usePlatformStore = defineStore('platform', () => {
     } else if (currentNav.value === 'settings') {
       if (sysPromptState.value) {
         sysPromptText.value = sysPromptState.value.sysPromptText
+      }
+      if (compositeTemplateState.value) {
+        compositeTemplateText.value = compositeTemplateState.value.templateText
       }
       runtimeFormDirty.value = false
     }
@@ -842,6 +878,77 @@ export const usePlatformStore = defineStore('platform', () => {
     showToast(`已恢复模板 ${id} 为草稿，发布后重新上线`)
   }
 
+  /** 直接删除模板（纯草稿立即清理，已发布则发布新版本移出快照，同时刷新技能关联数与发布历史） */
+  async function deleteTemplate(id: number, reason = '', deleteCases = true): Promise<boolean> {
+    const res = await guard(() => platformApi.deleteTemplate(id, reason, deleteCases), '删除模板失败')
+    if (!res) return false
+    if (currentTemplateId.value === id || templateDetail.value?.id === id) {
+      hasUnsavedChanges.value = false
+      templateDetail.value = null
+      currentTemplateId.value = 0
+      if (currentNav.value === 'workbench') {
+        currentNav.value = 'templates'
+      }
+    }
+    await Promise.all([refreshTemplates(), refreshSkills(), refreshReleases()])
+    onlineBaselineSeq.value += 1
+    const warnNote = res.warnings?.length ? `（提示：${res.warnings[0]?.message}）` : ''
+    const revNote = res.rev ? `（版本 ${res.rev}）` : '（草稿）'
+    showToast(`模板 ${id} 已删除${revNote}${warnNote}`, res.warnings?.length ? 'warning' : 'success')
+    return true
+  }
+
+  /** 生成模板持久化状态的规范化快照（忽略运行结果与统计衍生字段，用于撤销/改回原样时自动消除未保存状态） */
+  function serializeTemplateState(): string {
+    return JSON.stringify({
+      name: templateName.value.trim(),
+      description: templateDescription.value.trim(),
+      bodyText: bodyText.value,
+      skills: [...templateSkills.value],
+      inputs: templateInputs.value.map(i => ({
+        key: (i.key || '').trim(),
+        required: Boolean(i.required),
+        preset: i.preset || '无格式限制',
+        pattern: i.pattern || '',
+        desc: i.desc || '',
+        sample: i.sample || '',
+      })),
+      fields: templateFields.value.map(f => ({
+        name: (f.name || '').trim(),
+        visible: Boolean(f.visible),
+        type: f.type,
+        enumValues: Array.isArray(f.enumValues) ? [...f.enumValues] : [],
+        columns: Array.isArray(f.columns)
+          ? f.columns.map(c => ({
+              name: (c.name || '').trim(),
+              type: c.type,
+              enumValues: Array.isArray(c.enumValues) ? [...c.enumValues] : [],
+              description: c.description || '',
+            }))
+          : [],
+        evidenceType: f.evidenceType,
+        whenMissing: f.whenMissing,
+        defaultValue: f.defaultValue || '',
+        description: f.description || '',
+        format: f.format || '',
+        quoteWhole: Boolean(f.quoteWhole),
+      })),
+    })
+  }
+
+  function snapshotSavedTemplate() {
+    templateSavedSnapshot.value = serializeTemplateState()
+    hasUnsavedChanges.value = false
+  }
+
+  function recomputeTemplateDirty() {
+    if (!templateDetail.value) {
+      hasUnsavedChanges.value = false
+      return
+    }
+    hasUnsavedChanges.value = serializeTemplateState() !== templateSavedSnapshot.value
+  }
+
   // ======================================================================== 11. 模板工作台
   function applyTemplateDetail(detail: TemplateDetail) {
     templateDetail.value = detail
@@ -855,9 +962,9 @@ export const usePlatformStore = defineStore('platform', () => {
     const idx = templates.value.findIndex(t => t.id === detail.id)
     if (idx >= 0) templates.value.splice(idx, 1, detail.item)
     else templates.value = [...templates.value, detail.item]
-    hasUnsavedChanges.value = false
     checkedFieldIndices.value = []
     recomputeFieldBodyUsage()
+    snapshotSavedTemplate()
   }
 
   /** 同步 rollbackTargetRev 与 targetRollbackInfo，兼容直接赋值 rollbackTargetRev 后打开回退弹窗 */
@@ -1046,7 +1153,7 @@ export const usePlatformStore = defineStore('platform', () => {
   }
 
   function markCurrentTemplateDirty() {
-    hasUnsavedChanges.value = true
+    recomputeTemplateDirty()
     // 内容变了，之前的校验结果不再可信
     templateValidation.value = null
   }
@@ -1073,7 +1180,12 @@ export const usePlatformStore = defineStore('platform', () => {
     return [...names]
   })
 
-  watch(bodyText, () => recomputeFieldBodyUsage())
+  watch(bodyText, () => {
+    recomputeFieldBodyUsage()
+    if (templateDetail.value) {
+      recomputeTemplateDirty()
+    }
+  })
 
   function draftPayload() {
     return {
@@ -1086,9 +1198,16 @@ export const usePlatformStore = defineStore('platform', () => {
     }
   }
 
-  /** 同步服务端返回的最新模板草稿修订号与元信息 */
-  function syncTemplateDraftMeta(res?: { revision?: number; draft?: DraftMeta | null } | null) {
+  /** 同步服务端返回的最新模板草稿修订号与元信息（若内容与线上一致已清理草稿，同步置空） */
+  function syncTemplateDraftMeta(res?: { revision?: number | null; draft?: DraftMeta | null; cleared?: boolean } | null) {
     if (!res) return
+    if (res.cleared || res.draft === null) {
+      templateDraftRevision.value = null
+      if (templateDetail.value && templateDetail.value.id === currentTemplateId.value) {
+        templateDetail.value = { ...templateDetail.value, draft: null }
+      }
+      return
+    }
     const nextRev = res.draft?.revision ?? res.revision
     if (nextRev !== undefined) {
       templateDraftRevision.value = nextRev
@@ -1122,14 +1241,18 @@ export const usePlatformStore = defineStore('platform', () => {
     try {
       const res = await platformApi.saveTemplateDraft(id, { ...draftPayload(), revision: templateDraftRevision.value })
       syncTemplateDraftMeta(res)
-      hasUnsavedChanges.value = false
+      snapshotSavedTemplate()
       const errors = (res.issues || []).filter(i => i.level === 'error')
       templateValidation.value = {
         errors, warnings: (res.issues || []).filter(i => i.level === 'warning'), drift: null,
       }
       await Promise.all([refreshTemplates(), refreshSkills()])
-      showToast(errors.length ? `草稿已保存，有 ${errors.length} 个错误需要处理后才能发布` : '草稿已保存',
-        errors.length ? 'warning' : 'success')
+      if (res.cleared) {
+        showToast('内容与线上版本一致，已自动清理草稿并恢复为已发布状态', 'info')
+      } else {
+        showToast(errors.length ? `草稿已保存，有 ${errors.length} 个错误需要处理后才能发布` : '草稿已保存',
+          errors.length ? 'warning' : 'success')
+      }
       return true
     } catch (err) {
       handleTemplateDraftError(err, '保存草稿失败')
@@ -1193,6 +1316,8 @@ export const usePlatformStore = defineStore('platform', () => {
     await loadTemplate(id)
     if (res.warning) {
       showToast(res.warning, 'warning')
+    } else if (mode === 'draft_only' && res.cleared) {
+      showToast(`目标版本 ${target} 与当前线上内容一致，已清理冗余草稿并保持已发布状态`, 'info')
     } else {
       showToast(mode === 'publish_now'
         ? `已将模板 ${id} 回退至 ${target} 并发布上线（新版本 ${res.rev}）`
@@ -1388,7 +1513,9 @@ export const usePlatformStore = defineStore('platform', () => {
       const res = await platformApi.saveTemplateField(id, field, originalName, templateDraftRevision.value)
       syncTemplateDraftMeta(res)
       upsertTemplateField(field, originalName)
-      hasUnsavedChanges.value = false
+      snapshotSavedTemplate()
+      await refreshTemplates()
+      if (res.cleared) showToast('内容与线上版本一致，已自动清理草稿并恢复为已发布状态', 'info')
       return true
     } catch (err) {
       handleTemplateDraftError(err, '保存字段失败')
@@ -1405,6 +1532,9 @@ export const usePlatformStore = defineStore('platform', () => {
       syncTemplateDraftMeta(res)
       const idx = templateFields.value.findIndex(f => f.name === name)
       if (idx >= 0) templateFields.value.splice(idx, 1)
+      snapshotSavedTemplate()
+      await refreshTemplates()
+      if (res.cleared) showToast('内容与线上版本一致，已自动清理草稿并恢复为已发布状态', 'info')
       return true
     } catch (err) {
       handleTemplateDraftError(err, '删除字段失败')
@@ -1436,6 +1566,9 @@ export const usePlatformStore = defineStore('platform', () => {
       templateFields.value.forEach(f => {
         if (nameSet.has(f.name)) f.evidenceType = evType
       })
+      snapshotSavedTemplate()
+      await refreshTemplates()
+      if (res.cleared) showToast('内容与线上版本一致，已自动清理草稿并恢复为已发布状态', 'info')
       return true
     } catch (err) {
       handleTemplateDraftError(err, '批量更新证据类型失败')
@@ -1450,6 +1583,9 @@ export const usePlatformStore = defineStore('platform', () => {
     try {
       const res = await platformApi.reorderFields(id, names, templateDraftRevision.value)
       syncTemplateDraftMeta(res)
+      snapshotSavedTemplate()
+      await refreshTemplates()
+      if (res.cleared) showToast('内容与线上版本一致，已自动清理草稿并恢复为已发布状态', 'info')
       return true
     } catch (err) {
       handleTemplateDraftError(err, '调整字段顺序失败')
@@ -1465,6 +1601,9 @@ export const usePlatformStore = defineStore('platform', () => {
       const res = await platformApi.updateTemplateSkills(id, skillIds, templateDraftRevision.value)
       syncTemplateDraftMeta(res)
       templateSkills.value = [...res.skills]
+      snapshotSavedTemplate()
+      await Promise.all([refreshTemplates(), refreshSkills()])
+      if (res.cleared) showToast('内容与线上版本一致，已自动清理草稿并恢复为已发布状态', 'info')
       return true
     } catch (err) {
       handleTemplateDraftError(err, '更新模板关联技能失败')
@@ -1694,12 +1833,29 @@ export const usePlatformStore = defineStore('platform', () => {
     ])
     if (reqSeq !== loadSkillReqSeq) return
     skillMarkdown.value = detail.markdown
+    skillSavedMarkdown.value = detail.markdown
+    skillDocs.value = { ...(detail.docs || {}) }
+    skillSavedDocs.value = { ...(detail.docs || {}) }
     skillDraftRevision.value = detail.draft?.revision ?? null
     skillDirty.value = false
     const idx = skills.value.findIndex(s => s.id === skillId)
     if (idx >= 0) skills.value.splice(idx, 1, detail.item)
     skillOnlineMarkdown.value = online?.markdown || ''
+    skillOnlineDocs.value = { ...(online?.docs || {}) }
     skillRevisions.value = revs || []
+  }
+
+  function recordsEqual(a: Record<string, string>, b: Record<string, string>): boolean {
+    const ka = Object.keys(a)
+    const kb = Object.keys(b)
+    if (ka.length !== kb.length) return false
+    return ka.every(k => Object.prototype.hasOwnProperty.call(b, k) && a[k] === b[k])
+  }
+
+  function recomputeSkillDirty() {
+    skillDirty.value =
+      skillMarkdown.value !== skillSavedMarkdown.value
+      || !recordsEqual(skillDocs.value, skillSavedDocs.value)
   }
 
   async function openSkillDetail(skillId: string, skipLeaveGuard = false) {
@@ -1721,20 +1877,63 @@ export const usePlatformStore = defineStore('platform', () => {
 
   function setSkillMarkdown(_skillId: string, md: string) {
     skillMarkdown.value = md
-    skillDirty.value = true
+    recomputeSkillDirty()
+  }
+
+  function setSkillDoc(docPath: string, content: string) {
+    skillDocs.value = { ...skillDocs.value, [docPath]: content }
+    recomputeSkillDirty()
+  }
+
+  function renameSkillDoc(oldPath: string, newPath: string) {
+    if (oldPath === newPath || !(oldPath in skillDocs.value)) return
+    const next: Record<string, string> = {}
+    for (const [k, v] of Object.entries(skillDocs.value)) {
+      next[k === oldPath ? newPath : k] = v
+    }
+    skillDocs.value = next
+    recomputeSkillDirty()
+  }
+
+  function deleteSkillDoc(docPath: string) {
+    if (!(docPath in skillDocs.value)) return
+    const next = { ...skillDocs.value }
+    delete next[docPath]
+    skillDocs.value = next
+    recomputeSkillDirty()
+  }
+
+  function replaceSkillDocs(nextDocs: Record<string, string>) {
+    skillDocs.value = { ...nextDocs }
+    recomputeSkillDirty()
   }
 
   async function saveSkillDraft(): Promise<boolean> {
     const id = selectedSkillId.value
     if (!id) return false
     try {
-      const res = await platformApi.saveSkillDraft(id, skillMarkdown.value, skillDraftRevision.value)
-      skillDraftRevision.value = res.draft.revision
+      const res = await platformApi.saveSkillDraft(id, skillMarkdown.value, skillDraftRevision.value, skillDocs.value)
+      skillDraftRevision.value = res.cleared || !res.draft ? null : res.draft.revision
+      if (res.docs) {
+        skillDocs.value = { ...res.docs }
+      }
+      skillSavedMarkdown.value = skillMarkdown.value
+      skillSavedDocs.value = { ...skillDocs.value }
       skillDirty.value = false
       await Promise.all([refreshSkills(), refreshApis()])
+      if (res.cleared) {
+        showToast('内容与线上版本一致，已自动清理草稿并恢复为已发布状态', 'info')
+        return true
+      }
       const errors = (res.issues || []).filter(i => i.level === 'error')
-      showToast(errors.length ? `草稿已保存：${errors.map(e => e.message).join('；')}` : '技能草稿已保存',
-        errors.length ? 'warning' : 'success')
+      const warnings = (res.issues || []).filter(i => i.level === 'warning')
+      if (errors.length) {
+        showToast(`草稿已保存，但存在 ${errors.length} 项错误：${errors.map(e => e.message).join('；')}`, 'warning')
+      } else if (warnings.length) {
+        showToast(`技能草稿已保存（另有 ${warnings.length} 项提示：${warnings[0].message}）`, 'success')
+      } else {
+        showToast('技能草稿已保存', 'success')
+      }
       return true
     } catch (err) {
       if (err instanceof ApiError && (err.status === 409 || err.code === 'DRAFT_CONFLICT')) {
@@ -1768,6 +1967,21 @@ export const usePlatformStore = defineStore('platform', () => {
     }
   }
 
+  /** 删除技能（仅允许 scope=template 且无模板关联的技能） */
+  async function deleteSkill(id: string, reason = ''): Promise<boolean> {
+    const res = await guard(() => platformApi.deleteSkill(id, reason), '删除技能失败')
+    if (!res) return false
+    if (selectedSkillId.value === id) {
+      skillDirty.value = false
+      selectedSkillId.value = ''
+      skillsSubView.value = 'list'
+    }
+    await Promise.all([refreshSkills(), refreshApis(), refreshReleases()])
+    onlineBaselineSeq.value += 1
+    showToast(`技能 ${id} 已删除${res.rev ? `（版本 ${res.rev}）` : '（草稿）'}`)
+    return true
+  }
+
   async function publishCurrentSkill(note = '') {
     const id = selectedSkillId.value
     if (skillDirty.value && !(await saveSkillDraft())) return
@@ -1792,16 +2006,29 @@ export const usePlatformStore = defineStore('platform', () => {
     await Promise.all([refreshSkills(), refreshApis(), refreshReleases()])
     await loadSkill(id)
     onlineBaselineSeq.value += 1
-    showToast(
-      mode === 'publish_now'
-        ? `已将技能「${id}」回退至 ${targetRev} 并上线（新版本 ${res.rev}）`
-        : `已将 ${targetRev} 的内容恢复至草稿，核对无误后再发布`,
-    )
+    if (mode === 'draft_only' && res.cleared) {
+      showToast(`目标版本 ${targetRev} 与当前线上内容一致，已清理冗余草稿并保持已发布状态`, 'info')
+    } else {
+      showToast(
+        mode === 'publish_now'
+          ? `已将技能「${id}」回退至 ${targetRev} 并上线（新版本 ${res.rev}）`
+          : `已将 ${targetRev} 的内容恢复至草稿，核对无误后再发布`,
+      )
+    }
     return true
   }
 
-  async function createNewSkill(id: string, name: string, description: string, apiNames: string[] = []) {
-    const created = await guard(() => platformApi.createSkill({ id, name, description, apis: apiNames }), '创建技能失败')
+  async function createNewSkill(
+    id: string,
+    name: string,
+    description: string,
+    apiNames: string[] = [],
+    scope: 'template' | 'global' | 'chat' = 'template',
+  ) {
+    const created = await guard(
+      () => platformApi.createSkill({ id, name, description, scope, apis: scope === 'chat' ? [] : apiNames }),
+      '创建技能失败',
+    )
     if (!created) return
     closeModal()
     await Promise.all([refreshSkills(), refreshApis()])
@@ -1823,6 +2050,7 @@ export const usePlatformStore = defineStore('platform', () => {
     ])
     if (reqSeq !== loadApiReqSeq) return
     apiYamlText.value = detail.yamlText
+    apiSavedYaml.value = detail.yamlText
     apiDraftRevision.value = detail.draft?.revision ?? null
     apiDirty.value = false
     apiTestResult.value = null
@@ -1847,9 +2075,34 @@ export const usePlatformStore = defineStore('platform', () => {
     await loadApi(apiName)
   }
 
+  function stableValueEquals(a: unknown, b: unknown): boolean {
+    if (a === b) return true
+    if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false
+    if (Array.isArray(a) || Array.isArray(b)) {
+      if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+      return a.every((item, idx) => stableValueEquals(item, b[idx]))
+    }
+    const oa = a as Record<string, unknown>
+    const ob = b as Record<string, unknown>
+    const ka = Object.keys(oa)
+    const kb = Object.keys(ob)
+    if (ka.length !== kb.length) return false
+    return ka.every(k => Object.prototype.hasOwnProperty.call(ob, k) && stableValueEquals(oa[k], ob[k]))
+  }
+
+  /** 判断两段 YAML 语义是否完全一致（忽略纯空白/注释差异，避免可视化表单改回原值仍标未保存） */
+  function yamlSemanticallyEqual(a: string, b: string): boolean {
+    if (a === b) return true
+    try {
+      return stableValueEquals(YAML.parse(a), YAML.parse(b))
+    } catch {
+      return false
+    }
+  }
+
   function setApiYaml(text: string) {
     apiYamlText.value = text
-    apiDirty.value = true
+    apiDirty.value = !yamlSemanticallyEqual(text, apiSavedYaml.value)
   }
 
   async function saveApiDraft(): Promise<boolean> {
@@ -1857,10 +2110,15 @@ export const usePlatformStore = defineStore('platform', () => {
     if (!name) return false
     try {
       const res = await platformApi.saveApiDraft(name, { yamlText: apiYamlText.value, revision: apiDraftRevision.value })
-      apiDraftRevision.value = res.draft.revision
+      apiDraftRevision.value = res.cleared || !res.draft ? null : res.draft.revision
+      apiSavedYaml.value = apiYamlText.value
       apiDirty.value = false
       await refreshApis()
-      showToast('接口草稿已保存')
+      if (res.cleared) {
+        showToast('内容与线上版本一致，已自动清理草稿并恢复为已发布状态', 'info')
+      } else {
+        showToast('接口草稿已保存')
+      }
       return true
     } catch (err) {
       if (err instanceof ApiError && (err.status === 409 || err.code === 'DRAFT_CONFLICT')) {
@@ -1894,6 +2152,21 @@ export const usePlatformStore = defineStore('platform', () => {
     }
   }
 
+  /** 删除 API（要求无任何技能关联） */
+  async function deleteApi(name: string, reason = ''): Promise<boolean> {
+    const res = await guard(() => platformApi.deleteApi(name, reason), '删除接口失败')
+    if (!res) return false
+    if (selectedApiName.value === name) {
+      apiDirty.value = false
+      selectedApiName.value = ''
+      apisSubView.value = 'list'
+    }
+    await Promise.all([refreshApis(), refreshSkills(), refreshReleases()])
+    onlineBaselineSeq.value += 1
+    showToast(`接口 ${name} 已删除${res.rev ? `（版本 ${res.rev}）` : '（草稿）'}`)
+    return true
+  }
+
   async function publishCurrentApi(note = '') {
     const name = selectedApiName.value
     if (apiDirty.value && !(await saveApiDraft())) return
@@ -1918,11 +2191,15 @@ export const usePlatformStore = defineStore('platform', () => {
     await Promise.all([refreshApis(), refreshReleases()])
     await loadApi(name)
     onlineBaselineSeq.value += 1
-    showToast(
-      mode === 'publish_now'
-        ? `已将接口「${name}」回退至 ${targetRev} 并上线（新版本 ${res.rev}）`
-        : `已将 ${targetRev} 的 API 配置恢复至草稿，核对无误后再发布`,
-    )
+    if (mode === 'draft_only' && res.cleared) {
+      showToast(`目标版本 ${targetRev} 与当前线上内容一致，已清理冗余草稿并保持已发布状态`, 'info')
+    } else {
+      showToast(
+        mode === 'publish_now'
+          ? `已将接口「${name}」回退至 ${targetRev} 并上线（新版本 ${res.rev}）`
+          : `已将 ${targetRev} 的 API 配置恢复至草稿，核对无误后再发布`,
+      )
+    }
     return true
   }
 
@@ -1943,14 +2220,28 @@ export const usePlatformStore = defineStore('platform', () => {
     title: string,
     description: string,
     connector: ApiConnector = 'unified-gateway-xml',
+    httpOpts?: { method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH'; url?: string },
   ) {
-    const created = await guard(() => platformApi.createApi({ name, title, description, connector }), '创建接口失败')
+    const created = await guard(
+      () =>
+        platformApi.createApi({
+          name,
+          title,
+          description,
+          connector,
+          ...(connector === 'http' && httpOpts
+            ? { method: httpOpts.method, url: httpOpts.url }
+            : {}),
+        }),
+      '创建接口失败',
+    )
     if (!created) return
     closeModal()
     await refreshApis()
     apiEditMode.value = 'form'
     await openApiDetail(created.name, 'schema', true)
-    const proto = connector === 'unified-gateway-json' ? 'JSON' : 'XML'
+    const proto =
+      connector === 'http' ? '常规 HTTP' : connector === 'unified-gateway-json' ? 'JSON' : 'XML'
     showToast(`已创建 ${proto} API 草稿「${created.name}」`)
   }
 
@@ -1970,7 +2261,7 @@ export const usePlatformStore = defineStore('platform', () => {
     activeEvidenceKey.value = stabilized.fields.find(f => f.runStatus === 'found')?.name || ''
   }
 
-  // ======================================================================== 15. 回归（第二阶段）
+  // ======================================================================== 15. 全平台回归测试（支持自动路由 + 单版/双版对比）
   function toggleRegTemplate(tplId: number) {
     const pos = regSelectedTemplates.value.indexOf(tplId)
     if (pos >= 0) regSelectedTemplates.value.splice(pos, 1)
@@ -1982,9 +2273,222 @@ export const usePlatformStore = defineStore('platform', () => {
     activeDrawer.value = 'reg-diff-detail'
   }
 
-  async function executeBatchRegression() {
-    showToast('批量回归将在第二阶段提供（后端接口尚未实现），目前可在模板工作台逐条试运行用例', 'warning')
-    return undefined
+  async function refreshRegressionCases(params?: { scope?: string; q?: string }) {
+    const list = await guard(() => platformApi.fetchRegressionCases(params), '加载回归用例列表失败')
+    if (list) regressionCases.value = list
+  }
+
+  async function loadRegressionBatch(batchId: string) {
+    if (!batchId) {
+      activeRegressionBatch.value = null
+      regressionResults.value = []
+      regressionDiffs.value = []
+      return
+    }
+    const detail = await guard(() => platformApi.getRegressionBatch(batchId), '加载回归批次详情失败')
+    if (!detail) return
+    activeRegressionBatch.value = detail
+    regressionResults.value = detail.results || []
+    regressionDiffs.value = detail.diffs || []
+  }
+
+  async function loadRegressionWorkspace() {
+    await Promise.all([
+      refreshTemplates(),
+      refreshReleases(),
+      refreshRegressionCases(),
+      (async () => {
+        const list = await guard(() => platformApi.fetchRegressionBatches(30))
+        if (list) {
+          regressionBatches.value = list
+          if (!activeRegressionBatch.value && list.length > 0 && !isRegressionRunning.value) {
+            await loadRegressionBatch(list[0]!.batchId)
+          }
+        }
+      })(),
+    ])
+  }
+
+  async function createGlobalRegressionCase(
+    payload: Parameters<typeof platformApi.createRegressionCaseGlobal>[0],
+  ): Promise<GlobalRegressionCase | undefined> {
+    const res = await guard(() => platformApi.createRegressionCaseGlobal(payload), '创建回归用例失败')
+    if (!res) return undefined
+    await Promise.all([refreshRegressionCases(), refreshTemplates()])
+    showToast(`已创建${res.isAuto ? '自动路由' : `模板 #${res.templateId} `}回归用例「${res.id}」`)
+    return res
+  }
+
+  async function updateGlobalRegressionCase(
+    scope: string,
+    caseId: string,
+    payload: Parameters<typeof platformApi.updateRegressionCaseGlobal>[2],
+  ): Promise<GlobalRegressionCase | undefined> {
+    const res = await guard(
+      () => platformApi.updateRegressionCaseGlobal(scope, caseId, payload),
+      '更新回归用例失败',
+    )
+    if (!res) return undefined
+    await Promise.all([refreshRegressionCases(), refreshTemplates()])
+    showToast(`已更新回归用例「${res.id}」`)
+    return res
+  }
+
+  async function deleteGlobalRegressionCase(scope: string, caseId: string): Promise<boolean> {
+    const res = await guard(() => platformApi.deleteRegressionCaseGlobal(scope, caseId), '删除回归用例失败')
+    if (!res) return false
+    await Promise.all([refreshRegressionCases(), refreshTemplates()])
+    showToast(`已删除回归用例「${caseId}」`)
+    return true
+  }
+
+  async function adoptRegressionBaseline(
+    scope: string,
+    caseId: string,
+    payload: { runId: string; adoptFields?: boolean; adoptTemplate?: boolean; onlyField?: string },
+  ): Promise<GlobalRegressionCase | undefined> {
+    const res = await guard(
+      () => platformApi.adoptRegressionBaseline(scope, caseId, payload),
+      '设为期望基线失败',
+    )
+    if (!res) return undefined
+    await refreshRegressionCases()
+    showToast(
+      payload.onlyField
+        ? `已将字段「${payload.onlyField}」的新版输出采纳为期望基线`
+        : `已将用例「${caseId}」本次运行结果采纳为期望基线`,
+    )
+    return res
+  }
+
+  function abortBatchRegression() {
+    if (regressionAbortController) {
+      regressionAbortController.abort()
+      regressionAbortController = null
+    }
+    isRegressionRunning.value = false
+  }
+
+  async function executeBatchRegression(payload?: RegressionRunPayload) {
+    if (!payload || !payload.cases.length) {
+      showToast('请至少勾选一条回归用例后再执行', 'warning')
+      return undefined
+    }
+    if (isRegressionRunning.value) {
+      showToast('当前已有回归测试批次正在执行，请等待完成或先停止', 'warning')
+      return undefined
+    }
+
+    const ctrl = new AbortController()
+    regressionAbortController = ctrl
+    isRegressionRunning.value = true
+    regressionProgress.value = { done: 0, total: payload.cases.length, currentLabel: '正在初始化回归批次…' }
+    regressionResults.value = []
+    regressionDiffs.value = []
+
+    try {
+      const batch = await platformApi.streamRegressionRun(
+        payload,
+        {
+          onStart: meta => {
+            activeRegressionBatch.value = {
+              batchId: meta.batchId,
+              mode: meta.mode,
+              targetA: meta.targetA,
+              targetALabel: meta.targetALabel,
+              targetB: meta.targetB,
+              targetBLabel: meta.targetBLabel,
+              operator: currentUserLabel.value || '',
+              startedAt: meta.startedAt,
+              finishedAt: '',
+              durationMs: 0,
+              totalCases: meta.totalCases,
+              executedCases: 0,
+              passedCases: 0,
+              diffCases: 0,
+              routeMismatchCases: 0,
+              failedCases: 0,
+              passRate: 0,
+              results: [],
+              diffs: [],
+            }
+            regressionProgress.value = {
+              done: 0,
+              total: meta.totalCases,
+              currentLabel: `已启动 ${meta.totalCases} 条用例回归…`,
+            }
+          },
+          onCaseStart: info => {
+            regressionProgress.value = {
+              ...regressionProgress.value,
+              currentLabel: `正在核查 [${info.index}/${info.total}] ${info.caseId} ${info.caseName}`,
+            }
+          },
+          onCaseDone: ev => {
+            regressionProgress.value = {
+              done: ev.done,
+              total: ev.total,
+              currentLabel: `已完成 ${ev.done}/${ev.total} · ${ev.result.caseId}（${ev.result.verdict}）`,
+            }
+            regressionResults.value = [...regressionResults.value, ev.result]
+            if (ev.diffs.length) {
+              regressionDiffs.value = [...regressionDiffs.value, ...ev.diffs]
+            }
+            if (activeRegressionBatch.value) {
+              const cur = activeRegressionBatch.value
+              const rs = regressionResults.value
+              const passed = rs.filter(r => r.verdict === '通过').length
+              const failed = rs.filter(r => r.verdict === '失败').length
+              const routeMis = rs.filter(r => r.routeMismatch).length
+              const diffC = rs.filter(r => r.diffCount > 0).length
+              activeRegressionBatch.value = {
+                ...cur,
+                executedCases: rs.length,
+                passedCases: passed,
+                failedCases: failed,
+                routeMismatchCases: routeMis,
+                diffCases: diffC,
+                passRate: rs.length ? Math.round((passed * 1000) / rs.length) / 10 : 0,
+                results: rs,
+                diffs: regressionDiffs.value,
+              }
+            }
+          },
+          onDone: finalBatch => {
+            activeRegressionBatch.value = finalBatch
+            regressionResults.value = finalBatch.results || []
+            regressionDiffs.value = finalBatch.diffs || []
+          },
+        },
+        ctrl.signal,
+      )
+      await Promise.all([
+        refreshRegressionCases(),
+        refreshTemplates(),
+        (async () => {
+          const list = await guard(() => platformApi.fetchRegressionBatches(30))
+          if (list) regressionBatches.value = list
+        })(),
+      ])
+      showToast(
+        `回归测试完成：通过 ${batch.passedCases}/${batch.executedCases}（通过率 ${batch.passRate}%）`,
+        batch.failedCases > 0 || batch.diffCases > 0 ? 'warning' : 'success',
+      )
+      return batch
+    } catch (err) {
+      if ((err as { name?: string })?.name === 'AbortError') {
+        showToast('已停止当前批量回归测试', 'info')
+        await refreshRegressionCases()
+        return undefined
+      }
+      showError(err, '执行回归测试失败')
+      return undefined
+    } finally {
+      if (regressionAbortController === ctrl) {
+        regressionAbortController = null
+      }
+      isRegressionRunning.value = false
+    }
   }
 
   // ======================================================================== 16. 发布版本
@@ -2050,6 +2554,17 @@ export const usePlatformStore = defineStore('platform', () => {
     sysPromptStatus.value = state.sysPromptStatus
   }
 
+  function applyCompositeTemplate(state: CompositeTemplateState, opts?: { preserveDirty?: boolean }) {
+    const isDirty =
+      compositeTemplateState.value !== null &&
+      compositeTemplateText.value !== compositeTemplateState.value.templateText
+    compositeTemplateState.value = state
+    if (!(opts?.preserveDirty && isDirty)) {
+      compositeTemplateText.value = state.templateText
+    }
+    compositeTemplateStatus.value = state.status
+  }
+
   async function fetchRuntimeOptional<T>(fn: () => Promise<T>, label: string): Promise<T | undefined> {
     try {
       return await fn()
@@ -2065,9 +2580,11 @@ export const usePlatformStore = defineStore('platform', () => {
   async function loadSettings(opts?: { preserveDirty?: boolean }) {
     const seq = ++settingsReqSeq
     const preserveDirty = opts?.preserveDirty ?? true
-    const [state, revs, info, rtState, rtRevs] = await Promise.all([
+    const [state, revs, ctState, ctRevs, info, rtState, rtRevs] = await Promise.all([
       guard(() => platformApi.fetchSystemPrompt(), '加载系统提示词失败'),
       guard(() => platformApi.fetchSystemPromptRevisions()),
+      fetchRuntimeOptional(() => platformApi.fetchCompositeTemplate(), '加载汇总大模板失败'),
+      fetchRuntimeOptional(() => platformApi.fetchCompositeTemplateRevisions(), '加载汇总大模板历史失败'),
       guard(() => platformApi.fetchModelInfo()),
       fetchRuntimeOptional(() => platformApi.fetchRuntimeConfig(), '加载运行时配置失败'),
       fetchRuntimeOptional(() => platformApi.fetchRuntimeConfigRevisions(), '加载配置修订历史失败'),
@@ -2075,9 +2592,106 @@ export const usePlatformStore = defineStore('platform', () => {
     if (seq !== settingsReqSeq) return
     if (state) applySysPrompt(state, { preserveDirty })
     sysPromptRevisions.value = revs || []
+    if (ctState) applyCompositeTemplate(ctState, { preserveDirty })
+    compositeTemplateRevisions.value = ctRevs || []
     modelInfo.value = info || null
     if (rtState) runtimeState.value = rtState
     if (rtRevs) runtimeRevisions.value = rtRevs
+  }
+
+  async function saveCompositeTemplateDraft(): Promise<boolean> {
+    try {
+      const res = await platformApi.saveCompositeTemplateDraft(
+        compositeTemplateText.value,
+        compositeTemplateState.value?.draft?.revision,
+      )
+      applyCompositeTemplate(res)
+      showToast(
+        res.cleared ? '内容与线上版本一致，已自动清理草稿并恢复为已发布状态' : '汇总大模板草稿已保存',
+        res.cleared ? 'info' : 'success',
+      )
+      return true
+    } catch (err) {
+      if (err instanceof ApiError && (err.status === 409 || err.code === 'DRAFT_CONFLICT')) {
+        if (await promptDraftConflictReload(err, '多业务汇总大模板')) {
+          await loadSettings({ preserveDirty: false })
+          showToast('已重新加载服务端最新汇总大模板', 'info')
+        }
+        return false
+      }
+      if (!(err instanceof ApiError && err.status === 401)) {
+        showError(err, '保存汇总大模板失败')
+      }
+      return false
+    }
+  }
+
+  async function publishCompositeTemplate(note = ''): Promise<boolean> {
+    try {
+      const res = await platformApi.publishCompositeTemplate(
+        compositeTemplateText.value,
+        note,
+        compositeTemplateState.value?.draft?.revision,
+      )
+      await Promise.all([loadSettings({ preserveDirty: false }), refreshReleases()])
+      onlineBaselineSeq.value += 1
+      showToast(`汇总大模板已发布（${res.rev}），立即生效`)
+      return true
+    } catch (err) {
+      if (err instanceof ApiError && (err.status === 409 || err.code === 'DRAFT_CONFLICT')) {
+        if (await promptDraftConflictReload(err, '多业务汇总大模板')) {
+          await loadSettings({ preserveDirty: false })
+          showToast('已重新加载服务端最新汇总大模板', 'info')
+        }
+        return false
+      }
+      if (!(err instanceof ApiError && err.status === 401)) {
+        showError(err, '发布汇总大模板失败')
+      }
+      return false
+    }
+  }
+
+  async function discardCompositeTemplateDraft(): Promise<boolean> {
+    const res = await guard(() => platformApi.discardCompositeTemplateDraft(), '放弃草稿失败')
+    if (!res) return false
+    applyCompositeTemplate(res)
+    await Promise.all([loadSettings(), refreshReleases()])
+    onlineBaselineSeq.value += 1
+    showToast('已恢复为线上生效的汇总大模板')
+    return true
+  }
+
+  async function rollbackCompositeTemplate(
+    targetRev: string,
+    mode: 'draft_only' | 'publish_now' = 'draft_only',
+    reason = '',
+  ): Promise<boolean> {
+    const res = await guard(
+      () => platformApi.rollbackCompositeTemplate(targetRev, mode, reason),
+      '汇总大模板回退失败',
+    )
+    if (!res) return false
+    applyCompositeTemplate(res)
+    await Promise.all([loadSettings(), refreshReleases()])
+    onlineBaselineSeq.value += 1
+    if (mode === 'draft_only' && res.cleared) {
+      showToast(`目标版本 ${targetRev} 与当前线上内容一致，已清理冗余草稿并保持已发布状态`, 'info')
+    } else {
+      showToast(
+        mode === 'publish_now'
+          ? `已将汇总大模板回退至 ${targetRev} 并直接上线（新版本 ${res.rev || res.onlineRev || ''}）`
+          : `已将 ${targetRev} 的汇总大模板恢复至工作区草稿，核对无误后再发布`,
+      )
+    }
+    return true
+  }
+
+  async function previewCompositeTemplate(templateText?: string): Promise<CompositeTemplatePreviewResult | undefined> {
+    return guard(
+      () => platformApi.previewCompositeTemplate(templateText ?? compositeTemplateText.value),
+      '渲染汇总大模板预览失败',
+    )
   }
 
   async function openSysPromptRollback(targetRev = '') {
@@ -2098,7 +2712,10 @@ export const usePlatformStore = defineStore('platform', () => {
     try {
       const res = await platformApi.saveSystemPromptDraft(sysPromptText.value, sysPromptState.value?.draft?.revision)
       applySysPrompt(res)
-      showToast('系统提示词草稿已保存')
+      showToast(
+        res.cleared ? '内容与线上版本一致，已自动清理草稿并恢复为已发布状态' : '系统提示词草稿已保存',
+        res.cleared ? 'info' : 'success',
+      )
       return true
     } catch (err) {
       if (err instanceof ApiError && (err.status === 409 || err.code === 'DRAFT_CONFLICT')) {
@@ -2164,11 +2781,15 @@ export const usePlatformStore = defineStore('platform', () => {
     applySysPrompt(res)
     await Promise.all([loadSettings(), refreshReleases()])
     onlineBaselineSeq.value += 1
-    showToast(
-      mode === 'publish_now'
-        ? `已将系统提示词回退至 ${targetRev} 并直接上线（新版本 ${res.rev || res.onlineRev || ''}）`
-        : `已将 ${targetRev} 的系统提示词恢复至工作区草稿，核对无误后再发布`,
-    )
+    if (mode === 'draft_only' && res.cleared) {
+      showToast(`目标版本 ${targetRev} 与当前线上内容一致，已清理冗余草稿并保持已发布状态`, 'info')
+    } else {
+      showToast(
+        mode === 'publish_now'
+          ? `已将系统提示词回退至 ${targetRev} 并直接上线（新版本 ${res.rev || res.onlineRev || ''}）`
+          : `已将 ${targetRev} 的系统提示词恢复至工作区草稿，核对无误后再发布`,
+      )
+    }
     return true
   }
 
@@ -2236,11 +2857,14 @@ export const usePlatformStore = defineStore('platform', () => {
     templates, templateDetail, templateFields, otherTemplateFields, templateInputs, templateSkills, templateName, templateDescription, templateCases,
     templateDraftRevision, templateValidation, templateRevisions, templateDiff, bodyText, hasUnsavedChanges,
     checkedFieldIndices, undefinedBodyFields,
-    skills, skillMarkdown, skillOnlineMarkdown, skillDraftRevision, skillRevisions, skillDirty,
+    skills, skillMarkdown, skillOnlineMarkdown, skillDocs, skillOnlineDocs, skillDraftRevision, skillRevisions, skillDirty,
     apis, apiYamlText, apiOnlineYaml, apiDraftRevision, apiRevisions, apiTestResult, apiDirty,
-    runs, runDetail, regressionDiffs, regSelectedTemplates, regCompareMode, regScopeFilter,
+    runs, runDetail,
+    regressionCases, regressionBatches, activeRegressionBatch, regressionResults, regressionDiffs,
+    isRegressionRunning, regressionProgress, regSelectedTemplates, regCompareMode, regScopeFilter,
     globalReleases, releaseDiff,
     sysPromptState, sysPromptText, sysPromptStatus, sysPromptRevisions, modelInfo,
+    compositeTemplateState, compositeTemplateText, compositeTemplateStatus, compositeTemplateRevisions,
     runtimeState, runtimeRevisions, runtimeFormDirty,
     dryRunPreset, dryRunResult, dryRunEvents, isDryRunning,
     templateDebugRuns, selectedDebugRunId, isLoadingDebugRun,
@@ -2254,7 +2878,7 @@ export const usePlatformStore = defineStore('platform', () => {
     bootstrap, loadAll, navigate, handleLoginSubmit, logout,
     refreshTemplates, refreshSkills, refreshApis, refreshReleases, refreshRuns,
     // 模板与 IDE 联动
-    createNewTemplate, copyExistingTemplate, confirmOfflineTemplate, restoreOfflineTemplate,
+    createNewTemplate, copyExistingTemplate, confirmOfflineTemplate, restoreOfflineTemplate, deleteTemplate,
     loadTemplate, openTemplateWorkbench, handleBackFromWorkbench, markCurrentTemplateDirty, recomputeFieldBodyUsage,
     handleSaveDraft, handleDiscardDraft, validateCurrentTemplate, publishCurrentTemplate,
     openRollbackTemplateModal, rollbackTemplateToRev, openConflictDraftDiff, loadTemplateRevisions, loadTemplateDiff, switchWorkbenchTab,
@@ -2267,15 +2891,19 @@ export const usePlatformStore = defineStore('platform', () => {
     refreshCases, saveTemplateCase, createRegressionCase, createCaseFromRun, deleteTemplateCase,
     loadCaseIntoDryRun, loadRunIntoDryRun, executeDryRun, abortActiveDryRun, selectEvidence, setInspectorTab, setReportViewMode,
     // Skill
-    loadSkill, openSkillDetail, openSkillByName, setSkillMarkdown, saveSkillDraft, discardSkillDraft,
+    loadSkill, openSkillDetail, openSkillByName, setSkillMarkdown, setSkillDoc, renameSkillDoc, deleteSkillDoc, replaceSkillDocs, saveSkillDraft, discardSkillDraft, deleteSkill,
     publishCurrentSkill, rollbackCurrentSkill, createNewSkill,
     // 接口
-    loadApi, openApiDetail, setApiYaml, saveApiDraft, discardApiDraft, publishCurrentApi, rollbackCurrentApi, testCallCurrentApi,
+    loadApi, openApiDetail, setApiYaml, saveApiDraft, discardApiDraft, deleteApi, publishCurrentApi, rollbackCurrentApi, testCallCurrentApi,
     createNewApi,
     // 运行记录、回归、发布、设置
-    openRunDetail, toggleRegTemplate, openRegDiffDrawer, executeBatchRegression,
+    openRunDetail, toggleRegTemplate, openRegDiffDrawer,
+    loadRegressionWorkspace, refreshRegressionCases, loadRegressionBatch,
+    createGlobalRegressionCase, updateGlobalRegressionCase, deleteGlobalRegressionCase,
+    adoptRegressionBaseline, executeBatchRegression, abortBatchRegression,
     emergencySwitchVersion, loadReleaseDiff,
     loadSettings, openSysPromptRollback, saveSysPromptDraft, publishSysPrompt, discardSysPromptDraft, rollbackSysPrompt,
+    saveCompositeTemplateDraft, publishCompositeTemplate, discardCompositeTemplateDraft, rollbackCompositeTemplate, previewCompositeTemplate,
     saveRuntimeConfig, rollbackRuntimeConfig, syncRuntimeConfigEnv,
     saveShortcutHint:
       typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/i.test(navigator.userAgent) ? '⌘S' : 'Ctrl+S',

@@ -25,6 +25,10 @@ inputs:
   required: false
   description: 业务办理日期 yyyyMMdd；受理渠道为热线、掌上营业厅时用作受理日期
   sample: '20261105'
+- key: 申诉内容
+  required: false
+  description: 客户申诉或投诉的原始诉求正文，辅助判断争议场景与核查重点
+  sample: 用户反映未经本人允许开通业务，要求核查办理依据并处理。
 - key: 账单
   required: false
   description: 账单起止月份，格式 yyyyMM$yyyyMM，起止月份均包含在查询范围内

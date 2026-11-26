@@ -12,6 +12,7 @@ import {
   ChevronDown,
   ChevronRight,
   CircleCheck,
+  Compass,
   Copy,
   Loader2,
   RefreshCw,
@@ -24,9 +25,12 @@ import {
   describeToolEvent,
   formatElapsedAt,
   formatRoundBadge,
+  formatRouteDuration,
   groupEventsByRound,
   isEventFailed,
+  routeConfidenceLevel,
   shouldShowRoundMainCard,
+  type TimelineProcessEventLike,
   type ToolDisplayMeta,
 } from '@/utils/timelineFormat'
 
@@ -41,6 +45,13 @@ const emit = defineEmits<{
   (e: 'retry'): void
 }>()
 
+/** 将通用 RawProcessEvent 与自动路由扩展字段类型安全对齐，避免修改 embed/types.ts */
+type NormalizedRawEvent = Omit<
+  RawProcessEvent,
+  'routerSkill' | 'confidence' | 'reason' | 'candidates' | 'durationMs'
+> &
+  TimelineProcessEventLike
+
 /** 模型思考文字超过该长度默认折叠 */
 const LONG_TEXT = 160
 
@@ -51,12 +62,16 @@ function toggleFold(key: string) {
   expandedMap[key] = !expandedMap[key]
 }
 
-const groups = computed(() => groupEventsByRound(props.events))
+const normalizedEvents = computed<NormalizedRawEvent[]>(
+  () => props.events as unknown as NormalizedRawEvent[],
+)
+
+const groups = computed(() => groupEventsByRound(normalizedEvents.value))
 
 /** 预计算工具调用可读摘要，避免渲染期间重复解析 JSON */
 const toolMetaMap = computed<Map<number, ToolDisplayMeta>>(() => {
   const map = new Map<number, ToolDisplayMeta>()
-  for (const e of props.events) {
+  for (const e of normalizedEvents.value) {
     if (e.type === 'tool') {
       map.set(e.seq, describeToolEvent(e))
     }
@@ -64,7 +79,7 @@ const toolMetaMap = computed<Map<number, ToolDisplayMeta>>(() => {
   return map
 })
 
-function toolMeta(e: RawProcessEvent): ToolDisplayMeta {
+function toolMeta(e: NormalizedRawEvent): ToolDisplayMeta {
   return toolMetaMap.value.get(e.seq) ?? describeToolEvent(e)
 }
 
@@ -121,8 +136,66 @@ async function onCopyJson(label: string, val: unknown) {
             </div>
 
             <template v-for="e in g.items" :key="e.seq">
+              <!-- 0a. route_started -->
+              <div v-if="e.type === 'route_started'" class="route-box">
+                <div class="init-title">
+                  <Compass :size="13" class="primary-icon" />
+                  <strong>开始自动路由匹配模板</strong>
+                  <span v-if="e.rev" class="mini-chip mono">{{ e.rev }}</span>
+                </div>
+                <div class="init-row">
+                  <span class="init-label">路由技能：</span>
+                  <span v-if="e.routerSkill" class="skill-chip">
+                    <BookOpen :size="10" />
+                    <span>{{ e.routerSkill }}</span>
+                  </span>
+                  <span v-else class="muted">未配置（回退检索在线模板）</span>
+                </div>
+              </div>
+
+              <!-- 0b. route_completed -->
+              <div v-else-if="e.type === 'route_completed'" class="route-done-box">
+                <div class="init-title">
+                  <Compass :size="13" class="primary-icon" />
+                  <span>命中模板：</span>
+                  <strong>#{{ e.templateId }} {{ e.templateName }}</strong>
+                  <span
+                    v-if="e.confidence"
+                    class="conf-pill"
+                    :class="`conf-${routeConfidenceLevel(e.confidence)}`"
+                  >
+                    置信度 {{ e.confidence }}
+                  </span>
+                  <span v-if="e.durationMs !== undefined" class="mini-chip mono">
+                    {{ formatRouteDuration(e.durationMs) }}
+                  </span>
+                </div>
+                <div v-if="e.reason" class="route-reason">
+                  <span class="init-label">命中理由：</span>
+                  <span>{{ e.reason }}</span>
+                </div>
+                <div v-if="(e.candidates ?? []).length" class="route-cands">
+                  <span class="init-label">候选对比：</span>
+                  <div class="route-cand-list">
+                    <div
+                      v-for="cand in e.candidates"
+                      :key="`${cand.templateId}_${cand.level}`"
+                      class="route-cand-item"
+                      :class="{ selected: cand.templateId === e.templateId }"
+                    >
+                      <span class="mono cand-id">#{{ cand.templateId }}</span>
+                      <span v-if="cand.templateName" class="cand-name">{{ cand.templateName }}</span>
+                      <span class="conf-pill mini" :class="`conf-${routeConfidenceLevel(cand.level)}`">
+                        {{ cand.level }}
+                      </span>
+                      <span v-if="cand.reason" class="cand-reason">{{ cand.reason }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <!-- 1. run_started -->
-              <div v-if="e.type === 'run_started'" class="init-box">
+              <div v-else-if="e.type === 'run_started'" class="init-box">
                 <div class="init-title">
                   <span>模板：</span>
                   <strong>#{{ e.templateId }} {{ e.templateName }}</strong>
@@ -207,7 +280,7 @@ async function onCopyJson(label: string, val: unknown) {
           </div>
         </div>
 
-        <!-- 交卷核验结果 / 运行失败 -->
+        <!-- 交卷核验结果 / 路由失败 / 运行失败 -->
         <div
           v-for="o in g.outcomes"
           :key="o.seq"
@@ -215,7 +288,8 @@ async function onCopyJson(label: string, val: unknown) {
           :class="{
             'oc-pass': o.type === 'report_accepted',
             'oc-warn': o.type === 'report_degraded',
-            'oc-err': o.type === 'report_rejected' || o.type === 'run_failed',
+            'oc-err':
+              o.type === 'report_rejected' || o.type === 'run_failed' || o.type === 'route_failed',
           }"
         >
           <div class="round-head">
@@ -227,6 +301,9 @@ async function onCopyJson(label: string, val: unknown) {
             </span>
             <span v-else-if="o.type === 'report_rejected'" class="round-pill pill-err">
               <XCircle :size="12" /> 第 {{ g.round }} 轮 · 证据校验退回重填
+            </span>
+            <span v-else-if="o.type === 'route_failed'" class="round-pill pill-err">
+              <XCircle :size="12" /> 自动路由 · 模板匹配失败
             </span>
             <span v-else class="round-pill pill-err">
               <XCircle :size="12" /> 第 {{ g.round }} 轮 · 运行终止失败
@@ -244,6 +321,32 @@ async function onCopyJson(label: string, val: unknown) {
             <div v-else-if="o.type === 'report_degraded'" class="oc-title warn">
               重试耗尽，以下字段降级按缺失处理：{{ (o.fields ?? []).join('、') || '—' }}
             </div>
+            <template v-else-if="o.type === 'route_failed'">
+              <div class="oc-title err">
+                自动路由失败：{{ o.error || o.reason || '未匹配到可用模板' }}
+              </div>
+              <div v-if="o.reason && o.reason !== o.error" class="route-reason">
+                <span class="init-label">原因说明：</span>
+                <span>{{ o.reason }}</span>
+              </div>
+              <div v-if="(o.candidates ?? []).length" class="route-cands">
+                <span class="init-label">候选模板参考：</span>
+                <div class="route-cand-list">
+                  <div
+                    v-for="cand in o.candidates"
+                    :key="`${cand.templateId}_${cand.level}`"
+                    class="route-cand-item"
+                  >
+                    <span class="mono cand-id">#{{ cand.templateId }}</span>
+                    <span v-if="cand.templateName" class="cand-name">{{ cand.templateName }}</span>
+                    <span class="conf-pill mini" :class="`conf-${routeConfidenceLevel(cand.level)}`">
+                      {{ cand.level }}
+                    </span>
+                    <span v-if="cand.reason" class="cand-reason">{{ cand.reason }}</span>
+                  </div>
+                </div>
+              </div>
+            </template>
             <div v-else class="oc-title err">
               运行失败：{{ o.error || '未知错误' }}
             </div>
@@ -405,6 +508,97 @@ async function onCopyJson(label: string, val: unknown) {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+.route-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--gpt-bg-subtle);
+  border: 1px solid var(--gpt-border);
+}
+.route-done-box {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--gpt-accent-soft);
+  border: 1px solid var(--gpt-accent-border);
+}
+.route-reason {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--gpt-ink);
+}
+.conf-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  border: 1px solid transparent;
+}
+.conf-pill.mini {
+  padding: 0 5px;
+  font-size: 10.5px;
+  line-height: 16px;
+}
+.conf-pill.conf-high {
+  background: var(--gpt-emerald-bg);
+  border-color: var(--gpt-emerald-border);
+  color: var(--gpt-emerald);
+}
+.conf-pill.conf-mid {
+  background: var(--gpt-amber-bg);
+  border-color: var(--gpt-amber-border);
+  color: var(--gpt-amber);
+}
+.conf-pill.conf-low {
+  background: var(--gpt-coral-bg);
+  border-color: var(--gpt-coral-border);
+  color: var(--gpt-coral);
+}
+.route-cands {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--gpt-border-strong);
+}
+.route-cand-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.route-cand-item {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: #ffffff;
+  border: 1px solid var(--gpt-border);
+  font-size: 11.5px;
+}
+.route-cand-item.selected {
+  border-color: var(--gpt-accent-border);
+}
+.cand-id {
+  font-weight: 600;
+  color: var(--gpt-accent);
+}
+.cand-name {
+  font-weight: 500;
+  color: var(--gpt-ink);
+}
+.cand-reason {
+  color: var(--gpt-ink-secondary);
+  line-height: 1.45;
 }
 .init-title {
   display: flex;

@@ -17,12 +17,14 @@ from .chat.manager import ChatRunManager
 from .chat.service import ChatService
 from .chat.store import ChatStore
 from .config import Settings
+from .domain.composite import COMPOSITE_TEMPLATE_FILE, COMPOSITE_TEMPLATE_KEY
 from .domain.resources import load_resource_dir
 from .gateway.base import GatewayClient
 from .gateway.mock import MockGatewayClient
 from .gateway.reloadable import ReloadableGatewayClient
 from .gateway.unified_xml import UnifiedGatewayXmlClient
 from .runtime.model_factory import build_model, build_model_settings
+from .runtime.regression import RegressionStore
 from .runtime.runner import AgentRunner
 from .store.cases import CaseStore
 from .store.drafts import DraftStore
@@ -65,6 +67,7 @@ class Container:
     runs: RunStore
     gateway: GatewayClient
     runner: AgentRunner
+    regressions: RegressionStore
     chat: ChatService | None = None
     runtime_config: RuntimeConfigStore | None = None
     env_settings: Settings | None = None
@@ -123,6 +126,7 @@ def build_container(settings: Settings, model=None, gateway: GatewayClient | Non
     service = ResourceService(layout, releases, drafts, publisher, lock)
     cases = CaseStore(layout, lock)
     runs = RunStore(layout)
+    regressions = RegressionStore(layout, lock)
     releases.recover()
     if not releases.entries() and settings.seed_on_empty:
         seed(layout, publisher, cases)
@@ -169,6 +173,7 @@ def build_container(settings: Settings, model=None, gateway: GatewayClient | Non
         runs,
         reloadable_gw,
         runner,
+        regressions,
         chat=chat_service,
         runtime_config=runtime_config,
         env_settings=env_settings,
@@ -187,6 +192,9 @@ def seed(layout: DataLayout, publisher: Publisher, cases: CaseStore, seed_dir: P
     rs = load_resource_dir(seed_dir)
     changes: list[Change] = [Change(ResourceRef("system-prompt", SYSTEM_PROMPT_KEY), "publish", "系统提示词",
                                     source="tree", source_dir=seed_dir)]
+    if (seed_dir / COMPOSITE_TEMPLATE_FILE).exists():
+        changes.append(Change(ResourceRef("composite-template", COMPOSITE_TEMPLATE_KEY), "publish", "汇总大模板",
+                              source="tree", source_dir=seed_dir))
     changes += [Change(ResourceRef("api", a.name), "publish", a.title, source="tree", source_dir=seed_dir)
                 for a in rs.apis.values()]
     changes += [Change(ResourceRef("skill", s.id), "publish", s.title, source="tree", source_dir=seed_dir)

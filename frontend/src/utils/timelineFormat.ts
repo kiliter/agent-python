@@ -5,6 +5,13 @@
  * 由管理工作台 AgentTimeline.vue 与嵌入式聊天窗口 RawEventsTimeline.vue 共同复用。
  */
 
+export interface TimelineRouteCandidate {
+  templateId: number
+  templateName?: string
+  level: '高' | '中' | '低' | string
+  reason: string
+}
+
 export interface TimelineProcessEventLike {
   seq: number
   atMs?: number
@@ -25,14 +32,20 @@ export interface TimelineProcessEventLike {
   issues?: Array<{ field: string; message: string }>
   fields?: string[]
   error?: string
+  // 自动路由过程事件（route_started / route_completed / route_failed）
+  routerSkill?: string | null
+  confidence?: '高' | '中' | '低' | string
+  reason?: string
+  candidates?: TimelineRouteCandidate[]
+  durationMs?: number
 }
 
 export interface TimelineRoundGroup<E extends TimelineProcessEventLike = TimelineProcessEventLike> {
   round: number
   atMs: number
-  /** 本轮常规事件：run_started、model_text、tool */
+  /** 本轮常规事件：route_started、route_completed、run_started、model_text、tool */
   items: E[]
-  /** 本轮交卷结果与运行终止事件：report_accepted / report_rejected / report_degraded / run_failed */
+  /** 本轮交卷结果与运行终止事件：report_accepted / report_rejected / report_degraded / run_failed / route_failed */
   outcomes: E[]
 }
 
@@ -43,6 +56,8 @@ export interface ToolDisplayMeta {
   errMsg: string
   /** load_skill 的单个或批量技能名称列表 */
   skillNames: string[]
+  /** load_skill 加载的子文档路径列表（doc / docs） */
+  skillDocs: string[]
   /** load_skill 返回的单个或批量标题文本 */
   skillTitleSummary: string
   /** query_result 的目标结果集展示文本（如 r1 或 r1 + r2） */
@@ -64,10 +79,13 @@ export const TIMELINE_OUTCOME_TYPES = new Set([
   'report_accepted',
   'report_degraded',
   'run_failed',
+  'route_failed',
 ])
 
 export const TOOL_CN_LABELS: Record<string, string> = {
   load_skill: '加载技能',
+  list_templates: '检索模板',
+  get_template: '查看模板',
   call_api: '调用接口',
   query_result: '结果筛选',
   normalize_text: '文本清洗',
@@ -114,6 +132,20 @@ export function formatElapsedAt(ms: number | undefined): string {
   return `+${(Math.max(0, ms ?? 0) / 1000).toFixed(1)}s`
 }
 
+/** 自动路由耗时格式化（<1000ms 显示 ms，否则保留 1 位小数秒） */
+export function formatRouteDuration(ms: number | undefined | null): string {
+  if (ms === undefined || ms === null || !Number.isFinite(ms) || ms < 0) return ''
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  return `${(ms / 1000).toFixed(1)}s`
+}
+
+/** 路由置信度映射为样式语义级别 */
+export function routeConfidenceLevel(confidence: string | undefined | null): 'high' | 'mid' | 'low' {
+  if (confidence === '高') return 'high'
+  if (confidence === '中') return 'mid'
+  return 'low'
+}
+
 /** 判断工具或事件是否执行失败 */
 export function isEventFailed(e: TimelineProcessEventLike): boolean {
   const r = asRecord(e.result)
@@ -147,8 +179,13 @@ export function shouldShowRoundMainCard(g: TimelineRoundGroup<TimelineProcessEve
 
 /** 生成轮次标题徽标文案 */
 export function formatRoundBadge(g: TimelineRoundGroup<TimelineProcessEventLike>): string {
-  if (g.round === 0 && g.items.some(e => e.type === 'run_started')) {
-    return '初始化 · 启动核查运行'
+  if (g.round === 0) {
+    if (g.items.some(e => e.type === 'route_started' || e.type === 'route_completed')) {
+      return '自动路由 · 模板匹配与启动'
+    }
+    if (g.items.some(e => e.type === 'run_started')) {
+      return '初始化 · 启动核查运行'
+    }
   }
   const labels: string[] = []
   const push = (s: string) => {
@@ -158,6 +195,7 @@ export function formatRoundBadge(g: TimelineRoundGroup<TimelineProcessEventLike>
     if (e.type === 'model_text') push('推理说明')
     else if (e.type === 'tool') {
       if (e.tool === 'load_skill') push('加载技能')
+      else if (e.tool === 'list_templates' || e.tool === 'get_template') push('检索模板')
       else if (e.tool === 'call_api') push('接口查询')
       else if (e.tool === 'query_result') push('记录筛选')
       else push('确定性工具计算')
@@ -232,7 +270,7 @@ export function describeToolEvent(e: TimelineProcessEventLike): ToolDisplayMeta 
   const failed = isEventFailed(e)
   const errMsg = r.error ? asText(r.error) : failed ? '执行失败' : ''
 
-  // 1. load_skill（支持 name 单个或 names 批量）
+  // 1. load_skill（支持 name 单个、names 批量以及 doc / docs 子文档）
   const skillNames: string[] = []
   if (typeof a.name === 'string' && a.name.trim()) {
     skillNames.push(a.name.trim())
@@ -241,6 +279,16 @@ export function describeToolEvent(e: TimelineProcessEventLike): ToolDisplayMeta 
     for (const item of a.names) {
       const s = asText(item).trim()
       if (s && !skillNames.includes(s)) skillNames.push(s)
+    }
+  }
+  const skillDocs: string[] = []
+  if (typeof a.doc === 'string' && a.doc.trim()) {
+    skillDocs.push(a.doc.trim())
+  }
+  if (Array.isArray(a.docs)) {
+    for (const item of a.docs) {
+      const s = asText(item).trim()
+      if (s && !skillDocs.includes(s)) skillDocs.push(s)
     }
   }
   const skillTitleSummary =
@@ -263,13 +311,57 @@ export function describeToolEvent(e: TimelineProcessEventLike): ToolDisplayMeta 
   switch (tool) {
     case 'load_skill': {
       const namesJoined = skillNames.join('、') || '—'
-      argsText = namesJoined
+      const docsPart = skillDocs.length ? ` [${skillDocs.join('、')}]` : ''
+      argsText = `${namesJoined}${docsPart}`
       resultText = failed ? `失败：${errMsg}` : skillTitleSummary || '已加载'
       compactSummary = failed
-        ? `${namesJoined} 失败：${errMsg}`
+        ? `${argsText} 失败：${errMsg}`
         : skillTitleSummary
-          ? `${namesJoined}（${skillTitleSummary}）`
-          : namesJoined
+          ? `${argsText}（${skillTitleSummary}）`
+          : argsText
+      break
+    }
+    case 'list_templates': {
+      const kw = asText(a.keyword).trim()
+      argsText = kw ? `关键词 “${truncateText(kw, 32)}”` : '全部在线模板'
+      if (failed) {
+        resultText = `失败：${errMsg}`
+        compactSummary = kw ? `“${truncateText(kw, 20)}” 失败：${errMsg}` : `失败：${errMsg}`
+      } else {
+        const list = Array.isArray(e.result)
+          ? e.result
+          : Array.isArray(r.templates)
+            ? r.templates
+            : Array.isArray(r.items)
+              ? r.items
+              : null
+        const cnt =
+          typeof r.count === 'number'
+            ? r.count
+            : typeof r.total === 'number'
+              ? r.total
+              : list
+                ? list.length
+                : null
+        resultText = cnt !== null ? `返回 ${cnt} 个在线模板` : '已获取模板列表'
+        compactSummary = kw ? `关键词 “${truncateText(kw, 20)}” → ${resultText}` : resultText
+      }
+      break
+    }
+    case 'get_template': {
+      const tid = asText(a.templateId ?? a.template_id ?? a.id).trim()
+      argsText = tid ? `模板 #${tid}` : '指定模板'
+      if (failed) {
+        resultText = `失败：${errMsg}`
+        compactSummary = tid ? `#${tid} 失败：${errMsg}` : `失败：${errMsg}`
+      } else {
+        const tName = asText(r.name ?? r.templateName).trim()
+        const resolvedId = tid || asText(r.id ?? r.templateId).trim()
+        resultText = tName ? `${resolvedId ? `#${resolvedId} ` : ''}${tName}` : '已获取模板详情'
+        compactSummary = tName
+          ? `${resolvedId ? `#${resolvedId} ` : ''}${truncateText(tName, 28)}`
+          : argsText
+      }
       break
     }
     case 'call_api': {
@@ -412,6 +504,7 @@ export function describeToolEvent(e: TimelineProcessEventLike): ToolDisplayMeta 
     failed,
     errMsg,
     skillNames,
+    skillDocs,
     skillTitleSummary,
     queryTarget,
     queryConditionText,

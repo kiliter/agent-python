@@ -46,6 +46,7 @@ from .model_factory import build_model, build_model_settings
 from .output_model import build_report_model, report_to_dict
 from .prompt import USER_PROMPT, build_task_instructions
 from .render import field_render
+from .router import RouteResult, TemplateRouteError, TemplateRouter, extract_usage_dict
 from .text_tools import safe_regex_fullmatch
 from .tools import build_tools
 from .workspace import EventSink, ProcessEvent, Workspace
@@ -62,9 +63,19 @@ _MAX_AGENT_CACHE = 128
 class InputValidationError(ValueError):
     """入参不合法，不启动智能体。"""
 
-    def __init__(self, errors: list[str]) -> None:
+    def __init__(
+        self,
+        errors: list[str],
+        *,
+        template_id: int | None = None,
+        template_name: str | None = None,
+        routing: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__("；".join(errors))
         self.errors = errors
+        self.template_id = template_id
+        self.template_name = template_name
+        self.routing = routing
 
 
 class TemplateUnavailable(LookupError):
@@ -73,8 +84,8 @@ class TemplateUnavailable(LookupError):
 
 @dataclass
 class RunRequest:
-    template_id: int
-    inputs: dict[str, str]
+    template_id: int | None = None
+    inputs: dict[str, str] = field(default_factory=dict)
     document: str = ""
     entry: Entry = "上游调用"
     target: Literal["online", "draft"] = "online"
@@ -82,6 +93,9 @@ class RunRequest:
     extra: dict[str, Any] = field(default_factory=dict)
     # #Created By AiCoding(codex) 调用方可预先指定运行编号（聊天窗口需在启动前拿到 runId 以便订阅事件）
     run_id: str | None = None
+    # #Created By AiCoding(codex) 复合工单编排专用：共享幂等网关与锁定同一资源快照，普通调用保持 None
+    gateway_override: GatewayClient | None = None
+    snapshot_override: tuple[str, ResourceSet] | None = None
 
 
 def validate_inputs(template: Template, inputs: dict[str, str]) -> list[str]:
@@ -419,6 +433,7 @@ class AgentRunner:
         self.runs = runs
         self._sem = _DynamicLimiter(settings.agent_max_concurrent_runs)
         self._agent_cache: OrderedDict[tuple[str, int, int], tuple[type[BaseModel], Agent[RunDeps, Any]]] = OrderedDict()
+        self._router = TemplateRouter(self)
 
     @property
     def settings(self) -> Settings:
@@ -532,36 +547,73 @@ class AgentRunner:
 
     # ------------------------------------------------------------------ 运行
     async def run(self, req: RunRequest, listener: Callable[[ProcessEvent], None] | None = None) -> dict[str, Any]:
-        """执行一次填写，返回完整结果（同时写入运行记录）。"""
+        """执行一次填写，返回完整结果（同时写入运行记录）；未传 template_id 时先自动路由匹配模板。"""
         run_id = req.run_id or new_run_id()
         started_at = datetime.now().astimezone()
-        if req.target == "online":
+        t0 = time.monotonic()
+        if req.snapshot_override is not None:
+            rev, rs = req.snapshot_override
+        elif req.target == "online":
             try_snap = getattr(self.releases, "try_live_snapshot", None)
             snap = try_snap() if callable(try_snap) else None
             rev, rs = snap if snap is not None else await asyncio.to_thread(self._capture, req.target)
         else:
             rev, rs = await asyncio.to_thread(self._capture, req.target)
-        tpl = rs.templates.get(req.template_id)
-        if tpl is None:
-            raise TemplateUnavailable(f"模板 {req.template_id} 不存在" + ("（草稿与线上都没有）" if req.target == "draft" else "或未发布"))
-        if tpl.offline and req.target == "online":
-            raise TemplateUnavailable(f"模板 {req.template_id} 已下线")
+
+        events = EventSink(listener)
         inputs = {k: ("" if v is None else str(v)).strip() for k, v in (req.inputs or {}).items()}
-        errors = validate_inputs(tpl, inputs)
-        if errors:
-            raise InputValidationError(errors)
+        route_res: RouteResult | None = None
+        rt_sem = self._sem
+
+        if req.template_id is None:
+            # #Created By AiCoding(codex) 自动路由阶段单独获取限流槽位，释放后再进入填报槽位，避免自死锁
+            try:
+                async with rt_sem:
+                    route_res = await self._router.route(
+                        rev,
+                        rs,
+                        inputs=inputs,
+                        document=req.document or "",
+                        run_id=run_id,
+                        events=events,
+                        allow_offline=(req.target == "draft"),
+                    )
+            except TemplateRouteError as exc:
+                log.warning("自动模板路由失败 runId=%s rev=%s：%s", run_id, rev, exc)
+                raise
+            tpl = rs.templates.get(route_res.template_id)
+            if tpl is None:
+                raise TemplateUnavailable(f"自动路由命中的模板 {route_res.template_id} 不存在")
+            if tpl.offline and req.target == "online":
+                raise TemplateUnavailable(f"自动路由命中的模板 {route_res.template_id} 已下线")
+            errors = validate_inputs(tpl, inputs)
+            if errors:
+                raise InputValidationError(
+                    errors,
+                    template_id=tpl.id,
+                    template_name=tpl.name,
+                    routing=route_res.to_dict(),
+                )
+        else:
+            tpl = rs.templates.get(req.template_id)
+            if tpl is None:
+                raise TemplateUnavailable(f"模板 {req.template_id} 不存在" + ("（草稿与线上都没有）" if req.target == "draft" else "或未发布"))
+            if tpl.offline and req.target == "online":
+                raise TemplateUnavailable(f"模板 {req.template_id} 已下线")
+            errors = validate_inputs(tpl, inputs)
+            if errors:
+                raise InputValidationError(errors)
 
         bundle = self._bundle
         rt_settings = bundle.settings
         rt_model = bundle.model
         rt_model_settings = bundle.model_settings
         rt_tools = bundle.tools
-        rt_sem = self._sem
-        events = EventSink(listener)
         deps = RunDeps(
             run_id=run_id, rev=rev, resources=rs, template=tpl, inputs=inputs, document=req.document or "",
-            allowed_skills=[s for s in tpl.definition.skills if s in rs.skills],
-            allowed_apis=rs.allowed_apis(tpl), workspace=Workspace(), events=events, gateway=self.gateway,
+            allowed_skills=rs.allowed_skills(tpl),
+            allowed_apis=rs.allowed_apis(tpl), workspace=Workspace(), events=events,
+            gateway=req.gateway_override or self.gateway,
             settings=rt_settings,
         )
         events.emit("run_started", runId=run_id, templateId=tpl.id, templateName=tpl.name, rev=rev,
@@ -591,7 +643,6 @@ class AgentRunner:
         result = None
         active_run = None
         cancelled_exc: asyncio.CancelledError | None = None
-        t0 = time.monotonic()
         try:
             async with rt_sem:
                 async with asyncio.timeout(rt_settings.agent_run_timeout_s):
@@ -637,23 +688,27 @@ class AgentRunner:
 
         src = result if result is not None else active_run
         if src is not None:
-            try:
-                u = src.usage
-                usage = {"requests": u.requests, "toolCalls": u.tool_calls, "inputTokens": u.input_tokens,
-                         "outputTokens": u.output_tokens}
-            except Exception:  # noqa: BLE001
-                pass
+            usage = extract_usage_dict(src)
             try:
                 messages = json.loads(src.all_messages_json())
             except Exception:  # noqa: BLE001
                 pass
+        if route_res is not None and route_res.usage:
+            usage = {
+                key: int(usage.get(key, 0) or 0) + int(route_res.usage.get(key, 0) or 0)
+                for key in ("requests", "toolCalls", "inputTokens", "outputTokens")
+            }
 
         if error:
             events.emit("run_failed", error=error)
             log.warning("运行失败 runId=%s template=%s：%s", run_id, tpl.id, error)
 
         model_name = getattr(rt_model, "model_name", None) or rt_settings.llm_model
-        outcome = self._finish(run_id, started_at, rev, req, deps, report, error, usage, t0, model_name=model_name)
+        routing_dict = route_res.to_dict() if route_res is not None else None
+        outcome = self._finish(
+            run_id, started_at, rev, req, deps, report, error, usage, t0,
+            model_name=model_name, routing=routing_dict,
+        )
         detail = {**outcome, "messages": messages}
         self.runs.submit(self._summary(outcome), detail)
         if cancelled_exc is not None:
@@ -663,7 +718,8 @@ class AgentRunner:
     # ------------------------------------------------------------------ 结果整理
     def _finish(self, run_id: str, started_at: datetime, rev: str, req: RunRequest, deps: RunDeps,
                 report: dict[str, dict[str, Any]] | None, error: str | None, usage: dict[str, Any],
-                t0: float, *, model_name: str | None = None) -> dict[str, Any]:
+                t0: float, *, model_name: str | None = None,
+                routing: dict[str, Any] | None = None) -> dict[str, Any]:
         tpl = deps.template
         ws = deps.workspace
         retried = {i["field"] for rnd in ws.validation_rounds for i in rnd if isinstance(i, dict) and "field" in i}
@@ -735,6 +791,7 @@ class AgentRunner:
             "validationRounds": ws.validation_rounds,
             "events": [e.to_dict() for e in deps.events.events],
             "model": model_name or getattr(self.model, "model_name", None) or self.settings.llm_model,
+            "routing": routing,
             "extra": req.extra,
         }
 

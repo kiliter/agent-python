@@ -21,6 +21,7 @@ import {
   Eraser,
   ExternalLink,
   FileCheck2,
+  Layers,
   LayoutTemplate,
   MessageSquare,
   Plus,
@@ -38,6 +39,7 @@ import { copyToClipboard } from '@/utils/clipboard'
 import {
   buildChatTabKey,
   useWorkspaceTabsStore,
+  type ChatInitOrderItem,
   type ChatWorkspaceTab,
   type ConfirmedReportRecord,
   type SimPostMessageLog,
@@ -56,6 +58,16 @@ interface InputRow {
   value: string
 }
 
+interface SimOrderItemRow {
+  businessName: string
+  createTime: string
+  businessMonth: string
+  templateId: string
+  document: string
+}
+
+type OrderMode = 'single' | 'composite'
+
 type RightLayoutMode = 'tabs' | 'split'
 type ReportViewKind = 'rendered' | 'markdown'
 
@@ -69,8 +81,11 @@ const form = reactive({
   document: '',
 })
 
+const orderMode = ref<OrderMode>('single')
 const inputMode = ref<'rows' | 'json'>('rows')
 const rows = ref<InputRow[]>([{ key: '', value: '' }])
+const orderItems = ref<SimOrderItemRow[]>([])
+const docExpanded = ref(false)
 const jsonText = ref('{}')
 const jsonError = ref('')
 
@@ -163,7 +178,9 @@ onMounted(() => {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) {
       const saved = JSON.parse(raw) as Partial<typeof form> & {
+        orderMode?: OrderMode
         rows?: InputRow[]
+        orderItems?: Array<Partial<SimOrderItemRow> & { label?: string; busiName?: string }>
         jsonText?: string
         inputMode?: 'rows' | 'json'
       }
@@ -171,7 +188,33 @@ onMounted(() => {
       form.orderId = saved.orderId ?? form.orderId
       form.target = saved.target === 'draft' ? 'draft' : 'online'
       form.document = saved.document ?? ''
+      docExpanded.value = Boolean(form.document.trim())
       if (Array.isArray(saved.rows) && saved.rows.length) rows.value = saved.rows
+      if (Array.isArray(saved.orderItems)) {
+        orderItems.value = saved.orderItems.map(it => ({
+          // 兼容旧版缓存中 busiName="" 但 label 有值的情况，不能用 ?? 被空串短路
+          businessName: (it.businessName || it.busiName || it.label || '').trim(),
+          createTime: (it.createTime || '').trim(),
+          businessMonth: (it.businessMonth || '').trim(),
+          templateId: (it.templateId || '').trim(),
+          document: it.document || '',
+        }))
+      }
+      if (saved.orderMode === 'composite' || (saved.orderMode !== 'single' && orderItems.value.length > 0)) {
+        orderMode.value = 'composite'
+        // 兼容上次缓存里上方仍留有「业务名称」而下方首条未填充的情况，启动时自动补填
+        const busiIdx = rows.value.findIndex(r => r.key.trim() === '业务名称' && r.value.trim())
+        if (busiIdx >= 0) {
+          const val = rows.value[busiIdx]!.value.trim()
+          const emptyIt = orderItems.value.find(
+            it => !it.businessName.trim() || /^业务项\s*\d+$/.test(it.businessName.trim()),
+          )
+          if (emptyIt) {
+            emptyIt.businessName = val
+            rows.value.splice(busiIdx, 1)
+          }
+        }
+      }
       if (typeof saved.jsonText === 'string') jsonText.value = saved.jsonText
       if (saved.inputMode === 'json') inputMode.value = 'json'
     }
@@ -209,7 +252,7 @@ onActivated(() => {
 })
 
 watch(
-  [form, rows, jsonText, inputMode],
+  [form, orderMode, rows, orderItems, jsonText, inputMode],
   () => {
     try {
       localStorage.setItem(
@@ -219,7 +262,9 @@ watch(
           orderId: form.orderId,
           target: form.target,
           document: form.document,
+          orderMode: orderMode.value,
           rows: rows.value,
+          orderItems: orderItems.value,
           jsonText: jsonText.value,
           inputMode: inputMode.value,
         }),
@@ -268,12 +313,14 @@ function onPrefill(payload: TemplatePrefillPayload) {
   jsonError.value = ''
   if (payload.source === 'case') {
     form.document = payload.document || ''
+    docExpanded.value = Boolean(form.document.trim())
     ElMessage.success(`已载入回归用例「${payload.caseName}」的入参与单据`)
   } else if (!payload.inputs.length) {
     ElMessage.info('该模板无声明入参')
   } else {
     ElMessage.success(`已填入模板 #${payload.template.id} 的 ${payload.inputs.length} 个入参`)
   }
+  orderMode.value = 'single'
 }
 
 function clearPrefill() {
@@ -288,6 +335,170 @@ function addRow() {
 function removeRow(idx: number) {
   rows.value.splice(idx, 1)
   if (!rows.value.length) rows.value.push({ key: '', value: '' })
+}
+
+/** 单业务 ↔ 多业务切换时双向无损迁移「业务名称」，避免丢失或留空 */
+watch(orderMode, (mode, prev) => {
+  if (mode === prev) return
+  if (mode === 'composite') {
+    const busiRowIdx = rows.value.findIndex(r => r.key.trim() === '业务名称')
+    const firstBusi = busiRowIdx >= 0 ? rows.value[busiRowIdx]!.value.trim() : ''
+    const timeVal = rows.value.find(r => r.key.trim() === '创建时间')?.value.trim() || ''
+    const monthVal = rows.value.find(r => r.key.trim() === '业务月份')?.value.trim() || ''
+
+    if (orderItems.value.length === 0) {
+      orderItems.value = [
+        {
+          businessName: firstBusi,
+          createTime: timeVal,
+          businessMonth: monthVal,
+          templateId: '',
+          document: '',
+        },
+        {
+          businessName: '',
+          createTime: timeVal,
+          businessMonth: monthVal,
+          templateId: '',
+          document: '',
+        },
+      ]
+    } else if (firstBusi) {
+      // 若下方已有空项或仅含占位“业务项 1”，优先把上方「业务名称」默认填进去，避免丢失
+      const emptyRow = orderItems.value.find(
+        it => !it.businessName.trim() || /^业务项\s*\d+$/.test(it.businessName.trim()),
+      )
+      if (emptyRow) {
+        emptyRow.businessName = firstBusi
+        if (!emptyRow.createTime && timeVal) emptyRow.createTime = timeVal
+        if (!emptyRow.businessMonth && monthVal) emptyRow.businessMonth = monthVal
+      } else if (!orderItems.value.some(it => it.businessName.trim() === firstBusi)) {
+        orderItems.value.unshift({
+          businessName: firstBusi,
+          createTime: timeVal,
+          businessMonth: monthVal,
+          templateId: '',
+          document: '',
+        })
+      }
+    }
+
+    if (busiRowIdx >= 0) {
+      rows.value.splice(busiRowIdx, 1)
+      if (!rows.value.length) rows.value.push({ key: '手机号码', value: '' })
+    }
+    return
+  }
+
+  // 切回单业务模式：若上方尚未包含「业务名称」行，把下方首个非空业务名称自动带回上方
+  const hasBusiRow = rows.value.some(r => r.key.trim() === '业务名称')
+  const firstItemBusi = orderItems.value.find(it => it.businessName.trim())?.businessName.trim() || ''
+  if (!hasBusiRow && firstItemBusi) {
+    const mobileIdx = rows.value.findIndex(r => r.key.trim() === '手机号码')
+    const insertAt = mobileIdx >= 0 ? mobileIdx + 1 : 0
+    rows.value.splice(insertAt, 0, { key: '业务名称', value: firstItemBusi })
+  }
+})
+
+const hasConflictingSingleBusiKey = computed(
+  () => orderMode.value === 'composite' && rows.value.some(r => r.key.trim() === '业务名称' && r.value.trim()),
+)
+
+function stripSingleBusiKeyFromCommon() {
+  rows.value = rows.value.filter(r => r.key.trim() !== '业务名称')
+  if (!rows.value.length) rows.value.push({ key: '手机号码', value: '' })
+  ElMessage.success('已移除公共入参中的「业务名称」，避免与下方多业务列表重复')
+}
+
+function addOrderItem() {
+  const commonTime = rows.value.find(r => r.key.trim() === '创建时间')?.value.trim() || ''
+  const commonMonth = rows.value.find(r => r.key.trim() === '业务月份')?.value.trim() || ''
+  orderItems.value.push({
+    businessName: '',
+    createTime: commonTime,
+    businessMonth: commonMonth,
+    templateId: '',
+    document: '',
+  })
+}
+
+function removeOrderItem(idx: number) {
+  orderItems.value.splice(idx, 1)
+}
+
+function collectOrderItems(): ChatInitOrderItem[] {
+  if (orderMode.value !== 'composite') return []
+  const out: ChatInitOrderItem[] = []
+  for (const row of orderItems.value) {
+    const businessName = row.businessName.trim()
+    const createTime = row.createTime.trim()
+    const businessMonth = row.businessMonth.trim()
+    const doc = row.document.trim()
+    const tidNum = Number(row.templateId.trim())
+    if (!businessName && !createTime && !businessMonth && !doc && !(tidNum > 0)) continue
+    const params: Record<string, string> = {}
+    if (businessName) params['业务名称'] = businessName
+    if (createTime) params['创建时间'] = createTime
+    if (businessMonth) params['业务月份'] = businessMonth
+    out.push({
+      label: businessName || `业务项 ${out.length + 1}`,
+      params,
+      ...(doc ? { document: doc } : {}),
+      ...(Number.isInteger(tidNum) && tidNum > 0 ? { templateId: tidNum } : {}),
+    })
+  }
+  return out
+}
+
+function fillMultiProductPreset() {
+  orderMode.value = 'composite'
+  clearPrefill()
+  form.orderId = `SIM-MULTI-${Date.now().toString().slice(-6)}`
+  rows.value = [
+    { key: '手机号码', value: '13900001234' },
+    { key: '创建时间', value: '20251012000000' },
+    { key: '业务月份', value: '20251012' },
+    {
+      key: '申诉内容',
+      value: '未经过本人允许添加会员及保底套餐，要求核查办理依据、退费并关闭相关业务。',
+    },
+  ]
+  jsonText.value = JSON.stringify(
+    {
+      手机号码: '13900001234',
+      创建时间: '20251012000000',
+      业务月份: '20251012',
+      申诉内容: '未经过本人允许添加会员及保底套餐，要求核查办理依据、退费并关闭相关业务。',
+    },
+    null,
+    2,
+  )
+  orderItems.value = [
+    {
+      businessName: '套餐接续直降80元加享翻倍流量（12个月）',
+      createTime: '20251012000000',
+      businessMonth: '20251012',
+      templateId: '',
+      document: '',
+    },
+    {
+      businessName: '任我选会员15元优享版',
+      createTime: '20251012000000',
+      businessMonth: '20251012',
+      templateId: '',
+      document: '',
+    },
+    {
+      businessName: '全家保底消费融合套餐99元',
+      createTime: '20251012000000',
+      businessMonth: '20251012',
+      templateId: '',
+      document: '',
+    },
+  ]
+  form.document = ''
+  docExpanded.value = false
+  ElMessage.success('已切换至多业务模式并填入三项产品示例（单据全文已留空，可走全局技能接口查单）')
 }
 
 function parseJsonInputs(): Record<string, string> | null {
@@ -369,6 +580,7 @@ async function handleOpenChatInGlobalTab() {
     ElMessage.info('当前未填写 API Key，将使用管理端登录态会话打开线上版本预览')
   }
 
+  const items = collectOrderItems()
   await tabsStore.openOrUpdateChatTab(
     userId,
     orderId,
@@ -377,6 +589,7 @@ async function handleOpenChatInGlobalTab() {
       inputs,
       document: form.document,
       target: form.target,
+      ...(items.length ? { items } : {}),
     },
     { activate: true },
   )
@@ -393,6 +606,7 @@ async function handleResendInitToOpenTab() {
     ElMessage.error(jsonError.value || '结构化入参 JSON 格式不合法')
     return
   }
+  const items = collectOrderItems()
   await tabsStore.openOrUpdateChatTab(
     existing.userId,
     existing.orderId,
@@ -401,6 +615,7 @@ async function handleResendInitToOpenTab() {
       inputs,
       document: form.document,
       target: form.target,
+      ...(items.length ? { items } : {}),
     },
     { activate: false },
   )
@@ -544,10 +759,16 @@ function jumpToRunRecord(runId: string) {
               模拟外部工单系统上下文，在右侧全屏打开智能填报窗口
             </span>
           </div>
-          <el-button size="small" type="primary" plain @click="pickerOpen = true">
-            <LayoutTemplate :size="13" style="margin-right: 4px" />
-            从模板预填充
-          </el-button>
+          <div style="display: flex; align-items: center; gap: 6px; flex-shrink: 0">
+            <el-button size="small" plain @click="fillMultiProductPreset">
+              <Layers :size="13" style="margin-right: 4px" />
+              多商品示例
+            </el-button>
+            <el-button size="small" type="primary" plain @click="pickerOpen = true">
+              <LayoutTemplate :size="13" style="margin-right: 4px" />
+              从模板预填充
+            </el-button>
+          </div>
         </header>
 
         <div class="sim-left-scroll">
@@ -683,11 +904,32 @@ function jumpToRunRecord(runId: string) {
               </el-form-item>
             </div>
 
+            <!-- 第二点五行：工单形态切换（单业务 vs 多业务复合，消除「业务名称」与商品列表语义冲突） -->
+            <el-form-item>
+              <template #label>
+                <div class="field-label-bar">
+                  <span>工单形态</span>
+                  <span class="sim-mode-note">
+                    {{
+                      orderMode === 'single'
+                        ? '单业务：所有入参在下方统一填写'
+                        : '多业务复合：上方仅填公共参数（如手机号码），下方逐项填写各业务名称'
+                    }}
+                  </span>
+                  <span class="label-spacer"></span>
+                  <el-radio-group v-model="orderMode" size="small">
+                    <el-radio-button value="single">单业务工单</el-radio-button>
+                    <el-radio-button value="composite">多业务复合工单</el-radio-button>
+                  </el-radio-group>
+                </div>
+              </template>
+            </el-form-item>
+
             <!-- 第三行：结构化入参 inputs -->
             <el-form-item>
               <template #label>
                 <div class="field-label-bar">
-                  <span>结构化入参 inputs</span>
+                  <span>{{ orderMode === 'composite' ? '工单公共入参 inputs（跨业务共享）' : '结构化入参 inputs' }}</span>
                   <el-tag
                     v-if="prefillSource"
                     size="small"
@@ -698,6 +940,15 @@ function jumpToRunRecord(runId: string) {
                   >
                     已套用 #{{ prefillSource.id }} {{ prefillSource.name }}
                   </el-tag>
+                  <el-button
+                    v-if="hasConflictingSingleBusiKey"
+                    size="small"
+                    type="warning"
+                    text
+                    @click="stripSingleBusiKeyFromCommon"
+                  >
+                    移除冗余「业务名称」
+                  </el-button>
                   <span class="label-spacer"></span>
                   <el-radio-group v-model="inputMode" size="small">
                     <el-radio-button value="rows">键值列表</el-radio-button>
@@ -711,7 +962,7 @@ function jumpToRunRecord(runId: string) {
                   <span class="req-star" :title="isRequiredKey(r.key) ? '模板必填参数' : ''">
                     {{ isRequiredKey(r.key) ? '*' : '' }}
                   </span>
-                  <el-input v-model="r.key" placeholder="参数名（如 mobileNo）" class="kv-key-input" />
+                  <el-input v-model="r.key" placeholder="参数名（如 手机号码）" class="kv-key-input" />
                   <el-input
                     v-model="r.value"
                     :placeholder="rowPlaceholder(r.key)"
@@ -740,12 +991,49 @@ function jumpToRunRecord(runId: string) {
               </div>
             </el-form-item>
 
-            <!-- 第四行：单据全文 document -->
+            <!-- 第三点五行：多业务复合商品列表 items（仅在「多业务复合工单」模式显示） -->
+            <el-form-item v-if="orderMode === 'composite'">
+              <template #label>
+                <div class="field-label-bar">
+                  <span>多业务商品列表 items（逐项覆盖「业务名称 / 创建时间 / 业务月份」）</span>
+                  <el-tag v-if="orderItems.length > 0" size="small" type="primary" effect="light">
+                    {{ orderItems.length }} 项
+                  </el-tag>
+                  <span class="label-spacer"></span>
+                  <el-button v-if="orderItems.length > 0" size="small" text @click="orderItems = []">
+                    清空商品
+                  </el-button>
+                  <el-button size="small" text type="primary" @click="addOrderItem">
+                    <Plus :size="13" style="margin-right: 3px" />
+                    添加商品
+                  </el-button>
+                </div>
+              </template>
+
+              <div v-if="orderItems.length > 0" class="sim-items-list">
+                <div v-for="(it, idx) in orderItems" :key="idx" class="sim-item-row">
+                  <span class="sim-item-idx mono">#{{ idx + 1 }}</span>
+                  <el-input v-model="it.businessName" size="small" placeholder="业务名称（如 任我选会员15元优享版）" />
+                  <el-input v-model="it.createTime" size="small" placeholder="创建时间(可选)" style="max-width: 138px" />
+                  <el-input v-model="it.businessMonth" size="small" placeholder="业务月份(可选)" style="max-width: 112px" />
+                  <el-input v-model="it.templateId" size="small" placeholder="模板ID" style="max-width: 78px" />
+                  <el-button text title="删除此商品" @click="removeOrderItem(idx)">
+                    <Trash2 :size="14" />
+                  </el-button>
+                </div>
+              </div>
+              <div v-else class="sim-items-hint">
+                请点击「添加商品」或右上角「多商品示例」添加需要并发核查的多个产品项。
+              </div>
+            </el-form-item>
+
+            <!-- 第四行：单据全文 document（可选，默认折叠：若已配置全局查单据技能/接口可直接留空） -->
             <el-form-item class="doc-form-item">
               <template #label>
                 <div class="field-label-bar">
-                  <span>单据全文 document</span>
+                  <span>单据全文 document（可选）</span>
                   <span class="char-counter mono">{{ form.document.length }} 字符</span>
+                  <span class="sim-mode-note">已配置全局查单据接口时可留空</span>
                   <span class="label-spacer"></span>
                   <el-button
                     v-if="form.document"
@@ -755,13 +1043,17 @@ function jumpToRunRecord(runId: string) {
                   >
                     清空单据
                   </el-button>
+                  <el-button size="small" text type="primary" @click="docExpanded = !docExpanded">
+                    {{ docExpanded ? '收起' : '展开填写' }}
+                  </el-button>
                 </div>
               </template>
               <textarea
+                v-if="docExpanded"
                 v-model="form.document"
                 class="doc-textarea"
-                rows="6"
-                placeholder="在此粘贴投诉/申告原始工单全文，或点击右上角「从模板预填充」载入回归用例的单据与入参…"
+                rows="5"
+                placeholder="可选：当上游直接推送单据文本或需本地粘贴受理单原文时在此填写；若依赖全局查单据技能/接口可保持留空…"
                 spellcheck="false"
               ></textarea>
             </el-form-item>
@@ -1941,5 +2233,37 @@ function jumpToRunRecord(runId: string) {
   color: var(--text-primary);
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.sim-items-list {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sim-item-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sim-item-idx {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--primary);
+  min-width: 24px;
+}
+
+.sim-items-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.sim-mode-note {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  font-weight: 400;
 }
 </style>

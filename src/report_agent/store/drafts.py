@@ -17,6 +17,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from ..domain.skill import SKILL_FILE, SkillParseError, normalize_skill_doc_path
 from .fsutil import _fsync_dir, atomic_write_text, now_iso, read_json, read_text, write_json
 from .layout import (
     META_FILE,
@@ -80,6 +81,35 @@ class DraftStore:
         except (UnicodeDecodeError, OSError):
             return None
 
+    def read_dir_files(self, ref: ResourceRef) -> dict[str, str] | None:
+        """递归读取目录型草稿下的全部文本文件（返回规范化 POSIX 相对路径 -> 内容，不含 .meta.json）。#Created By AiCoding(codex)"""
+        if not self.exists(ref):
+            return None
+        d = self._dir(ref)
+        out: dict[str, str] = {}
+        stack: list[tuple[Path, str]] = [(d, "")]
+        while stack:
+            cur_dir, rel_prefix = stack.pop()
+            try:
+                with os.scandir(cur_dir) as it:
+                    entries = sorted(it, key=lambda e: e.name)
+            except OSError:
+                continue
+            for entry in entries:
+                if entry.name in (META_FILE, ".DS_Store"):
+                    continue
+                if entry.is_symlink():
+                    raise InvalidResource(f"草稿目录包含非法软链接「{entry.name}」")
+                rel_posix = f"{rel_prefix}/{entry.name}" if rel_prefix else entry.name
+                entry_path = ensure_within(d, Path(entry.path))
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append((entry_path, rel_posix))
+                elif entry.is_file(follow_symlinks=False):
+                    text = read_text(entry_path)
+                    if text is not None:
+                        out[rel_posix] = text
+        return dict(sorted(out.items()))
+
     def write(self, ref: ResourceRef, files: dict[str, str], operator: str, base_rev: str | None,
               expected_revision: int | None = None, action: str = "edit") -> dict[str, Any]:
         """原子写入草稿目录。expected_revision 不为空且与当前版本号不同时抛 DraftConflict。"""
@@ -107,6 +137,16 @@ class DraftStore:
             try:
                 tmp_dir.mkdir(parents=True, exist_ok=False)
                 for name, text in files.items():
+                    if ref.kind == "skill" and name != SKILL_FILE:
+                        # #Created By AiCoding(codex) Skill 支持同级及受控子目录（如 references/xxx.md）下的参考文档
+                        try:
+                            safe_rel = normalize_skill_doc_path(name)
+                        except SkillParseError as exc:
+                            raise InvalidResource(str(exc)) from exc
+                        target = ensure_within(tmp_dir, tmp_dir / safe_rel)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        atomic_write_text(target, text)
+                        continue
                     if not name or name == META_FILE or "/" in name or "\\" in name:
                         raise InvalidResource(f"草稿文件名「{name}」不合法")
                     atomic_write_text(ensure_within(tmp_dir, tmp_dir / name), text)
@@ -157,7 +197,7 @@ class DraftStore:
                 dst.unlink(missing_ok=True)
             elif dst.is_dir():
                 shutil.rmtree(dst)
-            shutil.copytree(src, dst, ignore=shutil.ignore_patterns(META_FILE))
+            shutil.copytree(src, dst, ignore=shutil.ignore_patterns(META_FILE, ".DS_Store"))
         else:
             if dst.is_symlink() or dst.is_file():
                 dst.unlink(missing_ok=True)

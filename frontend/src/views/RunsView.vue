@@ -6,17 +6,19 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessageBox } from 'element-plus'
-import { FileText, Table2, Activity, FileInput, Maximize2, Minimize2 } from 'lucide-vue-next'
+import { FileText, Table2, Activity, FileInput, Maximize2, Minimize2, Compass, Download, AlertTriangle } from 'lucide-vue-next'
 import { usePlatformStore } from '@/stores/platform'
 import { platformApi } from '@/api/platformApi'
 import { resolveEvidenceInspectorTab } from '@/utils/reportSegments'
-import type { TemplateField } from '@/types/platform'
+import { formatRouteDuration, routeConfidenceLevel } from '@/utils/timelineFormat'
+import type { MissingFieldsSummary, TemplateField } from '@/types/platform'
 import SvgIcon from '@/components/SvgIcon.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import AgentTimeline from '@/components/AgentTimeline.vue'
 import FieldEvidenceTable from '@/components/FieldEvidenceTable.vue'
 import EvidenceSourceInspector from '@/components/EvidenceSourceInspector.vue'
 import ReportPreviewContent from '@/components/ReportPreviewContent.vue'
+import MissingFieldsSummaryCard from '@/components/MissingFieldsSummaryCard.vue'
 
 const store = usePlatformStore()
 
@@ -38,6 +40,89 @@ const dateTo = computed({
   },
 })
 const querying = ref(false)
+
+// ==================== 多选与单页 HTML 模拟回放导出 ====================
+const selectedRunIds = ref<string[]>([])
+const exportingHtml = ref(false)
+
+const visibleRunIds = computed(() => store.filteredRuns.map(r => r.runId))
+const selectedRunIdSet = computed(() => new Set(selectedRunIds.value))
+const allVisibleSelected = computed(
+  () => visibleRunIds.value.length > 0 && visibleRunIds.value.every(id => selectedRunIdSet.value.has(id)),
+)
+const someVisibleSelected = computed(
+  () => visibleRunIds.value.some(id => selectedRunIdSet.value.has(id)) && !allVisibleSelected.value,
+)
+
+watch(visibleRunIds, ids => {
+  const valid = new Set(ids)
+  const kept = selectedRunIds.value.filter(id => valid.has(id))
+  if (kept.length !== selectedRunIds.value.length) {
+    selectedRunIds.value = kept
+  }
+})
+
+function toggleSelectAllVisible() {
+  if (allVisibleSelected.value) {
+    selectedRunIds.value = []
+  } else {
+    selectedRunIds.value = [...visibleRunIds.value]
+  }
+}
+
+function toggleSelectRun(runId: string) {
+  if (selectedRunIdSet.value.has(runId)) {
+    selectedRunIds.value = selectedRunIds.value.filter(id => id !== runId)
+  } else {
+    selectedRunIds.value = [...selectedRunIds.value, runId]
+  }
+}
+
+function clearRunSelection() {
+  selectedRunIds.value = []
+}
+
+function triggerHtmlDownload(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  setTimeout(() => URL.revokeObjectURL(url), 1500)
+}
+
+async function exportRunsHtmlByIds(ids: string[]) {
+  const clean = ids.filter(Boolean)
+  if (!clean.length) {
+    store.showToast('请先勾选至少一条要导出的运行记录', 'warning')
+    return
+  }
+  if (clean.length > 50) {
+    store.showToast('单次最多导出 50 条运行记录，请缩小勾选范围', 'warning')
+    return
+  }
+  exportingHtml.value = true
+  try {
+    const { blob, filename, count } = await platformApi.exportRunsHtml(clean)
+    triggerHtmlDownload(blob, filename)
+    store.showToast(`已导出 ${count} 笔运行回放 HTML（双击离线打开即可模拟运行）`, 'success')
+  } catch (err) {
+    store.showToast(`导出失败：${(err as Error).message || '未知错误'}`, 'error')
+  } finally {
+    exportingHtml.value = false
+  }
+}
+
+function exportSelectedRunsHtml() {
+  void exportRunsHtmlByIds(selectedRunIds.value)
+}
+
+function exportCurrentRunHtml() {
+  if (!detail.value?.runId) return
+  void exportRunsHtmlByIds([detail.value.runId])
+}
 
 /** 入参列表 */
 const inputEntries = computed(() => Object.entries(detail.value?.inputs ?? {}))
@@ -224,6 +309,25 @@ function onSelectRunReportField(fieldName: string, field?: TemplateField) {
   const f = field || detail.value?.fields.find(item => item.name === fieldName)
   store.selectEvidence(fieldName, resolveEvidenceInspectorTab(f))
   store.runDetailTab = 'fields'
+}
+
+/** 详情页「字段结果与证据」页签的状态筛选（全部 / 已找到 / 未找到） */
+const detailFieldFilter = ref<'all' | 'found' | 'not_found'>('all')
+watch(
+  () => store.selectedRunId,
+  () => {
+    detailFieldFilter.value = 'all'
+  },
+)
+
+/** AI 缺失摘要生成完成后同步更新当前运行详情，避免切页签丢失 */
+function onMissingSummaryUpdated(nextSummary: MissingFieldsSummary) {
+  if (store.runDetail) {
+    store.runDetail = {
+      ...store.runDetail,
+      missingSummary: nextSummary,
+    }
+  }
 }
 
 let filterDebounceTimer: ReturnType<typeof setTimeout> | null = null
@@ -511,9 +615,42 @@ async function convertToCase() {
           </button>
           <button class="btn" @click="resetRunFilters">重置</button>
         </div>
-        <span class="ops-filter-summary mono">
-          共 {{ store.filteredRuns.length }} 笔 · 默认最近 7 天
-        </span>
+        <div class="ops-filter-right">
+          <button
+            v-if="selectedRunIds.length > 0"
+            type="button"
+            class="btn btn-sm"
+            @click="clearRunSelection"
+          >
+            清空勾选
+          </button>
+          <button
+            type="button"
+            class="btn btn-sm"
+            :class="{ 'btn-primary': selectedRunIds.length > 0 }"
+            :disabled="exportingHtml || selectedRunIds.length === 0"
+            :title="
+              selectedRunIds.length > 0
+                ? `导出已勾选的 ${selectedRunIds.length} 笔运行记录为单页离线模拟回放 HTML`
+                : '请先在下方列表勾选要导出的运行记录（支持多选）'
+            "
+            @click="exportSelectedRunsHtml"
+          >
+            <Download :size="13" />
+            <span>
+              {{
+                exportingHtml
+                  ? '正在生成 HTML…'
+                  : selectedRunIds.length > 0
+                    ? `导出回放 HTML (${selectedRunIds.length})`
+                    : '导出回放 HTML'
+              }}
+            </span>
+          </button>
+          <span class="ops-filter-summary mono">
+            共 {{ store.filteredRuns.length }} 笔 · 默认最近 7 天
+          </span>
+        </div>
       </div>
     </div>
 
@@ -523,6 +660,18 @@ async function convertToCase() {
         <table class="data-table">
           <thead>
             <tr>
+              <th style="width: 38px; text-align: center">
+                <input
+                  type="checkbox"
+                  class="ops-check"
+                  :checked="allVisibleSelected"
+                  :indeterminate="someVisibleSelected"
+                  :disabled="store.filteredRuns.length === 0"
+                  title="全选 / 取消全选当前列表"
+                  aria-label="全选当前运行记录"
+                  @change="toggleSelectAllVisible"
+                />
+              </th>
               <th style="width: 138px">开始时间</th>
               <th style="width: 198px">运行编号</th>
               <th style="width: 168px">模板</th>
@@ -537,7 +686,7 @@ async function convertToCase() {
           </thead>
           <tbody>
             <tr v-if="store.filteredRuns.length === 0">
-              <td colspan="10" style="padding: 38px; text-align: center; color: var(--text-secondary)">
+              <td colspan="11" style="padding: 38px; text-align: center; color: var(--text-secondary)">
                 <template v-if="store.runs.length === 0">暂无运行记录</template>
                 <template v-else>
                   未检索到符合筛选条件的运行记录 ·
@@ -549,8 +698,18 @@ async function convertToCase() {
               v-for="r in store.filteredRuns"
               :key="r.runId"
               class="ops-table-row"
+              :class="{ 'is-selected': selectedRunIdSet.has(r.runId) }"
               @click="openRunRecord(r.runId)"
             >
+              <td style="text-align: center" @click.stop>
+                <input
+                  type="checkbox"
+                  class="ops-check"
+                  :checked="selectedRunIdSet.has(r.runId)"
+                  :aria-label="`选择运行记录 ${r.runId}`"
+                  @change="toggleSelectRun(r.runId)"
+                />
+              </td>
               <td class="mono" style="color: var(--text-regular)">{{ r.startTime }}</td>
               <td class="mono ops-run-id">{{ r.runId }}</td>
               <td style="font-weight: 500">{{ r.template }}</td>
@@ -634,6 +793,15 @@ async function convertToCase() {
             {{ detail.record.template }}
           </span>
           <span v-else class="chip-tag" title="所属模板">{{ detail.record.template }}</span>
+          <span
+            v-if="detail.routing"
+            class="chip-tag ops-routing-chip"
+            :class="`conf-${routeConfidenceLevel(detail.routing.confidence)}`"
+            :title="detail.routing.reason || '自动路由匹配模板'"
+          >
+            <Compass :size="11" />
+            <span>自动路由 · 置信度{{ detail.routing.confidence }}</span>
+          </span>
           <span class="chip-tag mono" title="核查总耗时">{{ detail.durationSec }}s</span>
           <span v-if="detail.model" class="chip-tag mono" title="执行大模型">{{ detail.model }}</span>
           <span class="chip-tag mono" title="版本">{{ detail.rev }}</span>
@@ -651,6 +819,16 @@ async function convertToCase() {
             <Maximize2 v-else :size="13" />
             <span>{{ store.isFocusFullscreen ? '退出全屏' : '全屏专注' }}</span>
           </button>
+          <button
+            type="button"
+            class="btn"
+            :disabled="exportingHtml"
+            title="导出当前运行记录为单页离线模拟回放 HTML（零外部依赖，直接打开即模拟 ChatUI 运行）"
+            @click="exportCurrentRunHtml"
+          >
+            <Download :size="13" />
+            <span>{{ exportingHtml ? '正在导出…' : '导出回放 HTML' }}</span>
+          </button>
           <button type="button" class="btn" @click="store.loadRunIntoDryRun(store.currentRun)">
             <SvgIcon name="play" /> 用此输入试运行
           </button>
@@ -658,11 +836,52 @@ async function convertToCase() {
         </div>
       </div>
 
+      <div v-if="detail.routing" class="ops-routing-banner">
+        <div class="ops-routing-banner-main">
+          <Compass :size="13" style="color: var(--primary); flex-shrink: 0" />
+          <span class="ops-routing-banner-label">自动路由命中</span>
+          <strong>#{{ detail.routing.templateId }} {{ detail.routing.templateName }}</strong>
+          <span
+            class="ops-routing-conf"
+            :class="`conf-${routeConfidenceLevel(detail.routing.confidence)}`"
+          >
+            置信度 {{ detail.routing.confidence }}
+          </span>
+          <span v-if="detail.routing.durationMs !== undefined" class="chip-tag mono">
+            {{ formatRouteDuration(detail.routing.durationMs) }}
+          </span>
+          <span v-if="detail.routing.reason" class="ops-routing-reason">
+            {{ detail.routing.reason }}
+          </span>
+        </div>
+        <button
+          v-if="tab !== 'timeline'"
+          type="button"
+          class="btn-link"
+          style="font-size: 12px"
+          @click="store.runDetailTab = 'timeline'"
+        >
+          查看路由轨迹 →
+        </button>
+      </div>
+
       <div v-if="detail.error" class="alert-banner alert-danger" style="margin: 0 0 8px">
         <span><SvgIcon name="error" /> 运行失败：{{ detail.error }}</span>
       </div>
-      <div v-if="detail.missingShown.length" class="alert-banner alert-warning" style="margin: 0 0 8px">
+      <div
+        v-if="detail.missingShown.length"
+        class="alert-banner alert-warning ops-missing-banner"
+        style="margin: 0 0 8px"
+      >
         <span><SvgIcon name="warn" /> 报告中显示但未找到证据的字段：{{ detail.missingShown.join('、') }}</span>
+        <button
+          v-if="tab !== 'missing' && detail.missingSummary && detail.missingSummary.nonFoundCount > 0"
+          type="button"
+          class="btn-link ops-missing-jump"
+          @click="store.runDetailTab = 'missing'"
+        >
+          查看缺失摘要与 AI 总结 →
+        </button>
       </div>
 
       <!-- 高辨识度底线激活页签切换栏 -->
@@ -690,6 +909,24 @@ async function convertToCase() {
           <Table2 :size="14" />
           <span>字段结果与证据</span>
           <span class="ops-tab-badge mono">{{ detail.foundCount }}/{{ detail.totalCount }}</span>
+        </button>
+        <button
+          v-if="detail.missingSummary && detail.missingSummary.nonFoundCount > 0"
+          type="button"
+          role="tab"
+          class="ops-tab-btn"
+          :class="{ active: tab === 'missing' }"
+          :aria-selected="tab === 'missing'"
+          @click="store.runDetailTab = 'missing'"
+        >
+          <AlertTriangle :size="14" />
+          <span>缺失摘要</span>
+          <span
+            class="ops-tab-badge mono"
+            :class="{ 'is-warn': detail.missingSummary.impactedCount > 0 }"
+          >
+            {{ detail.missingSummary.nonFoundCount }} 项
+          </span>
         </button>
         <button
           type="button"
@@ -770,6 +1007,20 @@ async function convertToCase() {
           <rect width="100%" height="100%" fill="url(#runs-report-eng-grid)" />
         </svg>
 
+        <!-- 非找到字段情况摘要（报告页签默认收起为单行，避免挤压正文；点击展开或切至「缺失摘要」页签） -->
+        <div
+          v-if="detail.missingSummary && detail.missingSummary.nonFoundCount > 0"
+          class="run-report-missing-wrap"
+        >
+          <MissingFieldsSummaryCard
+            :run-id="detail.runId"
+            :summary="detail.missingSummary"
+            :default-expanded="false"
+            @select-field="onSelectRunReportField"
+            @updated="onMissingSummaryUpdated"
+          />
+        </div>
+
         <!-- 顶部 3px 移动科技蓝冠线的正式政企核查报告单 -->
         <article class="official-audit-sheet">
           <header class="audit-sheet-meta">
@@ -820,10 +1071,80 @@ async function convertToCase() {
           <div class="card-title">
             字段结果与证据表 <span class="chip-tag">点击任意字段行在右侧定位高亮来源</span>
           </div>
+          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
+            <button
+              v-if="detail.missingSummary && detail.missingSummary.nonFoundCount > 0"
+              type="button"
+              class="btn btn-sm"
+              title="切换至独立「缺失摘要」页签查看完整归因与 AI 总结"
+              @click="store.runDetailTab = 'missing'"
+            >
+              <AlertTriangle :size="12" style="color: var(--warning)" />
+              <span>缺失摘要 ({{ detail.missingSummary.nonFoundCount }})</span>
+            </button>
+            <div class="segmented-control">
+              <button
+                type="button"
+                class="segmented-btn"
+                :class="{ active: detailFieldFilter === 'all' }"
+                @click="detailFieldFilter = 'all'"
+              >
+                全部 ({{ detail.totalCount }})
+              </button>
+              <button
+                type="button"
+                class="segmented-btn"
+                :class="{ active: detailFieldFilter === 'found' }"
+                @click="detailFieldFilter = 'found'"
+              >
+                找到 ({{ detail.foundCount }})
+              </button>
+              <button
+                type="button"
+                class="segmented-btn"
+                :class="{ active: detailFieldFilter === 'not_found' }"
+                @click="detailFieldFilter = 'not_found'"
+              >
+                未找到 ({{ Math.max(0, detail.totalCount - detail.foundCount) }})
+              </button>
+            </div>
+          </div>
         </div>
-        <FieldEvidenceTable filter="all" search="" />
+        <FieldEvidenceTable :filter="detailFieldFilter" search="" />
       </div>
       <EvidenceSourceInspector />
+    </div>
+
+    <!-- ==================== 页签 2.5：非找到字段缺失摘要（独占完整视口高度） ==================== -->
+    <div v-else-if="tab === 'missing'" class="card card-fill">
+      <div class="card-header">
+        <div class="card-title">
+          <span>非找到字段情况摘要与归因分析</span>
+          <span class="chip-tag">点击任意字段名即可跳转「字段结果与证据」定位原文</span>
+        </div>
+        <button
+          type="button"
+          class="btn btn-sm"
+          @click="detailFieldFilter = 'not_found'; store.runDetailTab = 'fields'"
+        >
+          在字段表中筛选未找到 →
+        </button>
+      </div>
+      <div class="card-scroll missing-tab-scroll">
+        <div class="missing-tab-inner">
+          <MissingFieldsSummaryCard
+            v-if="detail.missingSummary && detail.missingSummary.nonFoundCount > 0"
+            :run-id="detail.runId"
+            :summary="detail.missingSummary"
+            always-expanded
+            @select-field="onSelectRunReportField"
+            @updated="onMissingSummaryUpdated"
+          />
+          <div v-else style="text-align: center; color: var(--text-secondary); padding: 48px 0">
+            本次运行所有字段均已找到，无缺失项。
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- ==================== 页签 3：智能体时间线 ==================== -->
@@ -1114,6 +1435,78 @@ async function convertToCase() {
   border: none;
 }
 
+.ops-routing-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 600;
+}
+
+.ops-routing-chip.conf-high,
+.ops-routing-conf.conf-high {
+  background-color: var(--success-bg);
+  border-color: var(--success-border);
+  color: var(--success);
+}
+
+.ops-routing-chip.conf-mid,
+.ops-routing-conf.conf-mid {
+  background-color: var(--warning-bg);
+  border-color: var(--warning-border);
+  color: var(--warning);
+}
+
+.ops-routing-chip.conf-low,
+.ops-routing-conf.conf-low {
+  background-color: var(--danger-bg);
+  border-color: var(--danger-border);
+  color: var(--danger);
+}
+
+.ops-routing-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 7px 10px;
+  margin: 0 0 8px;
+  border-radius: 6px;
+  background: var(--primary-bg);
+  border: 1px solid var(--primary-border);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.ops-routing-banner-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.ops-routing-banner-label {
+  color: var(--text-secondary);
+}
+
+.ops-routing-conf {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  border: 1px solid transparent;
+}
+
+.ops-routing-reason {
+  color: var(--text-regular);
+  line-height: 1.45;
+}
+
 .ops-tabs-row {
   display: flex;
   align-items: center;
@@ -1195,6 +1588,45 @@ async function convertToCase() {
   pointer-events: none;
 }
 
+.run-report-missing-wrap {
+  position: relative;
+  z-index: 2;
+  max-width: 1060px;
+  width: 100%;
+  margin: 0 auto;
+  flex-shrink: 0;
+}
+
+.ops-missing-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ops-missing-jump {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.ops-tab-badge.is-warn {
+  background: var(--warning-bg);
+  color: var(--warning);
+  border-color: var(--warning-border);
+}
+
+.missing-tab-scroll {
+  padding: 16px 20px 24px;
+  background: var(--bg-subtle);
+}
+
+.missing-tab-inner {
+  max-width: 1080px;
+  margin: 0 auto;
+}
+
 /* 顶部 2px solid var(--primary) 正式政企核查报告单 */
 .official-audit-sheet {
   position: relative;
@@ -1247,5 +1679,24 @@ async function convertToCase() {
   color: var(--text-secondary);
   padding: 40px 0;
   font-size: 13px;
+}
+
+.ops-filter-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ops-check {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--primary);
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.ops-table-row.is-selected {
+  background: var(--primary-bg);
 }
 </style>

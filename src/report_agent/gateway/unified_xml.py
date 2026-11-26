@@ -23,6 +23,7 @@ import httpx
 from ..domain.api_contract import ApiContract
 from .base import (ApiCallResult, decode_xml, extract_json_records, extract_records, parse_json_body, parse_xml,
                    sanitize_xml_text)
+from .http_client import build_http_request_preview, parse_http_response, prepare_http_request
 
 log = logging.getLogger(__name__)
 
@@ -221,6 +222,8 @@ def build_masked_request_json(process_code: str, request: dict[str, Any]) -> str
 
 def build_request_preview(contract: ApiContract, args: dict[str, Any] | None = None, style: str = "java") -> str:
     """按契约协议生成脱敏请求预览报文；未传入的参数保留 ${参数名} 占位符。"""
+    if contract.is_http:
+        return build_http_request_preview(contract, args or {})
     preview_req = contract.build_preview_request(args or {})
     if contract.is_json:
         return build_masked_request_json(contract.processCode, preview_req)
@@ -294,7 +297,9 @@ class UnifiedGatewayXmlClient:
         await self._client.aclose()
 
     async def invoke(self, contract: ApiContract, args: dict[str, Any]) -> ApiCallResult:
-        """调用接口。按 contract.is_json 分发 JSON 或 XML 请求，复用相同的超时与幂等重试策略。"""
+        """调用接口。按契约类型分发常规 HTTP、统一网关 JSON 或统一网关 XML，复用超时与幂等重试策略。"""
+        if contract.is_http:
+            return await self._invoke_http(contract, args)
         try:
             request = contract.build_request(args)
             custom_headers = contract.build_headers(args)
@@ -371,6 +376,90 @@ class UnifiedGatewayXmlClient:
                 return parse_gateway_json_response(contract, text, resp.status_code, cost, preview, attempt)
             return parse_gateway_response(contract, text, resp.status_code, cost, preview, attempt)
         return ApiCallResult(ok=False, error=last_error or "网关调用失败", cost_ms=_ms(start), request_preview=preview)
+
+    async def _invoke_http(self, contract: ApiContract, args: dict[str, Any]) -> ApiCallResult:
+        """直连调用常规 HTTP 接口（不走统一网关，支持任意 Method/URL/Query/Headers/Body）。#Created By AiCoding(codex)"""
+        try:
+            prepared = prepare_http_request(contract, args)
+        except ValueError as exc:
+            return ApiCallResult(ok=False, error=f"HTTP 请求组装失败：{exc}")
+        attempts = contract.retry.maxAttempts if contract.idempotent else 1
+        timeout = httpx.Timeout(contract.timeoutMs / 1000, connect=self.connect_timeout_s)
+        start = time.monotonic()
+        last_error = ""
+        for attempt in range(1, attempts + 1):
+            try:
+                async with self._sem:
+                    resp = await self._client.request(
+                        prepared.method,
+                        prepared.url,
+                        content=prepared.payload_bytes,
+                        timeout=timeout,
+                        headers=prepared.headers,
+                    )
+            except httpx.ConnectTimeout as exc:
+                last_error = f"HTTP 连接超时（>{self.connect_timeout_s:g}s）：{type(exc).__name__} {exc}".strip()
+                log.warning("HTTP 接口 %s 第 %d/%d 次连接超时：%s", contract.name, attempt, attempts, exc)
+                if attempt < attempts:
+                    await asyncio.sleep(0.5 * 2 ** (attempt - 1))
+                    continue
+                return ApiCallResult(ok=False, error=last_error, cost_ms=_ms(start),
+                                     request_preview=prepared.preview, attempts=attempt)
+            except httpx.TimeoutException as exc:
+                last_error = f"HTTP 响应超时（>{contract.timeoutMs}ms）：{type(exc).__name__} {exc}".strip()
+                log.warning("HTTP 接口 %s 第 %d/%d 次响应超时：%s", contract.name, attempt, attempts, exc)
+                if attempt < attempts:
+                    await asyncio.sleep(0.5 * 2 ** (attempt - 1))
+                    continue
+                return ApiCallResult(ok=False, error=last_error, cost_ms=_ms(start),
+                                     request_preview=prepared.preview, attempts=attempt)
+            except httpx.TransportError as exc:
+                last_error = f"HTTP 调用失败：{type(exc).__name__} {exc}".strip()
+                log.warning("HTTP 接口 %s 第 %d/%d 次网络异常：%s", contract.name, attempt, attempts, exc)
+                if attempt < attempts:
+                    await asyncio.sleep(0.5 * 2 ** (attempt - 1))
+                    continue
+                return ApiCallResult(ok=False, error=last_error, cost_ms=_ms(start),
+                                     request_preview=prepared.preview, attempts=attempt)
+            except (httpx.HTTPError, RuntimeError) as exc:
+                last_error = f"HTTP 请求异常：{type(exc).__name__} {exc}".strip()
+                return ApiCallResult(ok=False, error=last_error, cost_ms=_ms(start),
+                                     request_preview=prepared.preview, attempts=attempt)
+
+            cost = _ms(start)
+            content_type = resp.headers.get("content-type", "")
+            log.info("HTTP 接口 %s (%s) 返回 HTTP %s，%d ms，%d 字节",
+                     contract.name, prepared.method, resp.status_code, cost, len(resp.content))
+            if not (200 <= resp.status_code < 300):
+                err_msg = _classify_http_error(resp.status_code)
+                if resp.status_code in (429, 502, 503, 504) and contract.idempotent and attempt < attempts:
+                    last_error = err_msg
+                    log.warning("HTTP 接口 %s 第 %d/%d 次返回 HTTP %s，准备重试",
+                                contract.name, attempt, attempts, resp.status_code)
+                    await asyncio.sleep(0.5 * 2 ** (attempt - 1))
+                    continue
+                err_text = decode_xml(resp.content, resp.charset_encoding)
+                return ApiCallResult(
+                    ok=False,
+                    error=err_msg,
+                    http_status=resp.status_code,
+                    cost_ms=cost,
+                    raw=err_text[:20_000],
+                    request_preview=prepared.preview,
+                    attempts=attempt,
+                )
+            return parse_http_response(
+                contract,
+                resp.content,
+                resp.status_code,
+                cost,
+                prepared.preview,
+                content_type=content_type,
+                charset=resp.charset_encoding,
+                attempts=attempt,
+            )
+        return ApiCallResult(ok=False, error=last_error or "HTTP 调用失败", cost_ms=_ms(start),
+                             request_preview=prepared.preview)
 
 
 def parse_gateway_response(contract: ApiContract, text: str, status: int | None, cost: int, preview: str,

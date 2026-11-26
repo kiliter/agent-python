@@ -9,6 +9,7 @@ from typing import Any
 
 from ..domain.template import FieldDef, TemplateDef
 from .dto import document_lines, field_to_dto, run_record, safe_int, sms_records
+from .missing_summary import build_missing_summary
 
 
 def _source(f: dict[str, Any]) -> str:
@@ -84,7 +85,10 @@ def detail_view(o: dict[str, Any], with_messages: bool = False) -> dict[str, Any
         "toolCalls": o.get("toolCalls") or [], "events": o.get("events") or [], "usage": o.get("usage") or {},
         "skillsLoaded": o.get("skillsLoaded") or [], "validationRounds": val_rounds,
         "model": o.get("model"),
+        "missingSummary": build_missing_summary(o),
     }
+    if o.get("routing"):
+        view["routing"] = o["routing"]
     if with_messages:
         view["messages"] = o.get("messages")
     return view
@@ -93,9 +97,10 @@ def detail_view(o: dict[str, Any], with_messages: bool = False) -> dict[str, Any
 def report_view(o: dict[str, Any]) -> dict[str, Any]:
     """上游调用的精简视图。"""
     raw_fields = [f for f in (o.get("fields") or []) if isinstance(f, dict) and f.get("name")]
-    return {
+    view: dict[str, Any] = {
         "runId": str(o.get("runId") or ""), "status": o.get("status") or "FAILED",
-        "templateId": o.get("templateId"), "rev": o.get("rev") or "—",
+        "templateId": o.get("templateId"), "templateName": o.get("templateName") or "",
+        "rev": o.get("rev") or "—",
         "report": str(o.get("report") or ""), "error": o.get("error"),
         "fields": [
             {
@@ -114,3 +119,6 @@ def report_view(o: dict[str, Any]) -> dict[str, Any]:
         "missingShown": o.get("missingShown") or [],
         "durationMs": safe_int(o.get("durationMs"), 0),
     }
+    if o.get("routing"):
+        view["routing"] = o["routing"]
+    return view

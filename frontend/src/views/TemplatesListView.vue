@@ -1,7 +1,9 @@
 <!-- #Created By AiCoding(codex) 5.2 模板列表页视图 -->
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { ElMessageBox } from 'element-plus'
 import { usePlatformStore } from '@/stores/platform'
+import type { TemplateItem } from '@/types/platform'
 import StatusTag from '@/components/StatusTag.vue'
 
 const store = usePlatformStore()
@@ -321,6 +323,23 @@ function openCopyFromTop() {
 function openOfflineModal(tplId: number) {
   store.targetOfflineTemplateId = tplId
   store.openModal('offline-template')
+}
+
+/** 直接删除模板（纯草稿立即清理，已发布则发布新版本移出快照） */
+function handleDeleteTemplate(t: TemplateItem) {
+  const isDraftOnly = t.status === 'DRAFT' && (!t.onlineRev || t.onlineRev === '—')
+  const tip = isDraftOnly
+    ? `确认删除未发布草稿模板「${t.id} ${t.name}」吗？关联的 ${t.casesCount} 个回归用例也将一并删除，此操作不可撤销。`
+    : `确认删除模板「${t.id} ${t.name}」吗？系统将生成新的发布版本把该模板移出当前快照（历史版本仍可在 Git 中追溯），并清理关联的 ${t.casesCount} 个回归用例。`
+  ElMessageBox.confirm(tip, '确认删除模板', {
+    confirmButtonText: '确认删除',
+    cancelButtonText: '取消',
+    type: 'warning',
+  })
+    .then(async () => {
+      await store.deleteTemplate(t.id)
+    })
+    .catch(() => {})
 }
 
 const refreshing = ref(false)
@@ -655,6 +674,7 @@ async function handleRefresh() {
                     下线
                   </button>
                   <button v-else class="btn-link" @click="store.restoreOfflineTemplate(t.id)">恢复</button>
+                  <button class="btn-link danger" @click="handleDeleteTemplate(t)">删除</button>
                 </div>
               </td>
             </tr>

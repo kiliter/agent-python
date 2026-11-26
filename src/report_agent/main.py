@@ -12,6 +12,7 @@ import logging
 import logging.handlers
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -20,18 +21,20 @@ from fastapi.staticfiles import StaticFiles
 
 from .api.auth import LoginGuard, TokenService, UserStore
 from .api.routes_chat import chat_router
+from .api.routes_regression import router as regression_router
 from .api.routes_resources import router as resources_router
 from .api.routes_system import admin_router, auth_router, report_router
 from .api.routes_templates import router as templates_router
 from .chat.service import ChatError
 from .config import Settings, get_settings
 from .container import Container, build_container
+from .runtime.router import TemplateRouteError
 from .runtime.runner import InputValidationError, TemplateUnavailable
 from .store.drafts import DraftConflict
 from .store.git_repo import GitError
 from .store.publisher import NothingToPublish, PublishError
 from .store.releases import ReleaseNotFound
-from .store.service import InvalidResource, ResourceNotFound
+from .store.service import InvalidResource, ResourceDeleteForbidden, ResourceInUseError, ResourceNotFound
 
 log = logging.getLogger("report_agent")
 
@@ -112,9 +115,32 @@ def install_error_handlers(app: FastAPI) -> None:
     async def _publish(_: Request, exc: PublishError):
         return _error(422, "PUBLISH_BLOCKED", "校验未通过，不能发布", issues=[i.to_dict() for i in exc.issues])
 
+    @app.exception_handler(ResourceInUseError)
+    async def _in_use(_: Request, exc: ResourceInUseError):
+        return _error(409, "RESOURCE_IN_USE", str(exc), references=exc.references)
+
+    @app.exception_handler(ResourceDeleteForbidden)
+    async def _delete_forbidden(_: Request, exc: ResourceDeleteForbidden):
+        return _error(400, exc.code, str(exc))
+
     @app.exception_handler(InputValidationError)
     async def _input(_: Request, exc: InputValidationError):
-        return _error(400, "INVALID_INPUT", str(exc), errors=exc.errors)
+        extra: dict[str, Any] = {"errors": exc.errors}
+        if exc.routing is not None:
+            extra["templateId"] = exc.template_id
+            extra["templateName"] = exc.template_name
+            extra["routing"] = exc.routing
+        return _error(400, "INVALID_INPUT", str(exc), **extra)
+
+    @app.exception_handler(TemplateRouteError)
+    async def _route_error(_: Request, exc: TemplateRouteError):
+        return _error(
+            422,
+            "TEMPLATE_ROUTE_FAILED",
+            str(exc),
+            reason=exc.reason,
+            candidates=exc.candidates,
+        )
 
     @app.exception_handler(ChatError)
     async def _chat_error(_: Request, exc: ChatError):
@@ -201,6 +227,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
     app.include_router(templates_router)
     app.include_router(resources_router)
     app.include_router(admin_router)
+    app.include_router(regression_router)
     app.include_router(report_router)
     app.include_router(chat_router)
 

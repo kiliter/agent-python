@@ -1,0 +1,19 @@
+{%- if order.平台流水号 or order.手机号码 -%}
+关于{% if order.平台流水号 %}工单「{{ order.平台流水号 }}」{% endif %}{% if order.手机号码 %}（号码：{{ order.手机号码 }}）{% endif %}涉及 {{ summary.totalItems }} 项业务的核查情况汇总如下：
+{%- else -%}
+本次共核查 {{ summary.totalItems }} 项业务，具体情况汇总如下：
+{%- endif %}
+
+{% for item in items -%}
+### {{ loop.index }}、关于【{{ item.label }}】核查情况（{{ item.templateName }}）
+{% if item.status == 'FAILED' -%}
+核查未完成：{{ item.error or '运行失败，请人工复核' }}
+{%- else -%}
+{{ item.report }}
+{%- endif %}
+
+{% endfor -%}
+{%- if summary.partialCount > 0 or summary.failedCount > 0 -%}
+---
+> 核查汇总提示：共 {{ summary.totalItems }} 项业务，其中完全核出 {{ summary.successCount }} 项{% if summary.partialCount > 0 %}、部分字段待补 {{ summary.partialCount }} 项{% endif %}{% if summary.failedCount > 0 %}、未完成 {{ summary.failedCount }} 项{% endif %}，请复核后再确认回传。
+{%- endif -%}

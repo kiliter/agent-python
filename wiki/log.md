@@ -89,3 +89,57 @@
 - 生成与校验工具：`generate.py` 读取 `template_descriptions.yaml` 并停止拼接原规则；`verify_structure.py` 的 S4 改为校验“有 rule 的字段必须写有非空取值说明”。
 - 技能 / API / 系统提示词：清理 `SKILL.md` 头注释与正文中的“迁移自 Java / 与 Java 一致”说法、3 个接口契约 YAML 注释中的 Java 对照，删除系统提示词中关于“原规则（Java）”的说明。运行时 `prompt.py` / `chat/agent.py` 仍保留剥离 `原规则（Java）：` 尾注的兼容逻辑，用于已有数据目录中的历史模板。
 - 注意：内置资源只在新数据目录 `report-agent init` 时导入，已部署环境需在工作台逐个修改模板说明后发布。
+
+
+## [2026-11-26] ingest | 新增常规 HTTP 接口连接器（`connector: http`）及工作台可视化配置支持
+
+- 领域与网关：在 `domain/api_contract.py` 扩展 `ConnectorType` 新增 `"http"`，支持 `method`（GET/POST/PUT/DELETE/PATCH）、`url`（含 `${参数}`/`${$now}` 占位符校验与构建）、`query`、`bodyType`（`json`/`form`/`text`/`none`）及 `response.format`（`auto`/`json`/`xml`/`text`），`http` 类型免填 `processCode`；新增 `gateway/http_client.py` 承载常规 HTTP 请求组装、凭证头/敏感查询参数脱敏预览及 JSON/XML/纯文本/204 响应解析；在 `gateway/unified_xml.py` 与 `gateway/mock.py` 中分别集成直连 HTTP 调度（复用意向信号量、禁止重定向与幂等重试）及 `.json`/`.xml`/`.txt` 本地 Mock 回放。
+- 接口与前端：更新 `api/dto.py`、`api/routes_resources.py`（创建/局部更新/校验预览/试调用）及前端 `types/platform.ts`、`platformApi.ts`、`stores/platform.ts`、`GlobalModals.vue`、`ApisView.vue` 与 `ApiVisualEditor.vue`，实现常规 HTTP 接口的新建、协议筛选、URL/Method/Headers/Query/Body/Response 可视化双向编辑与在线试调用。
+- 测试与文档：新增 `tests/test_api_http_connector.py` 覆盖契约校验、脱敏预览、直连重试、Mock 回放与管理端路由全链路，同步更新 [components/gateway-and-api-contract.md](components/gateway-and-api-contract.md)、[guides/add-skill-and-api.md](guides/add-skill-and-api.md) 与 [index.md](index.md)。
+
+## [2026-11-26] ingest | 新增 Skill 三态作用域（`scope: template | global | chat`）与 `maxPreviewChars: -1` 全文保留
+
+- **Skill 作用域模型**：在 `domain/skill.py` 新增 `SkillScope = Literal["template", "global", "chat"]`（默认 `template`，`template-router` 未声明时向后兼容为 `chat`）；在 `domain/resources.py` 新增 `ResourceSet.global_report_skills` / `chat_skills` / `allowed_skills` 并升级 `allowed_apis`，使 `scope: global` 技能及其 API 自动注入全部填报模板，同时新增 `GLOBAL_SKILL_REDUNDANT`、`CHAT_SKILL_IN_TEMPLATE`、`CHAT_SKILL_HAS_APIS` 交叉校验；`runtime/runner.py` 改用 `rs.allowed_skills(tpl)`，`chat/agent.py` 升级为允许加载全部 `scope: chat` 技能；内置 `seed/skills/template-router/SKILL.md` 显式补充 `scope: chat`。
+- **预览全文保留与错误描述增强**：`domain/api_contract.py#SummarySpec.maxPreviewChars` 支持 `-1` 表示不截断，`runtime/tools.py#_format_api_success_payload` 在不截断且全行命中时返回明确未截断提示；`gateway/base.py` 补充 `resultDesc` / `errMsg` / `errorMessage` 错误描述自动提取。
+- **管理端与前端工作台**：`api/dto.py`、`api/routes_resources.py` 与前端 `SkillsView.vue`、`GlobalModals.vue`、`WorkbenchLeftExplorer.vue`、`WorkbenchRightInspector.vue`、`ApiVisualEditor.vue` 完整支持 Skill 三态作用域新建、筛选、展示、模板绑定过滤与全局自动持有分组展示。
+- **测试与文档**：新增 `tests/test_skill_scope.py`，扩展 `tests/test_api_http_connector.py`，同步更新 [skills/README.md](skills/README.md) 与 [skills/template-router.md](skills/template-router.md)。
+
+## [2026-11-26] ingest | 新增多文件 Skill 子目录 Markdown 渐进式懒加载全栈支持
+
+- **领域模型与静态校验**：在 `domain/skill.py` 为 `Skill` 新增 `docs: dict[str, str]` 字段及 `normalize_skill_doc_path`、`validate_skill_docs_map`、`extract_doc_title`、`resolve_skill_doc_link`、`extract_md_doc_links`、`load_skill_dir`（允许同级及最多两级子目录下的 `.md` 文档，单技能上限 50 篇 / 单篇 20 万字符，严禁软链接、隐藏段与 `..` 穿越）；`domain/resources.py` 接入 `load_skill_dir` 并在 `validate_skill` 新增相对链接断链阻塞校验（`SKILL_DOC_NOT_FOUND`）、不可达孤儿文档提示（`SKILL_DOC_UNREFERENCED`）以及 `template-router` 跨 `SKILL.md` 与所有子文档的 `### <ID>` 扫描。
+- **存储层与快照发布**：升级 `store/drafts.py`（`DraftStore.write` 支持 Skill 嵌套子目录原子写盘、新增 `read_dir_files`）与 `store/service.py`（`_drafts_fingerprint` 递归指纹、`_files_from_tree` 递归回退、`_same_as_online` 比对主文档与全部子文档、`skill_docs`、`save_skill` 兼容保留已有子文档）。
+- **运行时与聊天懒加载**：在 `runtime/tools.py` 与 `chat/agent.py` 统一扩展 `load_skill(name, names, doc, docs)`，实现 L1 主文档自动附带子文档索引、L2 按需懒加载单/多篇子文档，不新增第 13 个平台工具。
+- **接口与前端工作台**：扩展 `api/dto.py`（`docsCount`、`docPaths`）与 `api/routes_resources.py`（`GET/PUT/discard-draft/rollback` 读写 `docs`）；改造 `SkillsView.vue` 为三栏多文件 IDE（左侧可折叠目录树、新建/重命名/删除/一键复制相对链接、预览区点击相对 `.md` 链接跳转或一键创建、版本历史逐文件 Diff）。
+- **测试与文档**：新增 `tests/test_skill_docs.py`，同步更新 [skills/README.md](skills/README.md) 与 [architecture/deterministic-tools.md](architecture/deterministic-tools.md)。
+- **内置模板路由拆分**：将 `seed/skills/template-router/SKILL.md`（原 280 行）重构为精简 L1 分流总控 + `references/` 下 6 篇按业务族懒加载的参考文档（完整覆盖 `100`～`132` 全部 33 个在线模板，`validate_all` 保持 0 error / 0 warning），同步更新 [skills/template-router.md](skills/template-router.md) 与 `tests/test_migrated_seed.py`。
+
+## [2026-11-26] ingest | 新增一单多业务复合工单编排（方案 A）、可编辑汇总大模板、聊天紧凑小卡片与回退草稿自动清理
+
+- **编辑状态与草稿自愈修复**：在 `store/service.py` 全量资源（模板、Skill、API、系统提示词、汇总大模板）及 `rollback(..., mode="draft_only")` 统一接入 `_clear_draft_if_same_as_online`，内容改回与线上一致时自动清理冗余草稿并返回 `cleared: true`；前端 `stores/platform.ts` 与 `SettingsView.vue` 改用快照/语义深度比对消除回退后假脏态。
+- **多业务汇总大模板资源（`composite-template.md.j2`）**：新增 `domain/composite.py` 与内置 `seed/composite-template.md.j2`，纳入 `ResourceKind`、`store/layout.py`、`store/service.py` 与 `routes_resources.py`（`/api/v1/settings/composite-template*` 含实时样例预览），并在 `SettingsView.vue` 提供「汇总大模板」可视化 Jinja2 编辑器、实时预览与版本回退。
+- **并发复合编排与跨子项幂等缓存（`runtime/composite.py`）**：新增 `SharedGatewayClient`（跨子项 `asyncio.shield` 并发去重并统计 `cache_hits`）与 `CompositeRunner`（同一快照并发执行多商品 × 多模板、部分子项失败隔离、Jinja2 确定性拼装 + 可选大模型二次润色保留确定性原版），对外开放 `POST /api/v1/reports/composite` 与 `POST /api/v1/reports/composite/polish`。
+- **嵌入式聊天紧凑小卡片与多业务编排**：将 `ReportInlineCard.vue` 收敛为 ~84px 紧凑可点击摘要小卡片（点击弹出 `PreviewDialog` 查看全文）；扩展 `chat/{store,agent,manager,service}.py`、`routes_chat.py`（`POST /sessions` 支持 `items[]`，新增 `/composite-runs` 与 `/runs/{runId}/polish`）及前端 `CompositeRunDialog.vue`、`ChatEmbedApp.vue`、`ChatSimView.vue`（多商品列表与一键示例预设），保持 `embed.html` 零 `element-plus`/`codemirror` 依赖。
+- **测试与文档**：新增 `tests/test_composite.py`，同步更新 [components/api-and-auth.md](components/api-and-auth.md) 与 [components/chat-embed.md](components/chat-embed.md)。
+
+## [2026-11-26] ingest | 上游报告接口支持未传 `templateId` 自动调用 `template-router` 按最高置信度路由并填报
+
+- **两阶段同快照自动路由（`runtime/router.py` + `runtime/runner.py` + `runtime/composite.py`）**：新增无状态 `TemplateRouter`，与 `ChatAgent` 共享只读路由工具（`load_skill`、`list_templates`、`get_template`），在单次请求锁定的同一份 `(rev, ResourceSet)` 快照上优先加载 `template-router` Skill（L1 主文档 + L2 `references/*.md` 懒加载，未配置时自动回退 `list_templates` + `get_template`），按置信度（`高 > 中 > 低`）稳定排序并始终选用最高置信度在线模板直接执行填报（低置信度不阻塞）；同步支持 `POST /api/v1/reports`、`/reports/stream` 与 `/reports/composite`（各 `items[i].templateId`）省略或传 `null` 触发自动路由。
+- **接口响应、过程事件与前置失败边界**：`report_view` 补充 `templateName`，自动路由时额外返回 `routing`（显式传 `templateId` 时不附带，100% 向后兼容）；`detail_view`（`GET /api/v1/runs/{runId}`）透传 `routing`，SSE 过程事件在 `round=0` 新增 `route_started` / `route_completed` / `route_failed`；无可用在线模板、无有效在线候选或路由异常时返回 `422 TEMPLATE_ROUTE_FAILED`（附 `reason`、`candidates`），命中模板但缺少必填入参时返回 `400 INVALID_INPUT`（附 `templateId`、`templateName`、`routing`），两类前置失败均不写入 `RunStore`。
+- **文档与知识库同步**：同步更新 `docs/frontend-api-handoff.md`、[architecture/request-pipeline.md](architecture/request-pipeline.md)、[components/api-and-auth.md](components/api-and-auth.md)、[skills/template-router.md](skills/template-router.md) 与 [index.md](index.md)。
+
+## [2026-11-26] ingest | 新增模板 / 技能 / API 删除功能与五项治理保护规则
+
+- **后端存储、门禁与路由**：在 `store/cases.py` 新增 `CaseStore.delete_all`；在 `store/publisher.py` 允许删除/下线模板时将未修改 `template-router` 的 `ROUTER_TEMPLATE_NOT_FOUND` 转为 `warnings` 不阻塞（编辑发布 `template-router` 自身仍严格报错），且 `action="delete"` 同步清理残余草稿；在 `store/service.py` 新增 `ResourceInUseError`、`ResourceDeleteForbidden`、`delete_template`、`skill_template_references`、`delete_skill`、`api_skill_references`、`delete_api`；在 `routes_templates.py`、`routes_resources.py` 与 `main.py` 暴露 `DELETE /api/v1/templates/{tid}`、`DELETE /api/v1/skills/{sid}`、`DELETE /api/v1/apis/{name}` 及 `409 RESOURCE_IN_USE` / `400 SKILL_DELETE_FORBIDDEN` 异常映射。
+- **前端工作台与测试**：在 `platformApi.ts`、`stores/platform.ts`、`TemplatesListView.vue`、`SkillsView.vue`、`ApisView.vue` 补齐删除按钮、二次确认弹窗与禁用态原因提示；新增 `tests/test_resource_delete.py` 并同步 `docs/frontend-api-handoff.md` 与 [architecture/resource-release-and-store.md](architecture/resource-release-and-store.md)。
+
+## [2026-11-26] ingest | 新增全平台回归测试工作台（方案 B）与未绑定模板自动路由回归支持
+
+- **存储与执行引擎（`store/cases.py` + `store/layout.py` + `runtime/regression.py`）**：扩展 `CaseStore` 支持未绑定模板自动路由作用域 `cases/auto/`（`tid=None` / `scope="auto"`）、新增 `expectedTemplateId` / `lastMatchedTemplateId` 字段、`list_all()` 跨作用域聚合与 `move()` 迁移；新增 `RegressionStore`（落盘至 `DATA_DIR/regressions/`，默认保留最近 50 批）与 `RegressionRunner`（复用 `AgentRunner` + `TemplateRouter` 执行 `single`/`compare` 批量并发回归，计算路由偏差、期望值偏差与双版逐字段差异并回写用例状态）。
+- **后端路由与前端工作台（`api/routes_regression.py` + `RegressionView.vue` + `GlobalDrawers.vue`）**：新增 `/api/v1/regression/*`（用例 CRUD/迁移、`/adopt-baseline` 局部与全量基线采纳、`/run/stream` SSE 实时回归、`/batches*` 历史批次查询）；重构 `RegressionView.vue` 落地方案 B 双 Tab 工作台（用例列表 + 逐字段差异对比、自动路由与模板范围筛选、单版/双版模式切换、实时进度条、新建/编辑自动路由用例弹窗与差异抽屉快捷采纳/跳转运行详单）。
+- **测试与文档**：新增 `tests/test_regression.py`，同步更新 [architecture/resource-release-and-store.md](architecture/resource-release-and-store.md)、[components/api-and-auth.md](components/api-and-auth.md) 与 [components/workbench-frontend.md](components/workbench-frontend.md)。
+
+## [2026-11-26] ingest | Jinja2 AST 条件分支短路优化与运行记录单页离线 ChatUI 模拟回放 HTML 导出
+
+- **正文条件分支短路（`domain/jinja_env.py` + `runtime/prompt.py` + `seed/system-prompt.md`）**：新增 `body_field_conditions()` 静态解析正文 `if`/`elif` AST，结合枚举全覆盖过滤、自保护条件保护、循环局部变量隔离与跨字段说明依赖保护，在任务提示词中自动标注受条件保护字段及其触发条件，引导模型优先确定控制字段（如 `受理渠道`、`争议类型`），对未命中分支跳过专属 Skill 加载与接口查询并直接提交 `not_found`，全平台 30 个带条件模板自动受益。
+- **运行记录离线模拟回放 HTML 导出（`api/run_export.py` + `api/routes_system.py` + `RunsView.vue`）**：新增 `POST /api/v1/runs/export-html`（支持单条及最多 50 条多选打包为单个零外链离线 HTML），复刻 ChatUI 单栏对话流、自动路由卡片、可折叠 `.thinking-bar`（精简步骤 ↔ 原样运行记录动态回放、倍速/暂停/重播/跳过动画）、流式报告卡片、入参/单据浮层与字段证据弹窗；前端 `RunsView.vue` 列表页支持多选批量导出，详情页支持单条一键导出。
+- **测试与文档**：新增 `tests/test_run_export.py`，同步更新 [components/api-and-auth.md](components/api-and-auth.md) 与 [components/workbench-frontend.md](components/workbench-frontend.md)。

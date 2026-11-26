@@ -13,15 +13,19 @@ import json
 import re
 from datetime import datetime
 from typing import Any, Literal
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import yaml
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from .template import safe_regex_compile
 
-ConnectorType = Literal["unified-gateway-xml", "unified-gateway-json"]
+ConnectorType = Literal["unified-gateway-xml", "unified-gateway-json", "http"]
+HttpMethod = Literal["GET", "POST", "PUT", "DELETE", "PATCH"]
+HttpBodyType = Literal["json", "form", "text", "none"]
+HttpResponseFormat = Literal["auto", "json", "xml", "text"]
 RecordsMode = Literal["auto", "object", "list", "scalar", "none"]
 
 _PLACEHOLDER_RE = re.compile(r"\$\{([^}]+)\}")
@@ -97,19 +101,34 @@ class RecordsSpec(_Base):
 
 
 class SummarySpec(_Base):
-    """call_api 返回给模型的摘要大小。"""
+    """call_api 返回给模型的摘要大小（maxPreviewChars 为 -1 时表示不截断全文保留）。#Created By AiCoding(codex)"""
 
     maxPreviewChars: int = 60
     previewRows: int | None = None
+
+    @field_validator("maxPreviewChars")
+    @classmethod
+    def _validate_max_preview_chars(cls, val: int) -> int:
+        if val != -1 and val < 1:
+            raise ValueError("maxPreviewChars 须为正整数或 -1（-1 表示不限制预览字数）")
+        return val
 
 
 class ResponseSpec(_Base):
     """返回结构。"""
 
+    format: HttpResponseFormat = "auto"
     success: SuccessSpec | None = None
     noData: list[NoDataRule] = Field(default_factory=list)
     records: RecordsSpec = Field(default_factory=RecordsSpec)
     summary: SummarySpec = Field(default_factory=SummarySpec)
+
+    @field_validator("format", mode="before")
+    @classmethod
+    def _normalize_format(cls, val: Any) -> Any:
+        if val is None or (isinstance(val, str) and not val.strip()):
+            return "auto"
+        return val.strip().lower() if isinstance(val, str) else val
 
     @field_validator("noData", mode="before")
     @classmethod
@@ -129,15 +148,43 @@ class ApiContract(_Base):
     title: str = ""
     description: str = ""
     connector: ConnectorType = "unified-gateway-xml"
-    processCode: str
+    processCode: str = ""
+    method: HttpMethod = "POST"
+    url: str = ""
+    query: dict[str, Any] = Field(default_factory=dict)
+    bodyType: HttpBodyType = "json"
     timeoutMs: int = Field(default=10000, ge=100, le=120000)
     retry: RetrySpec = Field(default_factory=RetrySpec)
     idempotent: bool = True
     headers: dict[str, str] = Field(default_factory=dict)
     input: dict[str, Any] = Field(default_factory=lambda: {"type": "object", "properties": {}})
-    request: dict[str, Any] = Field(default_factory=dict)
+    request: Any = Field(default_factory=dict)
     response: ResponseSpec = Field(default_factory=ResponseSpec)
     _validator_cache: tuple[dict[str, Any], Draft202012Validator] | None = PrivateAttr(default=None)
+
+    @field_validator("processCode", "url", mode="before")
+    @classmethod
+    def _normalize_str_fields(cls, val: Any) -> Any:
+        return "" if val is None else str(val)
+
+    @field_validator("method", mode="before")
+    @classmethod
+    def _normalize_method(cls, val: Any) -> Any:
+        if val is None or (isinstance(val, str) and not val.strip()):
+            return "POST"
+        return val.strip().upper() if isinstance(val, str) else val
+
+    @field_validator("bodyType", mode="before")
+    @classmethod
+    def _normalize_body_type(cls, val: Any) -> Any:
+        if val is None or (isinstance(val, str) and not val.strip()):
+            return "json"
+        return val.strip().lower() if isinstance(val, str) else val
+
+    @field_validator("query", mode="before")
+    @classmethod
+    def _normalize_query(cls, val: Any) -> Any:
+        return {} if val is None else val
 
     @field_validator("response", mode="before")
     @classmethod
@@ -164,10 +211,25 @@ class ApiContract(_Base):
                 normalized[key] = v
         return normalized
 
+    @model_validator(mode="after")
+    def _check_connector_request_shape(self) -> ApiContract:
+        """统一网关契约保持 request 为字典对象，常规 HTTP 允许按 bodyType 使用对象/数组/文本/空值。#Created By AiCoding(codex)"""
+        if self.connector != "http":
+            if self.request is None:
+                self.request = {}
+            elif not isinstance(self.request, dict):
+                raise ValueError("统一网关接口契约的 request 必须是键值映射对象")
+        return self
+
     @property
     def is_json(self) -> bool:
         """是否为统一网关 JSON 协议连接器。"""
         return self.connector == "unified-gateway-json"
+
+    @property
+    def is_http(self) -> bool:
+        """是否为常规 HTTP 连接器（不经统一网关信封）。#Created By AiCoding(codex)"""
+        return self.connector == "http"
 
     def _get_validator(self) -> Draft202012Validator:
         """获取并按 input 字典引用缓存编译后的 JSON Schema 校验器，同时拦截高危 ReDoS 正则。#Created By AiCoding(codex)"""
@@ -187,10 +249,8 @@ class ApiContract(_Base):
         return validator
 
     def schema_errors(self) -> list[str]:
-        """检查 input 是否为合法的 JSON Schema，以及 request/headers 引用的参数与头部安全性。"""
+        """检查 input 是否为合法的 JSON Schema，以及 url/query/request/headers 引用参数与安全性。"""
         errors: list[str] = []
-        if not self.processCode.strip():
-            errors.append("processCode 不能为空")
         if not isinstance(self.input, dict):
             errors.append("input 不是合法的 JSON Schema：顶层必须是对象")
         else:
@@ -203,19 +263,50 @@ class ApiContract(_Base):
                     safe_regex_compile(pat)
                 except ValueError as exc:
                     errors.append(f"input.{pat_path} 的正则不合法：{exc}")
-        if not self.is_json:
-            for bad_tag in sorted(_collect_bad_xml_tags(self.request)):
-                errors.append(f"request 中包含非法的 XML 标签名：{bad_tag!r}")
+
+        if self.is_http:
+            errors.extend(_validate_http_url_template(self.url))
+            if any(k is None or not str(k).strip() for k in self.query):
+                errors.append("query 中包含空的参数名")
+            if self.bodyType == "json":
+                if self.request is not None and _has_empty_json_keys(self.request):
+                    errors.append("request 中包含空的 JSON 键名")
+            elif self.bodyType == "form":
+                if self.request is not None:
+                    if not isinstance(self.request, dict):
+                        errors.append("bodyType=form 时 request 必须是键值映射对象")
+                    elif any(k is None or not str(k).strip() for k in self.request):
+                        errors.append("bodyType=form 时 request 中包含空的表单键名")
+            elif self.bodyType == "text":
+                # 默认空字典 {} 视作未配置纯文本内容；其他非字符串类型报错
+                if self.request is not None and self.request != {} and not isinstance(self.request, str):
+                    errors.append("bodyType=text 时 request 必须是字符串")
         else:
-            if _has_empty_json_keys(self.request):
-                errors.append("request 中包含空的 JSON 键名")
+            if not self.processCode.strip():
+                errors.append("processCode 不能为空")
+            if not self.is_json:
+                for bad_tag in sorted(_collect_bad_xml_tags(self.request)):
+                    errors.append(f"request 中包含非法的 XML 标签名：{bad_tag!r}")
+            else:
+                if _has_empty_json_keys(self.request):
+                    errors.append("request 中包含空的 JSON 键名")
+
         errors.extend(_validate_headers_dict(self.headers))
         props_raw = self.input.get("properties") if isinstance(self.input, dict) else None
         declared = set(props_raw.keys()) if isinstance(props_raw, dict) else set()
         # #Created By AiCoding(codex) 以 $ 开头的名称是内置占位符：不需要（也不允许）在 input 中声明
         for key in sorted(k for k in declared if str(k).startswith("$")):
             errors.append(f"input 参数名 {key!r} 以 $ 开头，$ 开头的名称保留给内置占位符")
-        for where, node in (("request", self.request), ("headers", self.headers)):
+
+        placeholder_sources: list[tuple[str, Any]] = [("headers", self.headers)]
+        if self.is_http:
+            placeholder_sources.extend([("url", self.url), ("query", self.query)])
+            if self.bodyType != "none":
+                placeholder_sources.append(("request", self.request))
+        else:
+            placeholder_sources.insert(0, ("request", self.request))
+
+        for where, node in placeholder_sources:
             for ref in sorted(_collect_placeholders(node)):
                 if ref.startswith("$"):
                     if ref not in BUILTIN_PLACEHOLDERS:
@@ -240,19 +331,71 @@ class ApiContract(_Base):
             errors.append(f"{where}：{err.message}")
         return errors
 
-    def build_request(self, args: dict[str, Any]) -> dict[str, Any]:
+    def build_request(self, args: dict[str, Any]) -> Any:
         """把 request 模板中的 ${参数} 替换为实际值（只替换字符串，不执行任何表达式）；${$now} 等内置占位符同时替换。"""
         return _substitute(self.request, _with_builtins(args))
 
-    def build_preview_request(self, args: dict[str, Any] | None = None) -> dict[str, Any]:
+    def build_preview_request(self, args: dict[str, Any] | None = None) -> Any:
         """把已提供的参数替换进 request，未提供的参数保留 ${参数名} 占位符供预览展示；内置占位符按当前时刻渲染。"""
         return _substitute(self.request, _with_builtins(args), keep_unresolved=True)
 
-    def build_headers(self, args: dict[str, Any] | None = None) -> dict[str, str]:
+    def build_query(self, args: dict[str, Any] | None = None, *, keep_unresolved: bool = False) -> dict[str, Any]:
+        """渲染 URL 查询参数字典（跳过值为 None 的可选参数）。#Created By AiCoding(codex)"""
+        if not self.query:
+            return {}
+        rendered = _substitute(self.query, _with_builtins(args), keep_unresolved=keep_unresolved)
+        if not isinstance(rendered, dict):
+            return {}
+        out: dict[str, Any] = {}
+        for k, v in rendered.items():
+            key = str(k).strip()
+            if not key or v is None:
+                continue
+            out[key] = v
+        return out
+
+    def build_url(self, args: dict[str, Any] | None = None, *, keep_unresolved: bool = False) -> str:
+        """渲染常规 HTTP 目标 URL 并合并 query 查询参数，拦截非法协议与控制字符。#Created By AiCoding(codex)"""
+        raw_tpl = self.url or ""
+        if _has_url_ctrl_chars(raw_tpl):
+            raise ValueError("HTTP 请求 URL 包含非法换行或控制字符")
+        raw_url = raw_tpl.strip()
+        if not raw_url:
+            raise ValueError("HTTP 接口 url 不能为空")
+        rendered_raw = str(_substitute(raw_url, _with_builtins(args), keep_unresolved=keep_unresolved))
+        if _has_url_ctrl_chars(rendered_raw):
+            raise ValueError("HTTP 请求 URL 包含非法换行或控制字符")
+        rendered_url = rendered_raw.strip()
+        if not rendered_url.lower().startswith(("http://", "https://")):
+            raise ValueError("HTTP 请求 URL 必须以 http:// 或 https:// 开头")
+        parsed = urlsplit(rendered_url)
+        if not parsed.hostname:
+            raise ValueError("HTTP 请求 URL 缺少合法主机名")
+        query_map = self.build_query(args, keep_unresolved=keep_unresolved)
+        if not query_map:
+            return rendered_url
+        pairs: list[tuple[str, str]] = []
+        for k, v in query_map.items():
+            if isinstance(v, list):
+                for item in v:
+                    if item is not None:
+                        pairs.append((k, _query_scalar_str(item)))
+            else:
+                pairs.append((k, _query_scalar_str(v)))
+        if not pairs:
+            return rendered_url
+        if keep_unresolved:
+            encoded_extra = "&".join(f"{k}={v}" for k, v in pairs)
+        else:
+            encoded_extra = urlencode(pairs, doseq=True)
+        merged_query = f"{parsed.query}&{encoded_extra}" if parsed.query else encoded_extra
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, merged_query, parsed.fragment))
+
+    def build_headers(self, args: dict[str, Any] | None = None, *, keep_unresolved: bool = False) -> dict[str, str]:
         """渲染并校验自定义安全请求头（拦截 CRLF 注入与受保护请求头覆盖）。"""
         if not self.headers:
             return {}
-        rendered_raw = _substitute(self.headers, _with_builtins(args))
+        rendered_raw = _substitute(self.headers, _with_builtins(args), keep_unresolved=keep_unresolved)
         rendered = {str(k).strip(): ("" if v is None else str(v)) for k, v in rendered_raw.items()}
         errs = _validate_headers_dict(rendered)
         if errs:
@@ -403,8 +546,42 @@ def parse_api_yaml(text: str) -> ApiContract:
     return ApiContract.model_validate(data)
 
 
-def fixed_params(request: dict[str, Any], prefix: str = "") -> list[dict[str, str]]:
+def _has_url_ctrl_chars(url: str) -> bool:
+    """检查 URL 中是否包含换行符、空字节或其他 ASCII 控制字符。#Created By AiCoding(codex)"""
+    return any(ch in ("\r", "\n", "\x00") or ord(ch) < 32 or ord(ch) == 127 for ch in url)
+
+
+def _validate_http_url_template(url: str) -> list[str]:
+    """静态校验常规 HTTP 接口的 URL 模板（支持路径/查询参数含 ${参数} 占位符）。#Created By AiCoding(codex)"""
+    raw = url or ""
+    if _has_url_ctrl_chars(raw):
+        return ["HTTP 接口 url 包含非法换行或控制字符"]
+    clean = raw.strip()
+    if not clean:
+        return ["HTTP 接口 url 不能为空"]
+    if not clean.lower().startswith(("http://", "https://")):
+        return ["HTTP 接口 url 必须以 http:// 或 https:// 开头"]
+    # 校验主机名时将占位符临时替换为安全字面量，避免 urlsplit 把 ${host} 当成非法字符
+    probe = _PLACEHOLDER_RE.sub("placeholder", clean)
+    parsed = urlsplit(probe)
+    if not parsed.hostname:
+        return ["HTTP 接口 url 缺少合法主机名"]
+    return []
+
+
+def _query_scalar_str(val: Any) -> str:
+    """把 query 参数值转为字符串：布尔值保持 true/false，结构化对象转紧凑 JSON。#Created By AiCoding(codex)"""
+    if isinstance(val, bool):
+        return "true" if val else "false"
+    if isinstance(val, (dict, list)):
+        return json.dumps(val, ensure_ascii=False, separators=(",", ":"))
+    return str(val)
+
+
+def fixed_params(request: Any, prefix: str = "") -> list[dict[str, str]]:
     """列出 request 模板中不引用参数的固定值（管理端展示用）。"""
+    if not isinstance(request, dict):
+        return []
     result: list[dict[str, str]] = []
     for key, val in request.items():
         name = f"{prefix}{key}"

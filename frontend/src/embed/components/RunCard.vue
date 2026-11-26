@@ -53,6 +53,7 @@ const emit = defineEmits<{
   (e: 'openPreview', run: RunMessage, mode: ReportViewMode): void
   (e: 'switchTemplate'): void
   (e: 'rerun', run: RunMessage): void
+  (e: 'polish', run: RunMessage): void
   (e: 'confirm', run: RunMessage): void
 }>()
 
@@ -166,7 +167,8 @@ async function onCopyRunId() {
 
           <span class="tb-sep">·</span>
           <span class="tb-tpl">
-            <span class="mono">#{{ message.templateId }}</span>
+            <span v-if="message.isComposite" class="tb-composite-pill">复合汇总</span>
+            <span v-else class="mono">#{{ message.templateId }}</span>
             <span>{{ message.templateName }}</span>
           </span>
 
@@ -327,6 +329,7 @@ async function onCopyRunId() {
       @open-preview="mode => emit('openPreview', message, mode)"
       @switch-template="emit('switchTemplate')"
       @rerun="emit('rerun', message)"
+      @polish="emit('polish', message)"
       @confirm="emit('confirm', message)"
     />
   </div>
@@ -441,6 +444,15 @@ async function onCopyRunId() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.tb-composite-pill {
+  padding: 0 5px;
+  border-radius: 4px;
+  background: #e0e7ff;
+  color: #3730a3;
+  font-size: 10.5px;
+  font-weight: 600;
+  flex-shrink: 0;
 }
 .tb-meta {
   color: var(--gpt-ink-muted);

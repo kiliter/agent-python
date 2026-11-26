@@ -32,12 +32,29 @@ const selectedSkillIds = ref<string[]>([])
 const newSkillId = ref('')
 const newSkillName = ref('')
 const newSkillDesc = ref('')
+const newSkillScope = ref<'template' | 'global' | 'chat'>('template')
 const newSkillApis = ref<string[]>([])
+
+/** 模板“选择技能”弹窗中可勾选的技能（排除聊天专用；已设为全局填报的仅在历史误绑时显示以便取消） */
+const bindableTemplateSkills = computed(() =>
+  store.skills.filter(s => {
+    const sc = s.scope || (s.id === 'template-router' ? 'chat' : 'template')
+    if (sc === 'template') return true
+    return selectedSkillIds.value.includes(s.id)
+  }),
+)
+
+/** 全局自动生效的填报技能（所有模板自动持有，无需逐模板勾选） */
+const globalReportSkills = computed(() =>
+  store.skills.filter(s => s.scope === 'global'),
+)
 
 const newApiName = ref('')
 const newApiTitle = ref('')
 const newApiDesc = ref('')
 const newApiConnector = ref<ApiConnector>('unified-gateway-xml')
+const newApiMethod = ref<'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH'>('POST')
+const newApiUrl = ref('')
 
 /** 发布校验的错误（阻止发布） */
 const publishErrors = computed<ValidationIssue[]>(() => store.templateValidation?.errors || [])
@@ -120,12 +137,15 @@ watch(
       newSkillId.value = ''
       newSkillName.value = ''
       newSkillDesc.value = ''
+      newSkillScope.value = 'template'
       newSkillApis.value = []
     } else if (modal === 'new-api') {
       newApiName.value = ''
       newApiTitle.value = ''
       newApiDesc.value = ''
       newApiConnector.value = 'unified-gateway-xml'
+      newApiMethod.value = 'POST'
+      newApiUrl.value = ''
     }
   },
   { immediate: true },
@@ -270,7 +290,13 @@ function handleCreateNewSkill() {
     store.showToast(`技能标识 ${id} 已存在`, 'warning')
     return
   }
-  void store.createNewSkill(id, name, newSkillDesc.value.trim(), [...newSkillApis.value])
+  void store.createNewSkill(
+    id,
+    name,
+    newSkillDesc.value.trim(),
+    newSkillScope.value === 'chat' ? [] : [...newSkillApis.value],
+    newSkillScope.value,
+  )
 }
 
 /** 新建 API */
@@ -287,6 +313,18 @@ function handleCreateNewApi() {
   }
   if (store.apis.some(a => a.name === name)) {
     store.showToast(`接口 ${name} 已存在`, 'warning')
+    return
+  }
+  if (newApiConnector.value === 'http') {
+    const rawUrl = newApiUrl.value.trim()
+    if (rawUrl && !/^https?:\/\//i.test(rawUrl)) {
+      store.showToast('请求地址 URL 须以 http:// 或 https:// 开头', 'warning')
+      return
+    }
+    void store.createNewApi(name, title, newApiDesc.value.trim(), 'http', {
+      method: newApiMethod.value,
+      url: rawUrl || undefined,
+    })
     return
   }
   void store.createNewApi(name, title, newApiDesc.value.trim(), newApiConnector.value)
@@ -723,16 +761,40 @@ async function handleSaveAndLeave() {
       </div>
       <div class="modal-body">
         <div style="font-size: 12px; color: var(--text-secondary)">
-          模型只能加载这里勾选的技能。修改后需保存草稿才会生效。
+          勾选需要单独绑定到本模板的技能（<code class="mono">scope: template</code>）。修改后需保存草稿才会生效。
         </div>
         <div
-          v-if="store.skills.length === 0"
+          v-if="globalReportSkills.length > 0"
+          style="
+            padding: 8px 10px;
+            border-radius: 6px;
+            background: rgba(7, 136, 85, 0.08);
+            border: 1px solid rgba(7, 136, 85, 0.25);
+            font-size: 12px;
+          "
+        >
+          <div style="font-weight: 600; color: var(--success); margin-bottom: 4px">
+            已全局自动生效（无需勾选 · {{ globalReportSkills.length }} 个）
+          </div>
+          <div style="display: flex; flex-wrap: wrap; gap: 6px">
+            <span
+              v-for="gs in globalReportSkills"
+              :key="gs.id"
+              class="gm-proto-badge is-json"
+              :title="gs.description"
+            >
+              {{ gs.name }} ({{ gs.id }})
+            </span>
+          </div>
+        </div>
+        <div
+          v-if="bindableTemplateSkills.length === 0"
           style="font-size: 12.5px; color: var(--text-secondary); padding: 12px 0; text-align: center"
         >
-          还没有技能，请先在「技能」页新建。
+          暂无可按模板绑定的技能，可前往「技能」页新建。
         </div>
         <label
-          v-for="s in store.skills"
+          v-for="s in bindableTemplateSkills"
           :key="s.id"
           style="
             display: flex;
@@ -750,12 +812,14 @@ async function handleSaveAndLeave() {
             style="margin-top: 3px"
             @change="toggleSelectedSkill(s.id)"
           />
-          <div>
-            <div style="font-weight: 600">
-              {{ s.name }}
+          <div style="min-width: 0; flex: 1">
+            <div style="display: flex; align-items: center; gap: 6px; font-weight: 600">
+              <span>{{ s.name }}</span>
               <span class="mono" style="font-weight: 400; color: var(--text-secondary)">
                 ({{ s.id }})
               </span>
+              <span v-if="s.scope === 'global'" class="gm-proto-badge is-json">全局(可取消冗余绑定)</span>
+              <span v-else-if="s.scope === 'chat'" class="gm-proto-badge is-http">聊天专用(建议取消)</span>
             </div>
             <div style="font-size: 12px; color: var(--text-secondary)">{{ s.description }}</div>
           </div>
@@ -847,12 +911,58 @@ async function handleSaveAndLeave() {
     class="modal-backdrop"
     @click="store.closeModal()"
   >
-    <div class="modal-dialog" style="width: 480px" @click.stop>
+    <div class="modal-dialog" style="width: min(620px, 94vw)" @click.stop>
       <div class="modal-header">
         <div class="modal-title">新建技能</div>
         <button class="btn btn-sm" @click="store.closeModal()">✕</button>
       </div>
       <div class="modal-body">
+        <div>
+          <label style="display: block; font-size: 12px; font-weight: 600; margin-bottom: 6px">
+            技能作用域 (scope) *
+          </label>
+          <div class="gm-proto-grid">
+            <label class="gm-proto-card" :class="{ 'is-active': newSkillScope === 'template' }">
+              <div class="gm-proto-card-head">
+                <div class="gm-proto-card-title-row">
+                  <input v-model="newSkillScope" type="radio" value="template" />
+                  <span class="gm-proto-card-title">绑定模板</span>
+                </div>
+                <span class="gm-proto-badge is-xml">template</span>
+              </div>
+              <div class="gm-proto-card-desc">
+                仅对显式勾选了该技能的填报模板生效（如短信、余额、靓号等专项技能）
+              </div>
+            </label>
+
+            <label class="gm-proto-card" :class="{ 'is-active': newSkillScope === 'global' }">
+              <div class="gm-proto-card-head">
+                <div class="gm-proto-card-title-row">
+                  <input v-model="newSkillScope" type="radio" value="global" />
+                  <span class="gm-proto-card-title">全局填报</span>
+                </div>
+                <span class="gm-proto-badge is-json">global</span>
+              </div>
+              <div class="gm-proto-card-desc">
+                所有填报模板自动持有，无需逐个模板绑定（如查询单据正文等通用能力）
+              </div>
+            </label>
+
+            <label class="gm-proto-card" :class="{ 'is-active': newSkillScope === 'chat' }">
+              <div class="gm-proto-card-head">
+                <div class="gm-proto-card-title-row">
+                  <input v-model="newSkillScope" type="radio" value="chat" />
+                  <span class="gm-proto-card-title">聊天专用</span>
+                </div>
+                <span class="gm-proto-badge is-http">chat</span>
+              </div>
+              <div class="gm-proto-card-desc">
+                仅供聊天选模板助手使用，不可绑定业务 API，不参与报告填报
+              </div>
+            </label>
+          </div>
+        </div>
+
         <div>
           <label style="display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px">
             技能唯一标识 (英文 kebab-case) *
@@ -887,7 +997,7 @@ async function handleSaveAndLeave() {
             placeholder="简述该技能解决的核查判断场景…"
           ></textarea>
         </div>
-        <div>
+        <div v-if="newSkillScope !== 'chat'">
           <label style="display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px">
             可调用的 API 接口
           </label>
@@ -922,9 +1032,21 @@ async function handleSaveAndLeave() {
               />
               <span
                 class="gm-proto-badge"
-                :class="a.format === 'JSON' || a.connector === 'unified-gateway-json' ? 'is-json' : 'is-xml'"
+                :class="
+                  a.connector === 'http' || a.format === 'HTTP'
+                    ? 'is-http'
+                    : a.format === 'JSON' || a.connector === 'unified-gateway-json'
+                      ? 'is-json'
+                      : 'is-xml'
+                "
               >
-                {{ a.format === 'JSON' || a.connector === 'unified-gateway-json' ? 'JSON' : 'XML' }}
+                {{
+                  a.connector === 'http' || a.format === 'HTTP'
+                    ? 'HTTP'
+                    : a.format === 'JSON' || a.connector === 'unified-gateway-json'
+                      ? 'JSON'
+                      : 'XML'
+                }}
               </span>
               <span class="mono">{{ a.name }}</span>
               <span style="color: var(--text-secondary)">{{ a.title }}</span>
@@ -945,7 +1067,7 @@ async function handleSaveAndLeave() {
     class="modal-backdrop"
     @click="store.closeModal()"
   >
-    <div class="modal-dialog" style="width: 540px" @click.stop>
+    <div class="modal-dialog" style="width: min(660px, 94vw)" @click.stop>
       <div class="modal-header">
         <div class="modal-title">新建 API</div>
         <button class="btn btn-sm" @click="store.closeModal()">✕</button>
@@ -967,7 +1089,7 @@ async function handleSaveAndLeave() {
                     type="radio"
                     value="unified-gateway-xml"
                   />
-                  <span class="gm-proto-card-title">统一网关 · XML 报文</span>
+                  <span class="gm-proto-card-title">统一网关</span>
                 </div>
                 <span class="gm-proto-badge is-xml">XML</span>
               </div>
@@ -987,7 +1109,7 @@ async function handleSaveAndLeave() {
                     type="radio"
                     value="unified-gateway-json"
                   />
-                  <span class="gm-proto-card-title">统一网关 · JSON 报文</span>
+                  <span class="gm-proto-card-title">统一网关</span>
                 </div>
                 <span class="gm-proto-badge is-json">JSON</span>
               </div>
@@ -995,21 +1117,69 @@ async function handleSaveAndLeave() {
                 按 <code class="mono">operation_in</code> JSON 对象封装请求并按点分路径解析返回记录
               </div>
             </label>
+
+            <label
+              class="gm-proto-card"
+              :class="{ 'is-active': newApiConnector === 'http' }"
+            >
+              <div class="gm-proto-card-head">
+                <div class="gm-proto-card-title-row">
+                  <input
+                    v-model="newApiConnector"
+                    type="radio"
+                    value="http"
+                  />
+                  <span class="gm-proto-card-title">常规 HTTP</span>
+                </div>
+                <span class="gm-proto-badge is-http">HTTP</span>
+              </div>
+              <div class="gm-proto-card-desc">
+                不经统一网关信封，自定义 <code class="mono">URL</code>、Method、请求头、请求体并解析响应体
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <div v-if="newApiConnector === 'http'" style="display: grid; grid-template-columns: 112px 1fr; gap: 8px">
+          <div>
+            <label style="display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px">
+              请求方式
+            </label>
+            <select v-model="newApiMethod" class="input mono" style="width: 100%">
+              <option value="POST">POST</option>
+              <option value="GET">GET</option>
+              <option value="PUT">PUT</option>
+              <option value="DELETE">DELETE</option>
+              <option value="PATCH">PATCH</option>
+            </select>
+          </div>
+          <div>
+            <label style="display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px">
+              目标 URL（选填，创建后可编辑）
+            </label>
+            <input
+              v-model="newApiUrl"
+              class="input mono"
+              style="width: 100%"
+              placeholder="例如：https://api.example.com/v1/orders"
+            />
           </div>
         </div>
 
         <div>
           <label style="display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px">
-            接口编码 (processCode) *
+            {{ newApiConnector === 'http' ? '接口标识 (name) *' : '接口编码 (processCode) *' }}
           </label>
           <input
             v-model="newApiName"
             class="input mono"
             style="width: 100%"
             :placeholder="
-              newApiConnector === 'unified-gateway-json'
-                ? '例如：qryOrderCheckJson'
-                : '例如：qryRoamingTrafficInfo'
+              newApiConnector === 'http'
+                ? '例如：queryUserProfileHttp'
+                : newApiConnector === 'unified-gateway-json'
+                  ? '例如：qryOrderCheckJson'
+                  : '例如：qryRoamingTrafficInfo'
             "
           />
         </div>
@@ -1236,7 +1406,7 @@ async function handleSaveAndLeave() {
 
 .gm-proto-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -1244,6 +1414,7 @@ async function handleSaveAndLeave() {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-width: 0;
   padding: 10px 12px;
   border-radius: 6px;
   border: 1px solid var(--border-color);
@@ -1266,7 +1437,8 @@ async function handleSaveAndLeave() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
+  min-width: 0;
 }
 
 .gm-proto-card-title-row {
@@ -1274,6 +1446,12 @@ async function handleSaveAndLeave() {
   align-items: center;
   gap: 6px;
   min-width: 0;
+  flex: 1 1 auto;
+}
+
+.gm-proto-card-title-row input[type='radio'] {
+  flex-shrink: 0;
+  margin: 0;
 }
 
 .gm-proto-card-title {
@@ -1281,6 +1459,8 @@ async function handleSaveAndLeave() {
   font-weight: 600;
   color: var(--text-primary);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .gm-proto-card-desc {
@@ -1314,5 +1494,11 @@ async function handleSaveAndLeave() {
   color: var(--success);
   background-color: rgba(7, 136, 85, 0.12);
   border: 1px solid rgba(7, 136, 85, 0.36);
+}
+
+.gm-proto-badge.is-http {
+  color: #6d28d9;
+  background-color: rgba(124, 58, 237, 0.12);
+  border: 1px solid rgba(124, 58, 237, 0.34);
 }
 </style>

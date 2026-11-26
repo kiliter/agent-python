@@ -7,7 +7,11 @@ export type FieldType = '文本' | '枚举' | '日期' | '列表'
 // #Created By AiCoding(codex) 列表字段（type=列表）的列类型
 export type ColumnType = '文本' | '枚举'
 export type MissingStrategy = '保留占位' | '置空' | '默认值'
-export type ApiConnector = 'unified-gateway-xml' | 'unified-gateway-json'
+export type SkillScope = 'template' | 'global' | 'chat'
+export type ApiConnector = 'unified-gateway-xml' | 'unified-gateway-json' | 'http'
+export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH'
+export type HttpBodyType = 'json' | 'form' | 'text' | 'none'
+export type HttpResponseFormat = 'auto' | 'json' | 'xml' | 'text'
 export type ApiEditMode = 'form' | 'split' | 'yaml'
 export type NavKey =
   | 'login'
@@ -232,6 +236,7 @@ export interface SkillItem {
   id: string
   name: string
   description: string
+  scope?: SkillScope
   status: ResourceStatus
   baseRev?: string
   onlineRev?: string
@@ -241,6 +246,8 @@ export interface SkillItem {
   loads7d: number
   lastPublishedAt: string
   apis: string[]
+  docsCount?: number
+  docPaths?: string[]
   draftRevision?: number | null
 }
 
@@ -248,6 +255,7 @@ export interface SkillDetail {
   item: SkillItem
   version: string
   markdown: string
+  docs?: Record<string, string>
   draft: DraftMeta | null
 }
 
@@ -270,7 +278,10 @@ export interface ApiItem {
   description: string
   type: string
   connector?: ApiConnector
-  format?: 'XML' | 'JSON'
+  format?: 'XML' | 'JSON' | 'HTTP'
+  method?: HttpMethod | null
+  url?: string
+  bodyType?: HttpBodyType | null
   headers?: Record<string, string>
   idempotent?: boolean
   processCode?: string
@@ -305,7 +316,7 @@ export interface ApiTestCallResult {
   noData: boolean
   rawXml: string
   requestXml: string
-  format?: 'xml' | 'json'
+  format?: 'xml' | 'json' | 'http' | 'text'
   connector?: ApiConnector
   rawBody?: string
   requestBody?: string
@@ -317,7 +328,7 @@ export interface ApiValidateResult {
   ok: boolean
   errors: string[]
   connector?: ApiConnector
-  format?: 'xml' | 'json'
+  format?: 'xml' | 'json' | 'http'
   requestPreview?: string
 }
 
@@ -364,7 +375,30 @@ export interface ToolCallRecord {
   ok: boolean
 }
 
+export type AutoRouteConfidence = '高' | '中' | '低'
+
+export interface AutoRouteCandidate {
+  templateId: number
+  templateName?: string
+  level: AutoRouteConfidence
+  reason: string
+}
+
+export interface AutoRouteInfo {
+  auto: boolean
+  templateId: number
+  templateName: string
+  confidence: AutoRouteConfidence
+  reason: string
+  candidates?: AutoRouteCandidate[]
+  skillsLoaded?: string[]
+  durationMs?: number
+}
+
 export type ProcessEventType =
+  | 'route_started'
+  | 'route_completed'
+  | 'route_failed'
   | 'run_started'
   | 'model_request'
   | 'model_text'
@@ -391,15 +425,79 @@ export interface ProcessEvent {
   attempt?: number
   issues?: Array<{ field: string; message: string }>
   fields?: string[]
-  // run_failed
+  // run_failed / route_failed
   error?: string
-  // run_started
+  // run_started / route_*
   runId?: string
   templateId?: number
   templateName?: string
   rev?: string
   skills?: string[]
   apis?: string[]
+  // route_started / route_completed / route_failed
+  routerSkill?: string | null
+  confidence?: AutoRouteConfidence | string
+  reason?: string
+  candidates?: AutoRouteCandidate[]
+  durationMs?: number
+}
+
+export interface MissingFieldItemSummary {
+  name: string
+  visible: boolean
+  shown: boolean
+  whenMissing: string
+  hasDefaultFallback: boolean
+  validationFailed: boolean
+  retried: boolean
+  category: string
+  relatedApis: string[]
+  briefReason: string
+  reasoning: string
+  evidenceLabel: string
+  evidenceTarget: EvidenceTarget
+}
+
+export interface MissingFieldGroupSummary {
+  code: string
+  label: string
+  severity: 'danger' | 'warning' | 'info' | 'muted'
+  count: number
+  summary: string
+  fields: MissingFieldItemSummary[]
+}
+
+export interface MissingRootCauseItem {
+  code: string
+  severity: 'danger' | 'warning' | 'info' | 'muted'
+  title: string
+  detail: string
+  affectedCount: number
+  affectedFields: string[]
+}
+
+export interface MissingFieldsAiSummary {
+  text: string
+  generatedAt: string
+  generatedAtIso?: string
+  model: string
+  operator: string
+}
+
+export interface MissingFieldsSummary {
+  totalFields: number
+  foundCount: number
+  nonFoundCount: number
+  impactedCount: number
+  shownMissingCount: number
+  defaultFallbackCount: number
+  skippedCount: number
+  headline: string
+  rootCauses: MissingRootCauseItem[]
+  groups: MissingFieldGroupSummary[]
+  aiSummary: MissingFieldsAiSummary | null
+  plainText: string
+  cached?: boolean
 }
 
 export interface RunDetail {
@@ -431,9 +529,13 @@ export interface RunDetail {
   skillsLoaded: string[]
   validationRounds: Array<Array<{ field: string; message: string }>>
   model?: string
+  routing?: AutoRouteInfo | null
+  missingSummary?: MissingFieldsSummary | null
 }
 
 export interface RegressionDiff {
+  scope?: string
+  templateId?: number | null
   caseId: string
   caseName: string
   field: string
@@ -443,6 +545,98 @@ export interface RegressionDiff {
   evA: string
   evB: string
   note: string
+  runIdA?: string | null
+  runIdB?: string | null
+  kind?: 'route_mismatch' | 'route_diff' | 'field_diff' | 'expected_mismatch'
+}
+
+export interface GlobalRegressionCase {
+  scope: string
+  isAuto: boolean
+  templateId: number | null
+  templateName: string
+  id: string
+  name: string
+  source: string
+  expectedCount: string
+  expectedTemplateId: number | null
+  expectedTemplateName: string
+  lastMatchedTemplateId: number | null
+  lastMatchedTemplateName: string
+  lastResult: string
+  lastRunId: string | null
+  updatedAt: string
+  mobile: string
+  busiName: string
+  createTime: string
+  busiMonth: string
+  appealContent: string
+  inputs: Record<string, string>
+  documentText: string
+  expectedValues: Record<string, string>
+}
+
+export interface RegressionCaseResult {
+  scope: string
+  templateId: number | null
+  isAuto: boolean
+  caseId: string
+  caseName: string
+  expectedTemplateId: number | null
+  verdict: string
+  statusA: RunStatus | string
+  templateIdA: number | null
+  templateNameA: string
+  runIdA: string | null
+  foundA: number
+  totalA: number
+  durationMsA: number
+  errorA: string | null
+  routingA?: AutoRouteInfo | null
+  statusB?: RunStatus | string | null
+  templateIdB?: number | null
+  templateNameB?: string
+  runIdB?: string | null
+  foundB?: number
+  totalB?: number
+  durationMsB?: number
+  errorB?: string | null
+  diffCount: number
+  routeMismatch: boolean
+}
+
+export interface RegressionBatchSummary {
+  batchId: string
+  mode: 'single' | 'compare'
+  targetA: string
+  targetALabel: string
+  targetB: string | null
+  targetBLabel: string | null
+  operator: string
+  startedAt: string
+  finishedAt: string
+  durationMs: number
+  totalCases: number
+  executedCases: number
+  passedCases: number
+  diffCases: number
+  routeMismatchCases: number
+  failedCases: number
+  passRate: number
+  cancelled?: boolean
+}
+
+export interface RegressionBatchDetail extends RegressionBatchSummary {
+  results: RegressionCaseResult[]
+  diffs: RegressionDiff[]
+}
+
+export interface RegressionRunPayload {
+  cases: Array<{ scope: string; caseId: string }>
+  mode: 'single' | 'compare'
+  targetA: string
+  targetB?: string | null
+  maxConcurrency?: number
 }
 
 export interface ReleaseChange {
@@ -481,6 +675,24 @@ export interface SystemPromptState {
   draft: DraftMeta | null
   version?: string
   versionText?: string
+}
+
+export interface CompositeTemplateState {
+  templateText: string
+  status: ResourceStatus
+  onlineText: string
+  onlineRev: string | null
+  baseRev: string | null
+  draft: DraftMeta | null
+  defaultText?: string
+  version?: string
+  versionText?: string
+}
+
+export interface CompositeTemplatePreviewResult {
+  ok: boolean
+  error: string | null
+  rendered: string
 }
 
 export interface ModelInfo {

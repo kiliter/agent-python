@@ -15,10 +15,19 @@ import yaml
 from fastapi import APIRouter, Body, Depends, Query, Request
 from pydantic import BaseModel, Field, ValidationError
 
-from ..domain.api_contract import ApiContract, parse_api_yaml
+from ..domain.api_contract import ApiContract, ConnectorType, parse_api_yaml
+from ..domain.composite import (
+    COMPOSITE_TEMPLATE_FILE,
+    DEFAULT_COMPOSITE_TEMPLATE,
+    CompositeTemplateError,
+    render_composite_report,
+    sample_composite_context,
+    validate_composite_template,
+)
 from ..domain.resources import SYSTEM_PROMPT_FILE, validate_api
-from ..domain.skill import build_skill_markdown
+from ..domain.skill import SkillScope, build_skill_markdown
 from ..gateway import unified_xml
+from ..gateway.http_client import detect_http_response_format
 from ..store.fsutil import fmt_time
 from ..store.layout import API_NAME_RE, REV_RE, SKILL_ID_RE
 from ..store.runtime_config import (
@@ -27,7 +36,7 @@ from ..store.runtime_config import (
     mask_api_keys,
     split_api_keys,
 )
-from ..store.service import SP_REF, InvalidResource, api_ref, skill_ref
+from ..store.service import CT_REF, SP_REF, InvalidResource, api_ref, skill_ref
 from .auth import require_user
 from .common import (
     PublishBody,
@@ -107,6 +116,7 @@ class CreateSkillBody(BaseModel):
     id: str
     name: str
     description: str = ""
+    scope: SkillScope = "template"
     apis: list[str] = Field(default_factory=list)
 
 
@@ -116,7 +126,9 @@ def create_skill(request: Request, body: CreateSkillBody) -> dict[str, Any]:
     _check_skill_id(body.id)
     if c.drafts.exists(skill_ref(body.id)) or c.service.skill_online(body.id) is not None:
         raise bad_request(f"Skill {body.id} 已存在", "SKILL_EXISTS")
-    md = build_skill_markdown(body.id, body.name.strip() or body.id, body.description, body.apis)
+    if body.scope == "chat" and body.apis:
+        raise bad_request("聊天助手专用 Skill（scope: chat）不允许声明业务网关接口", "CHAT_SKILL_HAS_APIS")
+    md = build_skill_markdown(body.id, body.name.strip() or body.id, body.description, body.apis, scope=body.scope)
     c.service.save_skill(body.id, md, operator(request), action="create")
     return _skill_item(request, body.id)
 
@@ -128,11 +140,19 @@ def get_skill(request: Request, sid: str, version: str = Query("working")) -> di
     md = c.service.skill_markdown(sid, version)
     if md is None:
         raise not_found(f"Skill {sid} 没有 {version} 版本")
-    return {"item": _skill_item(request, sid), "version": version, "markdown": md, "draft": c.drafts.meta(skill_ref(sid))}
+    docs = c.service.skill_docs(sid, version)
+    return {
+        "item": _skill_item(request, sid),
+        "version": version,
+        "markdown": md,
+        "docs": docs if docs is not None else {},
+        "draft": c.drafts.meta(skill_ref(sid)),
+    }
 
 
 class SkillDraftBody(BaseModel):
     markdown: str
+    docs: dict[str, str] | None = None
     revision: Any = None
 
 
@@ -143,9 +163,19 @@ def save_skill_draft(request: Request, sid: str, body: SkillDraftBody) -> dict[s
     c = container(request)
     if not c.drafts.exists(skill_ref(sid)) and c.service.skill_online(sid) is None:
         raise not_found(f"Skill {sid} 不存在")
-    meta = c.service.save_skill(sid, body.markdown, operator(request), expected_revision=expected_rev)
+    meta = c.service.save_skill(
+        sid, body.markdown, operator(request), expected_revision=expected_rev, docs=body.docs
+    )
     issues = c.service.validate_skill_working(sid)
-    return {"savedAt": fmt_time(meta["updatedAt"]), "draft": meta, "issues": [i.to_dict() for i in issues]}
+    docs = c.service.skill_docs(sid, "working") or {}
+    cleared = bool(meta.get("cleared"))
+    return {
+        "savedAt": fmt_time(meta["updatedAt"]),
+        "draft": None if cleared else meta,
+        "cleared": cleared,
+        "docs": docs,
+        "issues": [i.to_dict() for i in issues],
+    }
 
 
 @router.post("/skills/{sid}/discard-draft")
@@ -156,7 +186,11 @@ def discard_skill_draft(request: Request, sid: str) -> dict[str, Any]:
     online = c.service.skill_online(sid)
     if not had_draft and online is None:
         raise not_found(f"Skill {sid} 不存在")
-    return {"markdown": online.markdown if online else None, "deleted": online is None}
+    return {
+        "markdown": online.markdown if online else None,
+        "docs": dict(online.docs) if online else {},
+        "deleted": online is None,
+    }
 
 
 @router.post("/skills/{sid}/validate")
@@ -200,13 +234,35 @@ def skill_revisions(request: Request, sid: str) -> list[dict[str, Any]]:
     return revs
 
 
+class DeleteReasonBody(BaseModel):
+    reason: str = ""
+
+
 @router.post("/skills/{sid}/rollback")
 def rollback_skill(request: Request, sid: str, body: RollbackBody) -> dict[str, Any]:
     _check_skill_id(sid)
     check_rollback_reason(body)
     c = container(request)
     result = c.service.rollback(skill_ref(sid), body.targetRev, body.mode, body.reason, operator(request))
-    return {**result, "item": _skill_item(request, sid), "markdown": c.service.skill_markdown(sid)}
+    return {
+        **result,
+        "item": _skill_item(request, sid),
+        "markdown": c.service.skill_markdown(sid),
+        "docs": c.service.skill_docs(sid) or {},
+    }
+
+
+@router.delete("/skills/{sid}")
+def delete_skill(
+    request: Request,
+    sid: str,
+    reason: str = Query(""),
+    body: DeleteReasonBody | None = Body(default=None),
+) -> dict[str, Any]:
+    """删除技能（仅允许删除 scope=template 且未被任何模板关联的技能）。#Created By AiCoding(codex)"""
+    _check_skill_id(sid)
+    eff_reason = (body.reason if body and body.reason else reason).strip()
+    return container(request).service.delete_skill(sid, operator(request), eff_reason)
 
 
 # ============================================================================ 接口
@@ -248,18 +304,55 @@ class CreateApiBody(BaseModel):
     title: str
     description: str = ""
     processCode: str | None = None
-    connector: Literal["unified-gateway-xml", "unified-gateway-json"] = "unified-gateway-xml"
-    format: Literal["xml", "json", "XML", "JSON"] | None = None
+    connector: ConnectorType = "unified-gateway-xml"
+    format: Literal["xml", "json", "http", "XML", "JSON", "HTTP"] | None = None
+    method: Literal["GET", "POST", "PUT", "DELETE", "PATCH", "get", "post", "put", "delete", "patch"] | None = None
+    url: str | None = None
+    bodyType: Literal["json", "form", "text", "none", "JSON", "FORM", "TEXT", "NONE"] | None = None
 
 
 def _resolve_connector(body: CreateApiBody) -> str:
     if body.format is not None:
-        return "unified-gateway-json" if body.format.lower() == "json" else "unified-gateway-xml"
+        low = body.format.lower()
+        if low == "http":
+            return "http"
+        return "unified-gateway-json" if low == "json" else "unified-gateway-xml"
     return body.connector
 
 
 def _new_api_yaml(body: CreateApiBody) -> str:
     connector = _resolve_connector(body)
+    if connector == "http":
+        method = (body.method or "POST").upper()
+        url = (body.url or "").strip() or "https://api.example.com/v1/resource"
+        body_type = (body.bodyType or ("none" if method in ("GET", "DELETE") else "json")).lower()
+        data: dict[str, Any] = {
+            "name": body.name,
+            "title": body.title.strip() or body.name,
+            "description": body.description,
+            "connector": "http",
+            "method": method,
+            "url": url,
+            "bodyType": body_type,
+            "timeoutMs": 10000,
+            "retry": {"maxAttempts": 1},
+            "idempotent": True,
+            "headers": {},
+            "query": {},
+            "input": {
+                "type": "object",
+                "required": [],
+                "additionalProperties": False,
+                "properties": {},
+            },
+            "request": "" if body_type == "text" else {},
+            "response": {
+                "format": "auto",
+                "records": {"mode": "auto", "path": "", "columns": {}},
+                "summary": {"maxPreviewChars": 60},
+            },
+        }
+        return yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=1000)
     data = {
         "name": body.name,
         "title": body.title.strip() or body.name,
@@ -332,13 +425,27 @@ def save_api_draft(request: Request, name: str, body: ApiDraftBody) -> dict[str,
         if not isinstance(data, dict):
             raise bad_request("当前接口 YAML 顶层结构必须是映射对象")
         patch = body.api or {}
-        for key in ("title", "description", "processCode"):
+        for key in ("title", "description", "processCode", "url"):
             if key in patch and patch[key] is not None:
                 data[key] = str(patch[key])
-        if patch.get("connector") in ("unified-gateway-xml", "unified-gateway-json"):
+        if patch.get("connector") in ("unified-gateway-xml", "unified-gateway-json", "http"):
             data["connector"] = patch["connector"]
-        elif isinstance(patch.get("format"), str) and patch["format"].lower() in ("xml", "json"):
-            data["connector"] = "unified-gateway-json" if patch["format"].lower() == "json" else "unified-gateway-xml"
+        elif isinstance(patch.get("format"), str) and patch["format"].lower() in ("xml", "json", "http"):
+            low_fmt = patch["format"].lower()
+            if low_fmt == "http":
+                data["connector"] = "http"
+            else:
+                data["connector"] = "unified-gateway-json" if low_fmt == "json" else "unified-gateway-xml"
+        if isinstance(patch.get("method"), str) and patch["method"].strip().upper() in (
+            "GET", "POST", "PUT", "DELETE", "PATCH"
+        ):
+            data["method"] = patch["method"].strip().upper()
+        if isinstance(patch.get("bodyType"), str) and patch["bodyType"].strip().lower() in (
+            "json", "form", "text", "none"
+        ):
+            data["bodyType"] = patch["bodyType"].strip().lower()
+        if isinstance(patch.get("query"), dict):
+            data["query"] = {str(k): v for k, v in patch["query"].items() if v is not None}
         if isinstance(patch.get("headers"), dict):
             data["headers"] = {str(k): str(v) for k, v in patch["headers"].items() if v is not None}
         if "idempotent" in patch and patch["idempotent"] is not None:
@@ -369,7 +476,8 @@ def save_api_draft(request: Request, name: str, body: ApiDraftBody) -> dict[str,
         meta = c.service.save_api(name, text, operator(request), expected_revision=expected_rev)
     except ValueError as exc:
         raise bad_request(f"接口 YAML 无法解析：{exc}") from exc
-    return {"savedAt": fmt_time(meta["updatedAt"]), "draft": meta}
+    cleared = bool(meta.get("cleared"))
+    return {"savedAt": fmt_time(meta["updatedAt"]), "draft": None if cleared else meta, "cleared": cleared}
 
 
 @router.post("/apis/{name}/discard-draft")
@@ -381,6 +489,19 @@ def discard_api_draft(request: Request, name: str) -> dict[str, Any]:
     if not had_draft and online is None:
         raise not_found(f"接口 {name} 不存在")
     return {"yamlText": c.service.api_yaml(name, "online"), "deleted": online is None}
+
+
+@router.delete("/apis/{name}")
+def delete_api(
+    request: Request,
+    name: str,
+    reason: str = Query(""),
+    body: DeleteReasonBody | None = Body(default=None),
+) -> dict[str, Any]:
+    """删除 API（要求没有任何技能关联，含全局技能与聊天技能）。#Created By AiCoding(codex)"""
+    _check_api_name(name)
+    eff_reason = (body.reason if body and body.reason else reason).strip()
+    return container(request).service.delete_api(name, operator(request), eff_reason)
 
 
 @router.post("/apis/{name}/publish")
@@ -434,18 +555,28 @@ class ApiValidateBody(BaseModel):
 def _guess_connector_from_text(yaml_text: str) -> str:
     try:
         raw = yaml.safe_load(yaml_text)
-        if isinstance(raw, dict) and raw.get("connector") == "unified-gateway-json":
-            return "unified-gateway-json"
+        if isinstance(raw, dict):
+            conn = raw.get("connector")
+            if conn in ("unified-gateway-json", "http"):
+                return str(conn)
     except Exception:  # noqa: BLE001
         pass
+    if re.search(r"^\s*connector\s*:\s*['\"]?http['\"]?\s*$", yaml_text, re.MULTILINE):
+        return "http"
     if re.search(r"^\s*connector\s*:\s*['\"]?unified-gateway-json['\"]?\s*$", yaml_text, re.MULTILINE):
         return "unified-gateway-json"
     return "unified-gateway-xml"
 
 
+def _connector_format_code(conn: str) -> str:
+    if conn == "http":
+        return "http"
+    return "json" if conn == "unified-gateway-json" else "xml"
+
+
 @router.post("/apis/{name}/validate")
 def validate_api_contract(request: Request, name: str, body: ApiValidateBody | None = None) -> dict[str, Any]:
-    """校验接口契约 YAML（含语法/结构/占位符）并生成脱敏 XML/JSON 请求预览报文。"""
+    """校验接口契约 YAML（含语法/结构/占位符）并生成脱敏 XML/JSON/HTTP 请求预览报文。"""
     _check_api_name(name)
     c = container(request)
     yaml_text = body.yamlText if body is not None else None
@@ -463,7 +594,7 @@ def validate_api_contract(request: Request, name: str, body: ApiValidateBody | N
             "ok": False,
             "errors": errs,
             "connector": conn,
-            "format": "json" if conn == "unified-gateway-json" else "xml",
+            "format": _connector_format_code(conn),
             "requestPreview": "",
         }
     except (yaml.YAMLError, ValueError) as exc:
@@ -472,7 +603,7 @@ def validate_api_contract(request: Request, name: str, body: ApiValidateBody | N
             "ok": False,
             "errors": [f"YAML 解析失败：{exc}"],
             "connector": conn,
-            "format": "json" if conn == "unified-gateway-json" else "xml",
+            "format": _connector_format_code(conn),
             "requestPreview": "",
         }
 
@@ -481,8 +612,7 @@ def validate_api_contract(request: Request, name: str, body: ApiValidateBody | N
         errors.append(f"YAML 中 name={api.name} 必须与接口编码 {name} 一致")
     errors.extend(i.message for i in validate_api(api))
 
-    is_json = bool(getattr(api, "is_json", api.connector == "unified-gateway-json"))
-    fmt = "json" if is_json else "xml"
+    fmt = _connector_format_code(api.connector)
     preview = ""
     preview_fn = getattr(unified_xml, "build_request_preview", None)
     try:
@@ -543,8 +673,11 @@ async def test_call(request: Request, name: str, body: TestCallBody) -> dict[str
     c = container(request)
     api = await asyncio.to_thread(_prepare_test_call_api, c, name, body)
     res = await c.gateway.invoke(api, body.params)
-    is_json = bool(getattr(api, "is_json", api.connector == "unified-gateway-json"))
-    fmt = "json" if is_json else "xml"
+    if getattr(api, "is_http", api.connector == "http"):
+        fmt = detect_http_response_format(api, res.raw) if res.raw else "http"
+    else:
+        is_json = bool(getattr(api, "is_json", api.connector == "unified-gateway-json"))
+        fmt = "json" if is_json else "xml"
     op = operator(request)
     await asyncio.to_thread(
         c.publisher.audit,
@@ -612,9 +745,9 @@ def save_system_prompt(request: Request, body: SysPromptBody) -> dict[str, Any]:
     c = container(request)
     if body.sysPromptText is None:
         raise bad_request("sysPromptText 不能为空")
-    c.service.save_system_prompt(body.sysPromptText, operator(request), expected_rev)
+    meta = c.service.save_system_prompt(body.sysPromptText, operator(request), expected_rev)
     sp = _sp_state(request)
-    return {"status": sp["sysPromptStatus"], **sp}
+    return {"status": sp["sysPromptStatus"], "cleared": bool(meta.get("cleared")), **sp}
 
 
 @router.post("/settings/system-prompt/publish")
@@ -654,6 +787,117 @@ def rollback_system_prompt(request: Request, body: RollbackBody) -> dict[str, An
 @router.get("/settings/system-prompt/revisions")
 def system_prompt_revisions(request: Request) -> list[dict[str, Any]]:
     return resource_revisions(container(request), SP_REF)
+
+
+# ============================================================================ 汇总大模板（复合工单）
+def _ct_state(request: Request) -> dict[str, Any]:
+    c = container(request)
+    state = c.service.state(CT_REF)
+    online_raw = c.service.composite_template("online")
+    working = c.service.composite_template("working", fallback_default=True)
+    return {
+        "templateText": working,
+        "status": state.status if online_raw or state.draft else "PUBLISHED",
+        "onlineText": online_raw or DEFAULT_COMPOSITE_TEMPLATE,
+        "usingBuiltinDefault": not bool(online_raw) and not bool(state.draft),
+        "onlineRev": state.online_rev,
+        "baseRev": state.base_rev,
+        "draft": state.draft,
+    }
+
+
+@router.get("/settings/composite-template")
+def get_composite_template(request: Request, version: str = Query("working")) -> dict[str, Any]:
+    """读取复合工单汇总大模板（支持 working / online / draft / rN）。#Created By AiCoding(codex)"""
+    c = container(request)
+    ver = version if version != "" else "working"
+    if ver not in ("working", "online", "draft") and not REV_RE.match(ver):
+        raise bad_request(f"版本号「{version}」格式不合法", "INVALID_VERSION")
+    if ver == "draft" and not c.drafts.exists(CT_REF):
+        raise not_found("汇总大模板没有未发布的草稿版本")
+    if REV_RE.match(ver):
+        text = c.releases.read_file_at(ver, COMPOSITE_TEMPLATE_FILE)
+        if text is None:
+            raise not_found(f"汇总大模板没有 {ver} 版本")
+    else:
+        text = c.service.composite_template(ver, fallback_default=True)
+    return {**_ct_state(request), "version": ver, "versionText": text}
+
+
+class CompositeTemplateBody(BaseModel):
+    templateText: str | None = None
+    note: str = ""
+    revision: Any = None
+
+
+@router.put("/settings/composite-template/draft")
+def save_composite_template(request: Request, body: CompositeTemplateBody) -> dict[str, Any]:
+    expected_rev = parse_expected_revision(body.revision)
+    c = container(request)
+    if body.templateText is None:
+        raise bad_request("templateText 不能为空")
+    meta = c.service.save_composite_template(body.templateText, operator(request), expected_rev)
+    ct = _ct_state(request)
+    return {"cleared": bool(meta.get("cleared")), **ct}
+
+
+@router.post("/settings/composite-template/publish")
+def publish_composite_template(request: Request, body: CompositeTemplateBody) -> dict[str, Any]:
+    expected_rev = parse_expected_revision(body.revision)
+    c = container(request)
+    if body.templateText is not None:
+        c.service.save_composite_template(body.templateText, operator(request), expected_rev)
+    if not c.drafts.exists(CT_REF):
+        raise bad_request("没有需要发布的草稿", "NO_DRAFT")
+    result = c.service.publish_draft(CT_REF, operator(request), body.note)
+    ct = _ct_state(request)
+    return {
+        "rev": result.entry["rev"],
+        "publishedAt": fmt_time(result.entry["time"]),
+        **ct,
+    }
+
+
+@router.post("/settings/composite-template/discard-draft")
+def discard_composite_template(request: Request) -> dict[str, Any]:
+    container(request).service.discard(CT_REF)
+    return _ct_state(request)
+
+
+@router.post("/settings/composite-template/rollback")
+def rollback_composite_template(request: Request, body: RollbackBody) -> dict[str, Any]:
+    check_rollback_reason(body)
+    c = container(request)
+    result = c.service.rollback(CT_REF, body.targetRev, body.mode, body.reason, operator(request))
+    ct = _ct_state(request)
+    return {**result, **ct}
+
+
+@router.get("/settings/composite-template/revisions")
+def composite_template_revisions(request: Request) -> list[dict[str, Any]]:
+    return resource_revisions(container(request), CT_REF)
+
+
+class CompositeTemplatePreviewBody(BaseModel):
+    templateText: str
+    order: dict[str, Any] | None = None
+    items: list[dict[str, Any]] | None = None
+
+
+@router.post("/settings/composite-template/preview")
+def preview_composite_template(body: CompositeTemplatePreviewBody) -> dict[str, Any]:
+    """用内置多商品样例（或自定义数据）校验并渲染汇总大模板预览。#Created By AiCoding(codex)"""
+    errs = validate_composite_template(body.templateText)
+    if errs:
+        return {"ok": False, "errors": errs, "rendered": ""}
+    sample = sample_composite_context()
+    order = body.order if body.order is not None else sample["order"]
+    items = body.items if body.items is not None else sample["items"]
+    try:
+        rendered = render_composite_report(body.templateText, order=order, items=items)
+    except CompositeTemplateError as exc:
+        return {"ok": False, "errors": [str(exc)], "rendered": ""}
+    return {"ok": True, "errors": [], "rendered": rendered}
 
 
 # ============================================================================ 运行配置（统一网关 + 大模型热更新）

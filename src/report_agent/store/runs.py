@@ -513,6 +513,26 @@ class RunStore:
                     return _detail_from_summary(norm)
         return None
 
+    def update_detail(self, run_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
+        """原子合并更新单条运行记录详情文件（如缓存按需 AI 摘要），不改写 index.jsonl。#Created By AiCoding(codex)"""
+        loc = self._run_path(run_id)
+        if loc is None or not isinstance(patch, dict):
+            return None
+        _, _, json_path = loc
+        with self._write_lock:
+            with self._cache_lock:
+                pend = self._pending.get(run_id)
+                if pend is not None:
+                    merged_pend = {**pend[1], **patch}
+                    self._pending[run_id] = (pend[0], merged_pend)
+                    return _normalize_detail(merged_pend, run_id)
+            raw = read_json(json_path)
+            if not isinstance(raw, dict):
+                return None
+            updated = {**raw, **patch}
+            write_json(json_path, updated)
+            return _normalize_detail(updated, run_id)
+
     def list(self, date_from: date | None = None, date_to: date | None = None, limit: int = 200,
              predicate=None, offset: int = 0) -> list[dict[str, Any]]:
         """按日期倒序扫描摘要（默认最近 7 天），合并尚未落盘的内存项，支持 predicate 过滤与 offset 分页。"""

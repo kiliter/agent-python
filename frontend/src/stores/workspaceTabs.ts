@@ -20,11 +20,19 @@ export interface RouteWorkspaceTab {
   closable: boolean
 }
 
+export interface ChatInitOrderItem {
+  label: string
+  params: Record<string, string>
+  document?: string
+  templateId?: number
+}
+
 export interface ChatInitPayload {
   apiKey: string
   inputs: Record<string, string>
   document: string
   target: 'online' | 'draft'
+  items?: ChatInitOrderItem[]
 }
 
 export interface ChatWorkspaceTab {
@@ -211,6 +219,12 @@ export const useWorkspaceTabsStore = defineStore('workspace-tabs', () => {
       ) {
         return '当前全局系统提示词有未保存的修改'
       }
+      if (
+        platform.compositeTemplateState !== null &&
+        platform.compositeTemplateText !== platform.compositeTemplateState.templateText
+      ) {
+        return '当前多业务汇总大模板有未保存的修改'
+      }
       if (platform.runtimeFormDirty) {
         return '当前引擎与网关运行配置有未保存的修改'
       }
@@ -243,6 +257,9 @@ export const useWorkspaceTabsStore = defineStore('workspace-tabs', () => {
     } else if (navKey === 'settings') {
       if (platform.sysPromptState) {
         platform.sysPromptText = platform.sysPromptState.sysPromptText
+      }
+      if (platform.compositeTemplateState) {
+        platform.compositeTemplateText = platform.compositeTemplateState.templateText
       }
       platform.runtimeFormDirty = false
     }
@@ -566,6 +583,9 @@ export const useWorkspaceTabsStore = defineStore('workspace-tabs', () => {
       inputs: toPlainClone(payload.inputs),
       document: payload.document,
       target: payload.target,
+      ...(Array.isArray(payload.items) && payload.items.length > 0
+        ? { items: toPlainClone(payload.items) }
+        : {}),
     }
 
     let chatTab = tabs.value.find((t): t is ChatWorkspaceTab => t.kind === 'chat' && t.key === key)

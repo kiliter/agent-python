@@ -25,6 +25,26 @@ export interface ConfirmedInfo {
   rewritten: boolean
 }
 
+export interface SessionOrderItem {
+  label: string
+  params: Record<string, string>
+  document?: string
+  templateId?: number
+}
+
+export interface CompositeSubItem {
+  index: number
+  label: string
+  runId?: string
+  templateId: number
+  templateName: string
+  status: RunStatus
+  foundCount: number
+  totalCount: number
+  missingShown: string[]
+  error: string | null
+}
+
 export interface ChatSession {
   sessionId: string
   userId: string
@@ -37,6 +57,8 @@ export interface ChatSession {
   /** 上层入参指纹每变化一次 +1 */
   inputsVersion: number
   documentChars: number
+  /** 复合工单多业务明细列表（可选） */
+  items?: SessionOrderItem[]
   activeRunId: string | null
   confirmed: ConfirmedInfo | null
   messages: ChatMessage[]
@@ -122,9 +144,13 @@ export interface RunCard {
   missingShown: string[]
   foundCount: number
   totalCount: number
-  /** 第一条为 original；改写时追加 rewrite */
+  /** 第一条为 original；改写或 AI 二次润色时追加 rewrite */
   versions: ReportVersion[]
   confirmed: boolean
+  /** 多业务复合汇总运行扩展字段 */
+  isComposite?: boolean
+  compositeItems?: CompositeSubItem[]
+  sharedGatewayHits?: number
 }
 
 export interface TextMessage extends BaseMessage {
@@ -253,6 +279,7 @@ export interface ChatInitMessage {
   inputs?: Record<string, unknown>
   document?: string
   target?: ChatTarget
+  items?: SessionOrderItem[]
 }
 
 export const STATUS_LABEL: Record<RunStatus, string> = {

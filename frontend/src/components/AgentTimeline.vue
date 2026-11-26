@@ -1,7 +1,7 @@
 <!-- #Created By AiCoding(codex) 智能体执行时间线组件（复用在试运行与运行记录详情；按轮次展示后端推送的过程事件） -->
 <script setup lang="ts">
 import { computed } from 'vue'
-import { BookOpen } from 'lucide-vue-next'
+import { BookOpen, Compass } from 'lucide-vue-next'
 import { usePlatformStore } from '@/stores/platform'
 import type { ApiResult, ProcessEvent } from '@/types/platform'
 import {
@@ -10,8 +10,10 @@ import {
   describeToolEvent,
   formatElapsedAt,
   formatRoundBadge,
+  formatRouteDuration,
   groupEventsByRound,
   isEventFailed,
+  routeConfidenceLevel,
   shouldShowRoundMainCard,
   type ToolDisplayMeta,
 } from '@/utils/timelineFormat'
@@ -34,7 +36,7 @@ const events = computed<ProcessEvent[]>(() =>
 
 /** 折叠键前缀，带上运行编号避免不同运行互相影响 */
 const runKey = computed(
-  () => events.value.find(e => e.type === 'run_started')?.runId || store.activeRun?.runId || 'live',
+  () => events.value.find(e => e.runId)?.runId || store.activeRun?.runId || 'live',
 )
 
 /** 按 round 分组（保持首次出现的顺序） */
@@ -107,8 +109,70 @@ function foldKey(...parts: Array<string | number | undefined>): string {
           </div>
 
           <template v-for="e in g.items" :key="e.seq">
+            <!-- 自动路由启动 -->
+            <div v-if="e.type === 'route_started'" class="tl-route-box">
+              <div class="tl-meta-row">
+                <Compass :size="13" style="color: var(--primary)" />
+                <strong>开始自动路由匹配模板</strong>
+                <span v-if="e.rev" class="chip-tag mono">{{ e.rev }}</span>
+              </div>
+              <div class="tl-meta-row">
+                <span style="color: var(--text-secondary)">路由技能：</span>
+                <span
+                  v-if="e.routerSkill"
+                  class="chip-tag clickable tl-skill-chip"
+                  @click="store.openSkillByName(e.routerSkill)"
+                >
+                  <BookOpen :size="11" />
+                  <span>{{ e.routerSkill }}</span>
+                </span>
+                <span v-else style="color: var(--text-secondary)">未配置（回退检索在线模板）</span>
+              </div>
+            </div>
+
+            <!-- 自动路由完成 -->
+            <div v-else-if="e.type === 'route_completed'" class="tl-route-done">
+              <div class="tl-meta-row">
+                <Compass :size="13" style="color: var(--primary)" />
+                <span>命中模板：</span>
+                <strong>#{{ e.templateId }} {{ e.templateName }}</strong>
+                <span
+                  v-if="e.confidence"
+                  class="tl-conf-badge"
+                  :class="`conf-${routeConfidenceLevel(e.confidence)}`"
+                >
+                  置信度 {{ e.confidence }}
+                </span>
+                <span v-if="e.durationMs !== undefined" class="chip-tag mono">
+                  {{ formatRouteDuration(e.durationMs) }}
+                </span>
+              </div>
+              <div v-if="e.reason" class="tl-route-reason">
+                <span style="color: var(--text-secondary)">命中理由：</span>
+                <span>{{ e.reason }}</span>
+              </div>
+              <div v-if="(e.candidates ?? []).length" class="tl-route-candidates">
+                <span class="tl-cand-label">候选对比：</span>
+                <div class="tl-cand-list">
+                  <div
+                    v-for="cand in e.candidates"
+                    :key="`${cand.templateId}_${cand.level}`"
+                    class="tl-cand-item"
+                    :class="{ selected: cand.templateId === e.templateId }"
+                  >
+                    <span class="mono tl-cand-id">#{{ cand.templateId }}</span>
+                    <span v-if="cand.templateName" class="tl-cand-name">{{ cand.templateName }}</span>
+                    <span class="tl-conf-badge mini" :class="`conf-${routeConfidenceLevel(cand.level)}`">
+                      {{ cand.level }}
+                    </span>
+                    <span v-if="cand.reason" class="tl-cand-reason">{{ cand.reason }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <!-- 开始运行 -->
-            <div v-if="e.type === 'run_started'" class="tl-init-box">
+            <div v-else-if="e.type === 'run_started'" class="tl-init-box">
               <div>
                 模板：<strong>{{ e.templateId }} {{ e.templateName }}</strong>
                 <span class="chip-tag mono" style="margin-left: 6px">{{ e.rev }}</span>
@@ -162,7 +226,7 @@ function foldKey(...parts: Array<string | number | undefined>): string {
                   {{ e.tool }}
                 </span>
 
-                <!-- load_skill（兼容单个 name 与批量 names） -->
+                <!-- load_skill（兼容单个 name、批量 names 与 doc/docs 子文档） -->
                 <template v-if="e.tool === 'load_skill'">
                   <span>加载技能</span>
                   <template v-if="toolMeta(e).skillNames.length">
@@ -175,6 +239,11 @@ function foldKey(...parts: Array<string | number | undefined>): string {
                       <BookOpen :size="11" />
                       <span>「{{ sk }}」</span>
                     </span>
+                    <span
+                      v-for="docPath in toolMeta(e).skillDocs"
+                      :key="docPath"
+                      class="chip-tag mono"
+                    >{{ docPath }}</span>
                     <span
                       v-if="toolMeta(e).skillTitleSummary"
                       style="color: var(--text-secondary)"
@@ -286,7 +355,7 @@ function foldKey(...parts: Array<string | number | undefined>): string {
         </div>
       </div>
 
-      <!-- 交卷结果 / 运行失败 -->
+      <!-- 交卷结果 / 路由失败 / 运行失败 -->
       <div
         v-for="o in g.outcomes"
         :key="o.seq"
@@ -294,7 +363,8 @@ function foldKey(...parts: Array<string | number | undefined>): string {
         :class="{
           'tl-outcome-pass': o.type === 'report_accepted',
           'tl-outcome-warn': o.type === 'report_degraded',
-          'tl-outcome-err': o.type === 'report_rejected' || o.type === 'run_failed',
+          'tl-outcome-err':
+            o.type === 'report_rejected' || o.type === 'run_failed' || o.type === 'route_failed',
         }"
       >
         <div class="timeline-step-header tl-node-head">
@@ -306,6 +376,9 @@ function foldKey(...parts: Array<string | number | undefined>): string {
           </span>
           <span v-else-if="o.type === 'report_rejected'" class="tl-round-pill err">
             <SvgIcon name="error" /> 第 {{ g.round }} 轮 · 证据校验退回重填
+          </span>
+          <span v-else-if="o.type === 'route_failed'" class="tl-round-pill err">
+            <SvgIcon name="error" /> 自动路由 · 模板匹配失败
           </span>
           <span v-else class="tl-round-pill err">
             <SvgIcon name="error" /> 第 {{ g.round }} 轮 · 运行终止失败
@@ -327,6 +400,34 @@ function foldKey(...parts: Array<string | number | undefined>): string {
           <template v-else-if="o.type === 'report_degraded'">
             <div style="font-weight: 600; color: var(--warning)">
               重试次数耗尽，以下字段按缺失时处理方式处理：{{ (o.fields ?? []).join('、') || '—' }}
+            </div>
+          </template>
+          <template v-else-if="o.type === 'route_failed'">
+            <div style="font-weight: 600; color: var(--danger)">
+              自动路由失败：{{ o.error || o.reason || '未匹配到可用模板' }}
+            </div>
+            <div
+              v-if="o.reason && o.reason !== o.error"
+              style="font-size: 11.5px; color: var(--text-regular)"
+            >
+              原因说明：{{ o.reason }}
+            </div>
+            <div v-if="(o.candidates ?? []).length" class="tl-route-candidates">
+              <span class="tl-cand-label">候选模板参考：</span>
+              <div class="tl-cand-list">
+                <div
+                  v-for="cand in o.candidates"
+                  :key="`${cand.templateId}_${cand.level}`"
+                  class="tl-cand-item"
+                >
+                  <span class="mono tl-cand-id">#{{ cand.templateId }}</span>
+                  <span v-if="cand.templateName" class="tl-cand-name">{{ cand.templateName }}</span>
+                  <span class="tl-conf-badge mini" :class="`conf-${routeConfidenceLevel(cand.level)}`">
+                    {{ cand.level }}
+                  </span>
+                  <span v-if="cand.reason" class="tl-cand-reason">{{ cand.reason }}</span>
+                </div>
+              </div>
             </div>
           </template>
           <template v-else>
@@ -451,6 +552,117 @@ function foldKey(...parts: Array<string | number | undefined>): string {
   display: flex;
   flex-direction: column;
   gap: 5px;
+}
+
+.tl-route-box {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  background-color: var(--bg-subtle);
+  border: 1px solid var(--border-light);
+}
+
+.tl-route-done {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background-color: var(--primary-bg);
+  border: 1px solid var(--primary-border);
+}
+
+.tl-route-reason {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+
+.tl-conf-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  border: 1px solid transparent;
+}
+
+.tl-conf-badge.mini {
+  padding: 0 5px;
+  font-size: 10.5px;
+  line-height: 16px;
+}
+
+.tl-conf-badge.conf-high {
+  background-color: var(--success-bg);
+  border-color: var(--success-border);
+  color: var(--success);
+}
+
+.tl-conf-badge.conf-mid {
+  background-color: var(--warning-bg);
+  border-color: var(--warning-border);
+  color: var(--warning);
+}
+
+.tl-conf-badge.conf-low {
+  background-color: var(--danger-bg);
+  border-color: var(--danger-border);
+  color: var(--danger);
+}
+
+.tl-route-candidates {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--border-color);
+}
+
+.tl-cand-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.tl-cand-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tl-cand-item {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 5px;
+  font-size: 11.5px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-light);
+}
+
+.tl-cand-item.selected {
+  border-color: var(--primary-border);
+}
+
+.tl-cand-id {
+  font-weight: 600;
+  color: var(--primary);
+}
+
+.tl-cand-name {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.tl-cand-reason {
+  color: var(--text-secondary);
+  line-height: 1.45;
 }
 
 .tl-meta-row {

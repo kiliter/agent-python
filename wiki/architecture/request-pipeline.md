@@ -1,74 +1,93 @@
 ---
 title: 单智能体请求处理管道
 type: concept
-tags: [architecture, pipeline, runner, status, partial-salvage]
+tags: [architecture, pipeline, runner, routing, status, partial-salvage]
 sources:
   - src/report_agent/domain/template.py
+  - src/report_agent/runtime/router.py
   - src/report_agent/runtime/runner.py
+  - src/report_agent/runtime/composite.py
   - src/report_agent/runtime/output_model.py
   - src/report_agent/runtime/render.py
   - src/report_agent/runtime/workspace.py
   - src/report_agent/api/common.py
   - src/report_agent/api/routes_system.py
-updated: 2026-11-13
+  - src/report_agent/api/run_views.py
+updated: 2026-11-26
 ---
 
 # 单智能体请求处理管道
 
 <!-- #Created By AiCoding(codex) -->
 
-本页说明一次申告报告生成请求从 HTTP/SSE 入口进入 `AgentRunner.run` 到最终落盘返回的全链路执行机制，重点解析资源快照隔离、动态交卷 Schema、重试挽救与三级状态（`SUCCESS` / `PARTIAL` / `FAILED`）判定。
+本页说明一次申告报告生成请求从 HTTP/SSE 入口进入 `AgentRunner.run` 到最终落盘返回的全链路执行机制，重点解析资源快照隔离、未传 `templateId` 时的两阶段同快照自动路由、动态交卷 Schema、重试挽救与三级状态（`SUCCESS` / `PARTIAL` / `FAILED`）判定。
 
 ## 1. 入口与运行模式
 
-平台提供两类运行入口，底层均统一委托给 `src/report_agent/runtime/runner.py#AgentRunner.run`：
+平台提供两类运行入口，单模板执行统一委托给 `src/report_agent/runtime/runner.py#AgentRunner.run`，复合工单由 `src/report_agent/runtime/composite.py#CompositeRunner.run` 在同一快照下并发编排多个子项：
 
-| 入口场景 | HTTP 路由 | 鉴权方式 | 默认目标版本（`target`） | 事件推送方式 |
-|----------|-----------|----------|-------------------------|--------------|
-| **上游业务调用** | `POST /api/v1/reports`、`/reports/stream` | 请求头 `X-API-Key` | 固定 `"online"`（线上快照） | 同步 JSON 或 SSE `text/event-stream` |
-| **工作台试运行** | `POST /api/v1/templates/{id}/dryrun`、`/dryrun/stream` | 会话 Cookie / Bearer Token | `"draft"`（草稿叠加视图）或 `"online"` | 同步 JSON 或 SSE `text/event-stream` |
+| 入口场景 | HTTP 路由 | 鉴权方式 | 默认目标版本（`target`） | 事件推送与路由说明 |
+|----------|-----------|----------|-------------------------|--------------------|
+| **上游业务调用（单模板）** | `POST /api/v1/reports`、`/reports/stream` | 请求头 `X-API-Key` | 固定 `"online"`（线上快照） | 同步 JSON 或 SSE `text/event-stream`；`templateId` 可选，省略或传 `null` 时自动触发 `TemplateRouter` 路由匹配，显式传 `<= 0` 返回 `400 INVALID_TEMPLATE_ID` |
+| **上游业务调用（复合工单）** | `POST /api/v1/reports/composite` | 请求头 `X-API-Key` | 固定 `"online"`（线上快照） | 同步 JSON；每个 `items[i].templateId` 均可选，省略或传 `null` 时各子项在共享同一快照下并发自动路由并填报 |
+| **工作台试运行** | `POST /api/v1/templates/{id}/dryrun`、`/dryrun/stream` | 会话 Cookie / Bearer Token | `"draft"`（草稿叠加视图）或 `"online"` | 同步 JSON 或 SSE `text/event-stream`（路径已固定指定模板 ID） |
 
-在流式接口中，路由层通过 `asyncio.Queue` 注入 `on_event` 回调，每产生一条 `ProcessEvent` 即推送 `event: event`，每 15 秒发送 `: keep-alive` 注释保活，结束后推送 `event: final`。客户端中途断开连接不会取消后台正在执行的 `AgentRunner` 任务，确保运行记录完整落盘。
+在流式接口中，路由层通过 `asyncio.Queue` 注入 `on_event` 回调，每产生一条 `ProcessEvent` 即推送 `event: event`（自动路由时先在 `round=0` 推送 `route_started`、路由工具调用与 `route_completed` / `route_failed`），每 15 秒发送 `: keep-alive` 注释保活，结束后推送 `event: final`；若在路由或入参校验阶段即启动失败，则直接推送 `event: error`。客户端中途断开连接不会取消后台正在执行的 `AgentRunner` 任务，确保运行记录完整落盘。
 
-## 2. 七步执行主流程
+## 2. 两阶段同快照执行主流程
 
 ```mermaid
 sequenceDiagram
-    participant Caller as 调用方 (上游 / 工作台)
+    participant Caller as "调用方 (上游 / 工作台)"
     participant Runner as AgentRunner.run
     participant Store as ResourceService
+    participant Router as "TemplateRouter (可选)"
     participant Agent as Pydantic AI Agent
     participant Checker as EvidenceChecker
     participant Jinja as Jinja2 沙箱渲染
 
-    Caller->>Runner: RunRequest(templateId, inputs, documentText, target)
-    Runner->>Store: snapshot(target) 锁定不可变快照
-    Runner->>Runner: validate_inputs() & 初始化 Workspace + EventSink
-    Runner->>Runner: build_report_model() 动态生成 submit_report Schema
-    loop ReAct 工具循环 (上限 request_limit / tool_calls_limit)
-        Agent->>Agent: 按需调用 load_skill / call_api / 确定性计算工具
+    Caller->>Runner: "RunRequest(templateId?, inputs, documentText, target)"
+    Runner->>Store: "snapshot(target) 锁定不可变快照 (rev, ResourceSet)"
+    opt templateId 未传或为 null (两阶段同快照自动路由)
+        Runner->>Router: "route(rev, rs, inputs, document) [发射 route_started]"
+        Router-->>Runner: "按 高>中>低 选最高置信度在线模板 [发射 route_completed] 或抛 422"
     end
-    Agent->>Checker: 调用 submit_report 提交全部字段结论与证据
+    Runner->>Runner: "validate_inputs() & 初始化 Workspace + EventSink"
+    Runner->>Runner: "build_report_model() 动态生成 submit_report Schema"
+    loop "ReAct 工具循环 (上限 request_limit / tool_calls_limit)"
+        Agent->>Agent: "按需调用 load_skill / call_api / 确定性计算工具"
+    end
+    Agent->>Checker: "调用 submit_report 提交全部字段结论与证据"
     alt 证据核验不通过且重试未耗尽
-        Checker-->>Agent: 抛出 ModelRetry(退回具体违规字段重填)
+        Checker-->>Agent: "抛出 ModelRetry(退回具体违规字段重填)"
     else 重试耗尽仍存在违规字段
-        Runner->>Runner: _salvage_partial_report() + _cascade_degraded_fields()
+        Runner->>Runner: "_salvage_partial_report() + _cascade_degraded_fields()"
     end
-    Runner->>Jinja: build_render_context() + render_body()
-    Jinja-->>Runner: 渲染文本 + 实际展示字段集合 used_fields
-    Runner->>Caller: 判定 SUCCESS / PARTIAL + 异步写入 RunStore
+    Runner->>Jinja: "build_render_context() + render_body()"
+    Jinja-->>Runner: "渲染文本 + 实际展示字段集合 used_fields"
+    Runner->>Caller: "判定 SUCCESS / PARTIAL + 异步写入 RunStore (含 routing)"
 ```
 
 ### 第 1 步：捕获不可变资源快照
 
 `AgentRunner._capture` 按 `req.target` 在运行开始瞬间锁定本次请求使用的模板、Skill 字典、接口契约字典、系统提示词与版本号（如 `r3` 或 `r3+草稿`）：
 - 上游 `"online"` 模式优先调用 `ReleaseStore.try_live_snapshot()` 同步快路径（轻量 `os.readlink` 核对 `current` 软链并在进程内 `_snapshots` 命中时微秒级直返，未命中再回退 `asyncio.to_thread`）；工作台 `"draft"` 模式复用 `ResourceService.overlay()` 的 `(live_rev, _draft_mutation_seq, _drafts_fingerprint)` 内存缓存。
-- 即使运行途中其他人在工作台发布了新版本，正在执行的请求也不会发生上下文撕裂。
-- 若模板不存在或已被标记为下线（`tpl.offline == True` 且 `target != "draft"`），直接抛出 `TemplateUnavailableError`（HTTP 404）。
+- 即使运行途中其他人在工作台发布了新版本，正在执行的请求（包括自动路由阶段与后续填报阶段）也全程使用同一份 `(rev, ResourceSet)` 快照，不会发生上下文撕裂。
+- 当显式传入 `templateId` 时，若模板不存在或已被标记为下线（`tpl.offline == True` 且 `target != "draft"`），直接抛出 `TemplateUnavailable`（HTTP 404）。
+
+### 第 1.5 步（可选）：同快照自动模板路由（`TemplateRouter`）
+
+当 `RunRequest.template_id is None`（上游请求未传 `templateId` 或传 `null`）时，在入参校验前先由无状态路由器 `src/report_agent/runtime/router.py#TemplateRouter` 完成模板匹配，再无缝衔接第 2 步进入填报管道：
+
+- **共享只读工具与渐进式加载**：`TemplateRouter` 与 `ChatAgent` 共享只读路由纯函数与工具（`load_skill`、`list_templates`、`get_template`）。优先引导模型调用 `load_skill("template-router")` 读取 L1 路由总则，命中业务族后再按需懒加载 L2 `references/*.md` 细则（详见 [Skill 详解：template-router](../skills/template-router.md)）；若当前快照未配置 `template-router` Skill，则自动回退使用 `list_templates` + `get_template` 检索在线模板。
+- **最高置信度运行原则（不阻塞）**：在路由器 `@agent.output_validator` 中先拦截不存在或已下线模板 ID（触发 `ModelRetry`），再汇总所有有效在线候选按置信度（`高 > 中 > 低`）稳定排序，**始终选用置信度最高的模板直接执行填报（即使最高仅为 `低` 也不阻塞运行）**。
+- **并发槽位与路由失败边界**：路由阶段与填报阶段分段占用全局并发限流器（先完成路由并释放槽位，再进入填报阶段），避免嵌套死锁。仅当快照无可用在线模板、模型未产出任何有效在线候选或路由调用失败时，发射 `route_failed` 并抛出 `TemplateRouteError`（HTTP `422 TEMPLATE_ROUTE_FAILED`，附 `reason` 与 `candidates`；SSE 推送 `event: error`），且**不写入 `RunStore`**。
+- **事件、计量与视图透传**：路由阶段在 `round=0` 通过 `EventSink` 发射 `route_started`、路由工具调用（`tool`）与 `route_completed` / `route_failed`；成功后整次运行合并两阶段 `usage` 与总耗时 `durationMs`，将 `routing: {auto, templateId, templateName, confidence, reason, candidates, skillsLoaded, durationMs}` 写入运行记录，并由 `api/run_views.py#report_view`（仅自动路由时附带，显式传 `templateId` 时不返回）与 `detail_view`（`GET /api/v1/runs/{runId}`）透出。
+- **复合工单并发路由**：`CompositeRunner` 允许部分或全部 `items[i].templateId` 为空，各子项在同一 `(rev, ResourceSet)` 快照与 `SharedGatewayClient` 下并发自动路由并填报；单子项路由失败时仅该子项标记 `FAILED`，不影响其余子项完成汇总拼装。
 
 ### 第 2 步：入参清洗校验与工作区创建
 
-- 先对传入的 `req.inputs` 统一执行 `.strip()` 去除首尾空白（防止尾随空格透传给网关报错），再由 `validate_inputs(tpl, inputs)` 按 `template.yaml` 中 `inputs` 定义的 `required` 与 `pattern`（调用 `domain/template.py#safe_regex_fullmatch` 执行带防 ReDoS 语法树检查的整串匹配）做快速校验，不合法时立即抛出 `InputValidationError`（HTTP 400 `INVALID_INPUT`），不消耗任何模型 Token。
+- 先对传入的 `req.inputs` 统一执行 `.strip()` 去除首尾空白（防止尾随空格透传给网关报错），再由 `validate_inputs(tpl, inputs)` 按 `template.yaml` 中 `inputs` 定义的 `required` 与 `pattern`（调用 `domain/template.py#safe_regex_fullmatch` 执行带防 ReDoS 语法树检查的整串匹配）做快速校验，不合法时立即抛出 `InputValidationError`（HTTP 400 `INVALID_INPUT`，不写入 `RunStore`），不消耗填报阶段模型 Token。若该请求经自动路由命中模板后缺少必填入参，`InputValidationError` 响应体会额外附带已命中的 `templateId`、`templateName` 与 `routing`，便于上游补齐参数后重试。
 - 创建请求级隔离的 `Workspace` 与 `EventSink`（`src/report_agent/runtime/workspace.py`），负责将单据按行编号（`L001`、`L002`…）、惰性缓存 `DocumentIndex` 定位索引、记录网关调用的完整报文与幂等去重缓存（`r1`、`r2`…）、记录每次工具调用的输入输出（`t1`、`t2`…），并按序号发出过程事件（同事件循环内 `queue_listener` 直接入队，免除跨线程唤醒开销）。
 
 ### 第 3 步：动态构建与缓存交卷模型（`submit_report`）
@@ -120,5 +139,6 @@ sequenceDiagram
 - [强证据核验机制](evidence-system.md)
 - [模板模型与渲染机制](template-and-rendering.md)
 - [确定性平台工具设计](deterministic-tools.md)
+- [Skill 详解：template-router](../skills/template-router.md)
 - [AgentRunner 运行时组件剖析](../components/agent-runner.md)
 - [ADR-001：采用单智能体自主规划 + 强证据校验替代 Java 三 Agent 编排](../decisions/adr-001-single-agent-and-evidence.md)

@@ -6,25 +6,27 @@ sources:
   - src/report_agent/domain/api_contract.py
   - src/report_agent/domain/template.py
   - src/report_agent/gateway/base.py
+  - src/report_agent/gateway/http_client.py
   - src/report_agent/gateway/unified_xml.py
   - src/report_agent/gateway/mock.py
   - src/report_agent/gateway/reloadable.py
-updated: 2026-11-13
+updated: 2026-11-26
 ---
 
 # 网关契约与连接器组件剖析
 
 <!-- #Created By AiCoding(codex) -->
 
-外部业务系统取数能力由声明式领域模型 `src/report_agent/domain/api_contract.py` 与连接器实现层 `src/report_agent/gateway/` 共同承载，无需编写业务接口专属代码即可对接统一网关 XML/JSON 协议。
+外部业务系统取数能力由声明式领域模型 `src/report_agent/domain/api_contract.py` 与连接器实现层 `src/report_agent/gateway/` 共同承载，无需编写业务接口专属代码即可对接统一网关 XML/JSON 协议与常规 HTTP 接口。
 
 ## 1. 声明式接口契约（`domain/api_contract.py#ApiContract`）
 
 每个 `apis/<name>.yaml` 解析为一个不可变 `ApiContract` 实例，包含四大核心段落：
 
 1. **连接器与治理策略**：
-   - `connector`：`unified-gateway-xml`（默认）或 `unified-gateway-json`；
-   - `processCode`：统一网关业务编码（如 `querySMSSendInfo`）；
+   - `connector`：`unified-gateway-xml`（默认）、`unified-gateway-json` 或 `http`（常规 HTTP 直连）；
+   - `processCode`：统一网关业务编码（如 `querySMSSendInfo`；`connector: http` 时可留空）；
+   - `method` / `url` / `query` / `bodyType`（仅 `connector: http`）：支持 `GET` / `POST` / `PUT` / `DELETE` / `PATCH`、含 `${参数}` / `${$now}` 占位符的自定义 URL 与查询参数，以及 `json` / `form` / `text` / `none` 四种请求体形态；
    - `timeoutMs`（100～120,000 ms）、`retry.maxAttempts`（1～5 次，网络/5xx 指数退避重试）与 `idempotent`。
 2. **入参 Schema（`input`）**：标准 JSON Schema（`type: object`），按 `self.input` 缓存 `Draft202012Validator`（`_validator_cache`），并在 `schema_errors` 与 `validate_args` 阶段接入 `safe_regex_compile` 拦截嵌套量词 ReDoS。
 3. **请求报文构造（`request` + `build_request`）**：
@@ -52,12 +54,18 @@ updated: 2026-11-13
 
 当 `contract.connector == "unified-gateway-json"` 时，`UnifiedGatewayXmlClient` 自动将构造好的 `operation_in` 报文以 `application/json` 发送，并用 `parse_json_body` + `extract_json_records`（严格区分 `bool` 与 `int`，显式栈单遍扫描 `_first_json_text`）解析响应树，与 XML 共享一致的 `noData`/`success` 判定与多元素点分列抽取语义。
 
+### 2.4 常规 HTTP 连接器支持（`gateway/http_client.py`）
+
+当 `contract.connector == "http"` 时，`UnifiedGatewayXmlClient` 通过 `_invoke_http` 直连契约声明的 `url`（不拼接 `GATEWAY_URL/openapi_3`，不套 `operation_in` 信封），共享同一个禁止重定向的 `httpx.AsyncClient`、并发信号量与幂等重试策略：
+- **请求组装与脱敏**：`prepare_http_request` / `build_http_request_preview` 渲染 URL 路径占位符、URL 编码 `query` 参数、自定义安全 `headers` 与四类 `bodyType`（`json` / `form` / `text` / `none`）；请求预览与日志自动屏蔽 `Authorization`、`Cookie`、`Token`、`API-Key`、`Secret`、`Password` 等凭证头/参数及 11 位手机号；
+- **响应体解析**：任何 `2xx`（含 `204 No Content`）均视为 HTTP 成功，`parse_http_response` 按 `response.format`（`auto` / `json` / `xml` / `text`）自动识别 `Content-Type` 与响应正文，分别复用 `extract_json_records`、防 XXE `parse_xml + extract_records` 或纯文本单值提取（同时在 `raw` 中保留原始响应体）。
+
 ## 3. 本地 Mock 网关（`gateway/mock.py#MockGatewayClient`）
 
 当 `GATEWAY_MODE=mock` 时启用，无需连接企业内网网关即可本地开发、跑单测与工作台试运行：
 - **双目录查找优先级**：先查 `DATA_DIR/mock-gateway/`（方便运维放临时案例报文），未命中再回退 `fallback_root=SEED_DIR / "mock-gateway"`；
-- **按路由值匹配特定案例**：优先查找 `{api_name}.{route_value}.{xml|json}`（如 `querySMSSendInfo.13900000000.xml` 模拟无短信空结果），未命中再回退通用正例 `{api_name}.{xml|json}`；
-- 解析走与线上完全相同的 `parse_xml` / `parse_json_body` 契约抽取链路，确保契约路径配置在 Mock 阶段即可得到真实检验。
+- **按路由值匹配特定案例**：统一网关优先查找 `{api_name}.{route_value}.{xml|json}`（如 `querySMSSendInfo.13900000000.xml`），常规 HTTP 按 `{api_name}[.{route_value}].{json|xml|txt}` 查找并走与线上完全相同的 `parse_http_response` 抽取链路，未命中再回退通用正例 `{api_name}.{xml|json|txt}`；
+- 解析走与线上完全相同的 `parse_xml` / `parse_json_body` / `parse_http_response` 契约抽取链路，确保契约路径配置在 Mock 阶段即可得到真实检验。
 
 ## 4. 零中断热重载包装器（`gateway/reloadable.py#ReloadableGatewayClient`）
 

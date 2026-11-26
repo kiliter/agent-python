@@ -390,11 +390,23 @@ const skillLoadError = ref('')
 let fetchSkillReqSeq = 0
 
 const activeSkillId = computed(() => {
-  if (store.ideSelectedSkillId && store.templateSkills.includes(store.ideSelectedSkillId)) {
+  if (
+    store.ideSelectedSkillId &&
+    (store.templateSkills.includes(store.ideSelectedSkillId) ||
+      store.skills.some(s => s.id === store.ideSelectedSkillId && s.scope === 'global'))
+  ) {
     return store.ideSelectedSkillId
   }
-  return store.templateSkills[0] || ''
+  return (
+    store.templateSkills[0] ||
+    store.skills.find(s => s.scope === 'global')?.id ||
+    ''
+  )
 })
+
+const isActiveSkillExplicitlyBound = computed(
+  () => !!activeSkillId.value && store.templateSkills.includes(activeSkillId.value),
+)
 
 const activeSkillSummaryItem = computed<SkillItem | null>(() => {
   if (!activeSkillId.value) return null
@@ -1199,6 +1211,9 @@ function handleExpandDebugPanel() {
 
           <div class="skill-meta-line mono">
             <span>标识：{{ activeSkillId }}</span>
+            <span v-if="activeSkillSummaryItem?.scope === 'global'" style="color: var(--success)">
+              · 全局填报（自动持有）
+            </span>
             <span v-if="loadedSkillDetail?.version">· 版本：{{ loadedSkillDetail.version }}</span>
           </div>
 
@@ -1219,6 +1234,7 @@ function handleExpandDebugPanel() {
               管理绑定列表
             </button>
             <button
+              v-if="isActiveSkillExplicitlyBound"
               type="button"
               class="ide-btn ide-btn-xs ide-btn-danger"
               @click="handleUnbindSkill(activeSkillId)"

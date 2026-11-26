@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..domain.resources import ResourceSet
+from ..runtime.composite import CompositeRunner, CompositeRunRequest
 from ..runtime.runner import AgentRunner, InputValidationError, RunRequest, TemplateUnavailable
 from ..runtime.workspace import ProcessEvent
 from ..store.runs import new_run_id
@@ -184,6 +185,139 @@ class ChatRunManager:
         self._active_by_session[session_id] = run_id
         ch.task = loop.create_task(self._execute(ch, req, on_complete), name=f"chat-run-{run_id}")
         return run_id
+
+    def start_composite(
+        self,
+        session_id: str,
+        req: CompositeRunRequest,
+        *,
+        resources: ResourceSet | None,
+        on_complete: Callable[[RunCompletion], Awaitable[dict[str, Any]]],
+    ) -> str:
+        """校验单会话互斥并启动多业务复合工单后台运行，返回复合 run_id。#Created By AiCoding(codex)"""
+        if self.has_active_run(session_id) is not None:
+            raise RuntimeError("RUN_IN_PROGRESS")
+        self._evict_expired()
+        if not req.composite_run_id:
+            req.composite_run_id = f"cmp-{new_run_id()}"
+        run_id = req.composite_run_id
+
+        loop = asyncio.get_running_loop()
+        ch = _RunChannel(
+            run_id=run_id,
+            session_id=session_id,
+            mapper=StepMapper(resources=resources),
+            cond=asyncio.Condition(),
+            loop=loop,
+            started_mono=time.monotonic(),
+        )
+        self._channels[run_id] = ch
+        self._channels.move_to_end(run_id)
+        self._active_by_session[session_id] = run_id
+        ch.task = loop.create_task(self._execute_composite(ch, req, on_complete), name=f"chat-cmp-{run_id}")
+        return run_id
+
+    async def _execute_composite(
+        self,
+        ch: _RunChannel,
+        req: CompositeRunRequest,
+        on_complete: Callable[[RunCompletion], Awaitable[dict[str, Any]]],
+    ) -> None:
+        outcome: dict[str, Any] | None = None
+        error: str | None = None
+        error_code: str | None = None
+        cancelled = False
+
+        def _on_progress(icon: str, text: str, ok: bool) -> None:
+            elapsed = int((time.monotonic() - ch.started_mono) * 1000)
+            ch.mapper.append_custom(icon, text, ok=ok, at_ms=elapsed)
+            ch.raw_events.append({
+                "seq": len(ch.raw_events) + 1,
+                "type": "composite_progress",
+                "atMs": elapsed,
+                "round": 0,
+                "text": text,
+                "ok": ok,
+            })
+            self._schedule_notify(ch)
+
+        try:
+            try:
+                outcome = await CompositeRunner(self.runner).run(req, on_progress=_on_progress)
+                status = str(outcome.get("status") or "")
+                dur_ms = int(outcome.get("durationMs") or int((time.monotonic() - ch.started_mono) * 1000))
+                if status in ("SUCCESS", "PARTIAL"):
+                    s = outcome.get("summary") or {}
+                    ch.mapper.append_custom(
+                        "done",
+                        f"复合工单汇总完成（共 {s.get('totalItems', 0)} 项：成功 {s.get('successCount', 0)}、部分缺失 {s.get('partialCount', 0)}、失败 {s.get('failedCount', 0)}）",
+                        ok=True,
+                        at_ms=dur_ms,
+                    )
+                else:
+                    error = "所有业务子项核查均未成功"
+                    error_code = "RUN_FAILED"
+                    ch.mapper.append_custom("error", f"复合核查失败：{error}", ok=False, at_ms=dur_ms)
+            except asyncio.CancelledError:
+                cancelled = True
+                error = "复合运行已手动停止"
+                error_code = "CANCELLED"
+                elapsed = int((time.monotonic() - ch.started_mono) * 1000)
+                ch.mapper.append_custom("warn", "复合运行已手动停止", ok=False, at_ms=elapsed)
+            except InputValidationError as exc:
+                error = sanitize_error_text(exc, fallback="复合工单参数不合法")
+                error_code = "INPUT_INVALID"
+                elapsed = int((time.monotonic() - ch.started_mono) * 1000)
+                ch.mapper.append_custom("error", f"复合核查失败：{error}", ok=False, at_ms=elapsed)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("聊天窗口复合后台运行异常 runId=%s", ch.run_id)
+                error = sanitize_error_text(exc, fallback=type(exc).__name__)
+                error_code = "RUN_ERROR"
+                elapsed = int((time.monotonic() - ch.started_mono) * 1000)
+                ch.mapper.append_custom("error", f"复合核查失败：{error}", ok=False, at_ms=elapsed)
+
+            duration_ms = int(outcome.get("durationMs") or 0) if outcome is not None else int(
+                (time.monotonic() - ch.started_mono) * 1000
+            )
+            completion = RunCompletion(
+                run_id=ch.run_id,
+                session_id=ch.session_id,
+                outcome=outcome,
+                error=error,
+                error_code=error_code,
+                cancelled=cancelled,
+                steps=[dict(s) for s in ch.mapper.steps],
+                duration_ms=max(0, duration_ms),
+            )
+            cb_fut = asyncio.ensure_future(on_complete(completion))
+            final_msg: dict[str, Any] | None = None
+            try:
+                final_msg = await asyncio.shield(cb_fut)
+            except asyncio.CancelledError:
+                try:
+                    final_msg = await cb_fut
+                except Exception:  # noqa: BLE001
+                    log.exception("聊天复合运行完成回调失败 runId=%s", ch.run_id)
+            except Exception:  # noqa: BLE001
+                log.exception("聊天复合运行完成回调失败 runId=%s", ch.run_id)
+            ch.final_message = copy.deepcopy(final_msg) if isinstance(final_msg, dict) else None
+        finally:
+            ch.done = True
+            ch.finished_mono = time.monotonic()
+            if self._active_by_session.get(ch.session_id) == ch.run_id:
+                self._active_by_session.pop(ch.session_id, None)
+            self._evict_expired()
+            try:
+                async with ch.cond:
+                    ch.cond.notify_all()
+            except asyncio.CancelledError:
+                async def _final_wake() -> None:
+                    async with ch.cond:
+                        ch.cond.notify_all()
+
+                t = ch.loop.create_task(_final_wake())
+                ch.notify_tasks.add(t)
+                t.add_done_callback(ch.notify_tasks.discard)
 
     async def _execute(
         self,

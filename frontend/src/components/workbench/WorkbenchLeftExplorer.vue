@@ -87,7 +87,7 @@ const sectionTitle = computed(() => {
     case 'inputs':
       return `入参 (${store.templateInputs.length})`
     case 'skills':
-      return `已绑定技能 (${store.templateSkills.length})`
+      return `技能 (${store.templateSkills.length + inheritedGlobalSkills.value.length})`
     case 'cases':
       return `回归用例 (${store.templateCases.length})`
     case 'history':
@@ -179,6 +179,25 @@ const filteredSkills = computed(() => {
         (item?.apis || []).some(a => a.toLowerCase().includes(q))
       )
     })
+})
+
+/** 全局填报技能（自动对所有模板生效，未显式列在 templateSkills 中） */
+const inheritedGlobalSkills = computed(() => {
+  const explicitSet = new Set(store.templateSkills)
+  return store.skills.filter(s => s.scope === 'global' && !explicitSet.has(s.id))
+})
+
+const filteredGlobalSkills = computed(() => {
+  const q = normalizedQuery.value
+  return inheritedGlobalSkills.value.filter(item => {
+    if (!q) return true
+    return (
+      item.id.toLowerCase().includes(q) ||
+      item.name.toLowerCase().includes(q) ||
+      item.description.toLowerCase().includes(q) ||
+      item.apis.some(a => a.toLowerCase().includes(q))
+    )
+  })
 })
 
 /** 过滤后的回归用例条目（保留真实下标） */
@@ -822,9 +841,55 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div v-if="filteredSkills.length === 0" class="explorer-empty">
-          {{ normalizedQuery ? '无匹配的已绑定技能' : '暂未绑定技能，点击右上角「+ 绑定」选择' }}
+        <div v-if="filteredSkills.length === 0 && filteredGlobalSkills.length === 0" class="explorer-empty">
+          {{ normalizedQuery ? '无匹配的技能' : '暂未绑定技能，点击右上角「+ 绑定」选择' }}
         </div>
+
+        <template v-if="filteredGlobalSkills.length > 0">
+          <div
+            style="
+              padding: 8px 10px 4px;
+              font-size: 11px;
+              font-weight: 600;
+              color: var(--success);
+              letter-spacing: 0.02em;
+            "
+          >
+            全局自动持有 ({{ filteredGlobalSkills.length }})
+          </div>
+          <div
+            v-for="item in filteredGlobalSkills"
+            :key="`global-${item.id}`"
+            class="res-item"
+            :class="{ active: store.ideSelectedSkillId === item.id }"
+            @click="onSelectSkill(item.id)"
+          >
+            <span
+              class="status-dot"
+              :class="
+                item.status === 'PUBLISHED'
+                  ? 'ok'
+                  : item.status === 'PUBLISHED_DRAFT'
+                    ? 'warn'
+                    : 'muted'
+              "
+            ></span>
+            <div class="res-main">
+              <div class="res-name-row">
+                <span class="res-name">{{ item.name }}</span>
+                <span
+                  class="ref-count-tag"
+                  style="color: var(--success); background: rgba(7, 136, 85, 0.12)"
+                >
+                  全局
+                </span>
+              </div>
+              <div class="res-sub mono">
+                {{ item.apis.length ? item.apis.join(', ') : item.id }}
+              </div>
+            </div>
+          </div>
+        </template>
       </div>
 
       <!-- 4. 回归用例 -->

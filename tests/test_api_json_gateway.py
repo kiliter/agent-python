@@ -85,7 +85,7 @@ def test_json_contract_schema_headers_and_fixed_params():
     assert api.connector == "unified-gateway-json"
     assert api.is_json is True
     assert not SMS_XML_API.is_json
-    assert ConnectorType.__args__ == ("unified-gateway-xml", "unified-gateway-json")
+    assert ConnectorType.__args__ == ("unified-gateway-xml", "unified-gateway-json", "http")
     assert api.schema_errors() == []
 
     # JSON 契约允许包含非 XML 标签字符的 JSON 键（如 @type），但拦截空键名

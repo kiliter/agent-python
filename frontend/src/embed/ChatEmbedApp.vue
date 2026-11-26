@@ -22,6 +22,7 @@ import {
   Copy,
   Database,
   FileText,
+  Layers,
   LayoutGrid,
   Loader2,
   Maximize2,
@@ -45,6 +46,7 @@ import type {
   RunStatus,
   RunStep,
   ScaleMode,
+  SessionOrderItem,
   TextMessage,
 } from './types'
 import RecommendCard from './components/RecommendCard.vue'
@@ -55,6 +57,7 @@ import ChatInput from './components/ChatInput.vue'
 import PreviewDialog from './components/PreviewDialog.vue'
 import TemplateStructureDialog from './components/TemplateStructureDialog.vue'
 import SwitchTemplateDialog from './components/SwitchTemplateDialog.vue'
+import CompositeRunDialog from './components/CompositeRunDialog.vue'
 import StageConfirmDialog from './components/StageConfirmDialog.vue'
 import BrandMark from '@/components/BrandMark.vue'
 
@@ -160,8 +163,9 @@ const docExpanded = ref(false)
 const compacting = ref(false)
 const memoryPanelOpen = ref(false)
 
-// 三大居中弹窗状态（全部挂载在 .embed-stage 内）
+// 弹窗状态（全部挂载在 .embed-stage 内）
 const switchTplVisible = ref(false)
+const compositeDialogVisible = ref(false)
 const tplStructureId = ref<number | null>(null)
 const previewModalRunId = ref<string | null>(null)
 const previewModalInitMode = ref<ReportViewMode>('preview')
@@ -207,6 +211,7 @@ const inputEntries = computed(() => {
 })
 
 const inputCount = computed(() => inputEntries.value.length)
+const sessionItems = computed<SessionOrderItem[]>(() => session.value?.items || [])
 const hasMemoryDoc = computed(() => upstreamDocument.value.length > 0)
 const effectiveDocChars = computed(() =>
   hasMemoryDoc.value ? upstreamDocument.value.length : session.value?.documentChars || 0,
@@ -710,6 +715,17 @@ async function handleInit(data: ChatInitMessage) {
   confirmedPayload.value = null
   showCloseFallback.value = false
 
+  const normalizedItems: SessionOrderItem[] = Array.isArray(data.items)
+    ? data.items
+        .filter(it => it && typeof it === 'object')
+        .map(it => ({
+          label: typeof it.label === 'string' ? it.label.trim() : '',
+          params: normalizeInputs(it.params as Record<string, unknown> | undefined),
+          ...(typeof it.document === 'string' && it.document.trim() ? { document: it.document } : {}),
+          ...(typeof it.templateId === 'number' && it.templateId > 0 ? { templateId: it.templateId } : {}),
+        }))
+    : []
+
   const isReinit = !!session.value
   if (isReinit) reinitLoading.value = true
   else phase.value = 'loading'
@@ -719,6 +735,7 @@ async function handleInit(data: ChatInitMessage) {
       orderId,
       inputs: normalizeInputs(data.inputs),
       document: docStr,
+      ...(normalizedItems.length ? { items: normalizedItems } : {}),
       ...(data.target === 'draft' ? { target: 'draft' as const } : {}),
     })
     if (gen !== initGen) return
@@ -730,6 +747,7 @@ async function handleInit(data: ChatInitMessage) {
       inputsPanelOpen.value = false
       memoryPanelOpen.value = false
       switchTplVisible.value = false
+      compositeDialogVisible.value = false
       tplStructureId.value = null
       previewModalRunId.value = null
       closeConfirmDialog(false)
@@ -1115,6 +1133,60 @@ async function runTemplate(templateId: number, inputs?: Record<string, string>) 
   }
 }
 
+async function runComposite(payload: {
+  items: api.CompositeRunItemPayload[]
+  polish: boolean
+  polishInstruction: string
+}) {
+  const s = session.value
+  if (!s || actionPending.value) return
+  if (busy.value) {
+    stageToast.warning('当前已有运行中的核查任务，请等待完成或先取消')
+    return
+  }
+  actionPending.value = true
+  try {
+    const res = await api.startCompositeRun(s.sessionId, payload)
+    compositeDialogVisible.value = false
+    if (res.session) applySession(res.session)
+    if (res.message) upsertMessage(res.message)
+    stageToast.info(`已启动 ${payload.items.length} 项业务并发核查与汇总拼装`)
+    void scrollToBottom(true)
+  } catch (err) {
+    if (err instanceof ChatApiError && err.code === 'RUN_IN_PROGRESS') {
+      stageToast.warning('当前已有运行中的核查任务，请等待完成或先取消')
+    } else {
+      stageToast.error(`启动多业务复合核查失败：${chatErrorText(err)}`)
+    }
+  } finally {
+    actionPending.value = false
+  }
+}
+
+async function polishReport(run: RunMessage) {
+  if (!session.value || actionPending.value || busy.value) return
+  actionPending.value = true
+  stageToast.info('正在调用大模型进行二次润色，原确定性拼装版本将保留为 v1…')
+  try {
+    const res = await api.polishRun(run.runId, '')
+    if (res.session) applySession(res.session)
+    if (res.message) upsertMessage(res.message)
+    stageToast.success(`二次润色完成（已保存为 AI 改写 v${res.versionNo}，可随时切回原版核对）`)
+  } catch (err) {
+    stageToast.error(`二次润色失败：${chatErrorText(err)}`)
+  } finally {
+    actionPending.value = false
+  }
+}
+
+function handleRerunRun(run: RunMessage) {
+  if (run.isComposite) {
+    compositeDialogVisible.value = true
+    return
+  }
+  void runTemplate(run.templateId)
+}
+
 async function handleManualCompact() {
   if (
     !session.value ||
@@ -1349,6 +1421,10 @@ function onGlobalKeydown(e: KeyboardEvent) {
   }
   if (switchTplVisible.value) {
     switchTplVisible.value = false
+    return
+  }
+  if (compositeDialogVisible.value) {
+    compositeDialogVisible.value = false
   }
 }
 
@@ -1492,6 +1568,19 @@ onBeforeUnmount(() => {
             >
               <Maximize2 v-if="scaleMode === 'scaled'" :size="13" />
               <Columns2 v-else :size="13" />
+            </button>
+
+            <!-- 2.5) 多业务复合核查与汇总拼装入口 -->
+            <button
+              v-if="phase === 'ready' && session"
+              type="button"
+              class="topbar-pill-btn eb-tip eb-tip-right"
+              :class="{ active: compositeDialogVisible || sessionItems.length > 1 }"
+              data-tip="一单多业务并发核查并按汇总大模板确定性拼装"
+              @click="compositeDialogVisible = true"
+            >
+              <Layers :size="12" />
+              <span>多业务拼装{{ sessionItems.length > 1 ? ` (${sessionItems.length})` : '' }}</span>
             </button>
 
             <!-- 3) 全部模板库按钮 -->
@@ -1708,6 +1797,28 @@ onBeforeUnmount(() => {
         <template v-else-if="session">
           <main ref="listRef" class="chat-scroll-area">
             <div class="chat-stream-container">
+              <!-- 多业务复合工单引导横幅（当上层传入 >= 2 个产品项时展示） -->
+              <div v-if="sessionItems.length > 1" class="composite-order-banner">
+                <div class="cob-left">
+                  <Layers :size="15" class="cob-ic" />
+                  <div class="cob-text">
+                    <div class="cob-title">检测到当前工单包含 {{ sessionItems.length }} 项待核查业务</div>
+                    <div class="cob-items">
+                      {{ sessionItems.map((it, i) => `${i + 1}. ${it.label || it.params?.['业务名称'] || it.params?.busiName || '未命名业务'}`).join(' ｜ ') }}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  class="cob-btn"
+                  :disabled="busy || actionPending"
+                  @click="compositeDialogVisible = true"
+                >
+                  <Layers :size="12" />
+                  <span>一键多业务并发拼装</span>
+                </button>
+              </div>
+
               <!-- 已确认报告轻提示条 -->
               <div
                 v-if="session.confirmed"
@@ -1805,7 +1916,8 @@ onBeforeUnmount(() => {
                       @reset-draft="onRewriteCardResetDraft(m)"
                       @open-preview="mode => onRewriteCardOpenPreview(m, mode)"
                       @switch-template="switchTplVisible = true"
-                      @rerun="runTemplate(findRewriteTargetRun(m)!.run.templateId)"
+                      @rerun="handleRerunRun(findRewriteTargetRun(m)!.run)"
+                      @polish="polishReport(findRewriteTargetRun(m)!.run)"
                       @confirm="onRewriteCardConfirm(m)"
                     />
                   </div>
@@ -1864,7 +1976,8 @@ onBeforeUnmount(() => {
                       @reset-draft="run => resetRunDraft(run)"
                       @open-preview="(run, mode) => openReportModal(run, mode, null)"
                       @switch-template="switchTplVisible = true"
-                      @rerun="run => runTemplate(run.templateId)"
+                      @rerun="run => handleRerunRun(run)"
+                      @polish="run => polishReport(run)"
                       @confirm="run => confirmRun(run)"
                     />
                   </div>
@@ -1951,6 +2064,17 @@ onBeforeUnmount(() => {
         @close="switchTplVisible = false"
         @select="id => runTemplate(id)"
         @preview="id => (tplStructureId = id)"
+      />
+
+      <CompositeRunDialog
+        :visible="compositeDialogVisible"
+        :session-id="session?.sessionId || ''"
+        :session-inputs="session?.inputs || {}"
+        :session-items="sessionItems"
+        :busy="busy"
+        :action-pending="actionPending"
+        @close="compositeDialogVisible = false"
+        @submit="payload => runComposite(payload)"
       />
 
       <PreviewDialog
@@ -2854,5 +2978,67 @@ onBeforeUnmount(() => {
   text-align: center;
   font-size: 11px;
   color: var(--gpt-ink-muted);
+}
+
+.composite-order-banner {
+  margin-bottom: 12px;
+  padding: 10px 13px;
+  border-radius: 10px;
+  border: 1px solid #bfdbfe;
+  background: linear-gradient(135deg, #eff6ff 0%, #f8fafc 100%);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.cob-left {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  min-width: 0;
+  flex: 1;
+}
+.cob-ic {
+  color: #2563eb;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.cob-text {
+  min-width: 0;
+}
+.cob-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #1e3a8a;
+}
+.cob-items {
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: #475569;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cob-btn {
+  flex-shrink: 0;
+  height: 30px;
+  padding: 0 11px;
+  border-radius: 7px;
+  border: 1px solid #2563eb;
+  background: #2563eb;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.cob-btn:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+.cob-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 </style>

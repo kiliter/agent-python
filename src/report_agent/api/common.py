@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from ..container import Container
 from ..domain.resources import Issue
+from ..runtime.router import TemplateRouteError
 from ..runtime.runner import AgentRunner, InputValidationError, RunRequest, TemplateUnavailable
 from ..runtime.workspace import queue_listener
 from ..store.fsutil import fmt_time
@@ -128,7 +129,22 @@ def sse_run(runner: AgentRunner, req: RunRequest, shape: Callable[[dict[str, Any
             out = await runner.run(req, listener=queue_listener(queue))
             await queue.put(("final", shape(out)))
         except InputValidationError as exc:
-            await queue.put(("error", {"code": "INVALID_INPUT", "message": str(exc), "errors": exc.errors}))
+            payload: dict[str, Any] = {"code": "INVALID_INPUT", "message": str(exc), "errors": exc.errors}
+            if exc.routing is not None:
+                payload["templateId"] = exc.template_id
+                payload["templateName"] = exc.template_name
+                payload["routing"] = exc.routing
+            await queue.put(("error", payload))
+        except TemplateRouteError as exc:
+            await queue.put((
+                "error",
+                {
+                    "code": "TEMPLATE_ROUTE_FAILED",
+                    "message": str(exc),
+                    "reason": exc.reason,
+                    "candidates": exc.candidates,
+                },
+            ))
         except TemplateUnavailable as exc:
             await queue.put(("error", {"code": "TEMPLATE_UNAVAILABLE", "message": str(exc)}))
         except Exception as exc:  # noqa: BLE001

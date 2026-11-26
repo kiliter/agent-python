@@ -229,10 +229,13 @@ def template_item(tpl: Template, state: ResourceState, rs: ResourceSet, stats: d
 
 
 def skill_item(skill: Skill, state: ResourceState, ref_templates: list[str], stats: dict[str, Any]) -> dict[str, Any]:
+    doc_paths = sorted(skill.docs.keys())
     return {
-        "id": skill.id, "name": skill.title, "description": skill.meta.description, **status_fields(state),
+        "id": skill.id, "name": skill.title, "description": skill.meta.description,
+        "scope": skill.meta.scope, **status_fields(state),
         "refsCount": len(ref_templates), "refTemplates": ref_templates,
         "loads7d": int((stats.get("skills") or {}).get(skill.id, 0)), "apis": list(skill.meta.apis),
+        "docsCount": len(doc_paths), "docPaths": doc_paths,
         "draftRevision": (state.draft or {}).get("revision"),
     }
 
@@ -244,12 +247,18 @@ def api_item(api: ApiContract, state: ResourceState, refs: list[str], stats: dic
     avg = int(sum(ms for _, ms in calls) / n) if n else None
     props = api.input.get("properties") or {}
     required = set(api.input.get("required") or [])
+    is_http = api.connector == "http"
     is_json = api.connector == "unified-gateway-json"
+    fmt_label = "HTTP" if is_http else ("JSON" if is_json else "XML")
+    type_label = "常规 HTTP" if is_http else ("统一网关 JSON" if is_json else "统一网关 XML")
     return {
         "name": api.name, "title": api.title, "description": api.description,
         "connector": api.connector,
-        "format": "JSON" if is_json else "XML",
-        "type": "统一网关 JSON" if is_json else "统一网关 XML",
+        "format": fmt_label,
+        "type": type_label,
+        "method": api.method if is_http else None,
+        "url": api.url if is_http else "",
+        "bodyType": api.bodyType if is_http else None,
         "headers": dict(getattr(api, "headers", None) or {}),
         "idempotent": api.idempotent,
         "processCode": api.processCode, **status_fields(state), "refs": refs, "calls7d": f"{n:,}",

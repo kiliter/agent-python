@@ -15,15 +15,26 @@ sources:
   - src/report_agent/seed/skills/second-confirmation-sms/SKILL.md
   - src/report_agent/seed/skills/template-router/SKILL.md
   - src/report_agent/seed/skills/verification-sms/SKILL.md
+  - src/report_agent/domain/skill.py
   - tools/java_migration/MAPPING.md
-updated: 2026-11-12
+updated: 2026-11-26
 ---
 
 # 12 个纯文本业务 Skill 总览
 
 <!-- #Created By AiCoding(codex) -->
 
-`src/report_agent/seed/skills/` 内置了 **12 个纯文本业务 Skill**：其中 **11 个填报取数与派生 Skill** 供 `AgentRunner` 在填写 33 个生产申告模板时按需加载（支持 `load_skill(names=[...])` 批量加载），组合平台提供的 [12 个确定性工具](../architecture/deterministic-tools.md) 完成取数、筛选、计算与证据提交；另外 **1 个聊天路由 Skill [template-router](template-router.md)** 专供嵌入式聊天窗口的 `ChatAgent` 在选模板阶段做分流推荐。所有 Skill 均仅由一个 `SKILL.md` 文件（YAML frontmatter + Markdown 操作手册）构成，不含任何可执行脚本。
+`src/report_agent/seed/skills/` 内置了 **12 个纯文本业务 Skill**：其中 **11 个填报取数与派生 Skill**（`scope: template`）供 `AgentRunner` 在填写 33 个生产申告模板时按需加载（支持 `load_skill(names=[...])` 批量加载），组合平台提供的 [12 个确定性工具](../architecture/deterministic-tools.md) 完成取数、筛选、计算与证据提交；另外 **1 个聊天路由 Skill [template-router](template-router.md)**（`scope: chat`）专供嵌入式聊天窗口的 `ChatAgent` 在选模板阶段做分流推荐。所有 Skill 均由纯文本 Markdown 构成（`SKILL.md` 为主入口，支持按需拆分至同级及最多两级子目录下的参考 `.md` 文档），不含任何可执行脚本。
+
+> **Skill 作用域（`scope`）模型**（`domain/skill.py`）：每个 Skill 在 frontmatter 中通过可选字段 `scope` 声明生效范围，共三态：
+> - **`template`**（默认，向后兼容）：仅对显式绑定了该 Skill 的填报模板生效；
+> - **`global`**：全局填报 Skill，所有填报模板运行时经 `ResourceSet.allowed_skills` / `allowed_apis` 自动持有（无需逐模板勾选），适合“查询单据正文”等全模板通用能力；
+> - **`chat`**：聊天助手专用 Skill，仅供 `ChatAgent` 通过 `load_skill` 加载（`template-router` 未声明 `scope` 时自动向后兼容为 `chat`），禁止声明外部业务接口（`CHAT_SKILL_HAS_APIS` / `ROUTER_SKILL_HAS_APIS`），也不会混入模板填报。
+
+> **多文件子目录 Markdown 渐进式懒加载（Progressive Disclosure）**（`domain/skill.py` / `runtime/tools.py` / `chat/agent.py`）：
+> - 每个 Skill 除主文件 `skills/<id>/SKILL.md` 外，还可在同级或最多两级子目录下存放参考 `.md` 文档（例如 `references/broadband.md`、`examples/case-1.md`，单技能上限 50 篇、单篇上限 20 万字符，严格拒绝软链接、绝对路径、隐藏段及 `..` 路径穿越）。
+> - **L0 → L1 → L2 三层披露**：L0 提示词仅列出 Skill 名称与摘要；L1 调用 `load_skill(name)` 返回 `SKILL.md` 正文并在末尾自动附加「可按需加载的参考文档」目录（路径 + 首个标题），不一次性展开子文档；L2 仅在命中场景时调用 `load_skill(name, doc="references/xxx.md")` 或 `docs=[...]` 按需加载对应子文档（填报运行时与聊天助手均统一支持）。
+> - **发布前静态链路校验**：`validate_skill` 自动扫描 `SKILL.md` 与所有子文档中的相对 `.md` 链接（忽略代码块与行内代码），缺失或越界链接触发阻塞错误 `SKILL_DOC_NOT_FOUND`，从 `SKILL.md` 不可达的孤儿文档触发告警 `SKILL_DOC_UNREFERENCED`；`template-router` 的 `### <ID>` 覆盖检查同步跨 `SKILL.md` 与所有子文档扫描。
 
 ## 1. 全量 Skill 矩阵
 

@@ -25,6 +25,8 @@ _TOOL_LABELS: dict[str, str] = {
     "expand_period": "展开账期区间",
     "time_diff": "计算时间差",
     "regex_extract": "正则提取内容",
+    "list_templates": "检索在线模板",
+    "get_template": "查看模板详情",
 }
 
 _BEARER_TOKEN_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._\-+/=]{6,}")
@@ -238,6 +240,30 @@ class StepMapper:
         ev_type, at_ms, data = _unpack_event(ev)
         if not ev_type or ev_type in ("model_request", "model_text"):
             return None
+
+        if ev_type == "route_started":
+            router_skill = str(data.get("routerSkill") or "").strip()
+            rev = str(data.get("rev") or "—")
+            if router_skill:
+                text = f"开始自动匹配模板（使用 {router_skill}，版本 {rev}）"
+            else:
+                text = f"开始自动匹配模板（检索在线模板，版本 {rev}）"
+            return self._emit("start", text, ok=True, at_ms=at_ms)
+
+        if ev_type == "route_completed":
+            tpl_name = str(
+                data.get("templateName")
+                or (f"模板 {data['templateId']}" if data.get("templateId") is not None else "未知模板")
+            )
+            tid = data.get("templateId")
+            conf = str(data.get("confidence") or "").strip()
+            tid_part = f"#{tid} " if tid is not None else ""
+            conf_part = f"（置信度：{conf}）" if conf else ""
+            return self._emit("check", f"自动匹配模板：{tid_part}{tpl_name}{conf_part}", ok=True, at_ms=at_ms)
+
+        if ev_type == "route_failed":
+            err = _sanitize_error(data.get("error") or data.get("reason"), fallback="未匹配到合适模板")
+            return self._emit("error", f"自动匹配模板失败：{err}", ok=False, at_ms=at_ms)
 
         if ev_type == "run_started":
             tpl_name = str(

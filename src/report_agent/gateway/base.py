@@ -350,7 +350,11 @@ def extract_records(contract: ApiContract, root: ET.Element) -> ApiCallResult:
             if resp.success.missingAs == "failure":
                 return ApiCallResult(ok=False, error=f"响应中没有 {resp.success.path}")
         elif code != resp.success.equals:
-            desc = _first_text(root, ["resp_desc", "respDesc", "ret_msg", "retMsg", "message", "msg", "faultstring"])
+            desc = _first_text(
+                root,
+                ["resp_desc", "respDesc", "resultDesc", "result_desc", "ret_msg", "retMsg", "errMsg", "err_msg",
+                 "message", "msg", "errorMessage", "faultstring"],
+            )
             return ApiCallResult(ok=False, error=f"业务返回码 {code}" + (f"：{desc}" if desc else ""))
     if mode == "none":
         return ApiCallResult(ok=True, records=[], no_data=False)
@@ -632,7 +636,9 @@ def extract_json_records(contract: ApiContract, data: Any) -> ApiCallResult:
                     return ApiCallResult(ok=False, error=f"响应中没有 {resp.success.path}")
             elif code != resp.success.equals:
                 desc = _first_json_text(
-                    data, ["resp_desc", "respDesc", "ret_msg", "retMsg", "message", "msg", "error_msg", "faultstring"]
+                    data,
+                    ["resp_desc", "respDesc", "resultDesc", "result_desc", "ret_msg", "retMsg",
+                     "errMsg", "err_msg", "message", "msg", "error_msg", "errorMessage", "faultstring"],
                 )
                 return ApiCallResult(ok=False, error=f"业务返回码 {code}" + (f"：{desc}" if desc else ""))
         if mode == "none":

@@ -65,10 +65,63 @@ def test_draft_publish_and_rollback(container):
 
 def test_nothing_to_publish(container):
     c = container
-    c.service.save_template(c.service.template_working(1001), "测试员")
+    # 1. 保存与线上一致的模板不会产生冗余草稿，状态仍保持 PUBLISHED，且发布抛 NothingToPublish
+    meta_noop = c.service.save_template(c.service.template_working(1001), "测试员")
+    assert meta_noop.get("cleared") is True
+    assert not c.drafts.exists(tpl_ref(1001))
+    assert c.service.state(tpl_ref(1001)).status == "PUBLISHED"
     with pytest.raises(NothingToPublish):
         c.service.publish_draft(tpl_ref(1001), "测试员")
     assert c.releases.live_rev() == "r1"
+
+    # 2. 先改内容生成草稿（PUBLISHED_DRAFT），再改回与线上一致并保存 → 自动清理草稿恢复 PUBLISHED
+    orig_tpl = c.service.template_online(1001)
+    assert orig_tpl is not None
+    _edit_name(c, "临时改名")
+    assert c.service.state(tpl_ref(1001)).status == "PUBLISHED_DRAFT"
+    meta_reverted = c.service.save_template(orig_tpl, "测试员", expected_revision=1)
+    assert meta_reverted.get("cleared") is True
+    assert not c.drafts.exists(tpl_ref(1001))
+    assert c.service.state(tpl_ref(1001)).status == "PUBLISHED"
+
+    # 3. 修改后用 rollback(draft_only) 恢复到与当前线上相同的 r1 → 同样自动清理草稿恢复 PUBLISHED
+    _edit_name(c, "临时改名2")
+    assert c.service.state(tpl_ref(1001)).status == "PUBLISHED_DRAFT"
+    rb_res = c.service.rollback(tpl_ref(1001), "r1", "draft_only", "改回线上一致", "测试员")
+    assert rb_res["cleared"] is True
+    assert not c.drafts.exists(tpl_ref(1001))
+    assert c.service.state(tpl_ref(1001)).status == "PUBLISHED"
+
+    # 4. Skill 同样具备改回线上一致自动清理草稿能力
+    _, live_rs = c.service.live()
+    sid = next(iter(live_rs.skills))
+    orig_sk = c.service.skill_online(sid)
+    assert orig_sk is not None
+    c.service.save_skill(sid, orig_sk.markdown + "\n临时修改", "测试员")
+    assert c.service.state(skill_ref(sid)).status == "PUBLISHED_DRAFT"
+    sk_reverted = c.service.save_skill(sid, orig_sk.markdown, "测试员", expected_revision=1)
+    assert sk_reverted.get("cleared") is True
+    assert not c.drafts.exists(skill_ref(sid))
+    assert c.service.state(skill_ref(sid)).status == "PUBLISHED"
+
+    # 5. API 与系统提示词改回与线上一致时同样自动清理草稿并恢复 PUBLISHED
+    api_name = next(iter(live_rs.apis))
+    orig_api_yaml = c.service.api_yaml(api_name, "online")
+    assert orig_api_yaml is not None
+    c.service.save_api(api_name, orig_api_yaml.replace("title:", "title: 临时-", 1), "测试员")
+    assert c.service.state(api_ref(api_name)).status == "PUBLISHED_DRAFT"
+    api_reverted = c.service.save_api(api_name, orig_api_yaml, "测试员", expected_revision=1)
+    assert api_reverted.get("cleared") is True
+    assert not c.drafts.exists(api_ref(api_name))
+    assert c.service.state(api_ref(api_name)).status == "PUBLISHED"
+
+    orig_sp = c.service.system_prompt("online")
+    c.service.save_system_prompt(orig_sp + "\n临时追加", "测试员")
+    assert c.service.state(SP_REF).status == "PUBLISHED_DRAFT"
+    sp_reverted = c.service.save_system_prompt(orig_sp, "测试员", expected_revision=1)
+    assert sp_reverted.get("cleared") is True
+    assert not c.drafts.exists(SP_REF)
+    assert c.service.state(SP_REF).status == "PUBLISHED"
 
 
 def test_publish_blocked_by_validation(container):

@@ -9,6 +9,10 @@ inputs:
   required: false
   description: 客户手机号，11 位
   sample: '13900001234'
+- key: 申诉内容
+  required: false
+  description: 客户申诉或投诉的原始诉求正文，辅助判断争议场景与核查重点
+  sample: 用户反映未经本人允许开通业务，要求核查办理依据并处理。
 - key: 充值号码
   required: false
   description: 充值的手机号码，11 位

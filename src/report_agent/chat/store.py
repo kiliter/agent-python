@@ -38,8 +38,12 @@ def session_id_for(user_id: str, order_id: str) -> str:
     return hashlib.sha256(f"{u}\x00{o}".encode("utf-8")).hexdigest()[:32]
 
 
-def inputs_fingerprint(inputs: dict[str, str], document: str) -> str:
-    """对清洗后的非空 inputs（排序键值）与 document 计算稳定 SHA-256 hex。"""
+def inputs_fingerprint(
+    inputs: dict[str, str],
+    document: str,
+    items: list[dict[str, Any]] | None = None,
+) -> str:
+    """对清洗后的非空 inputs（排序键值）、document 及可选多商品 items 计算稳定 SHA-256 hex。"""
     cleaned: dict[str, str] = {}
     for raw_k, raw_v in (inputs or {}).items():
         key = ("" if raw_k is None else str(raw_k)).strip()
@@ -49,8 +53,11 @@ def inputs_fingerprint(inputs: dict[str, str], document: str) -> str:
         if val:
             cleaned[key] = val
     doc = "" if document is None else str(document)
+    body: dict[str, Any] = {"inputs": cleaned, "document": doc}
+    if items:
+        body["items"] = items
     payload = json.dumps(
-        {"inputs": cleaned, "document": doc},
+        body,
         sort_keys=True,
         ensure_ascii=False,
         separators=(",", ":"),

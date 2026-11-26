@@ -129,6 +129,7 @@ class OpenSessionBody(BaseModel):
     userId: str = ""
     orderId: str = ""
     inputs: dict[str, Any] | None = Field(default_factory=dict)
+    items: list[dict[str, Any]] | None = Field(default=None, description="可选多商品子项列表（用于单号码多业务复合工单）")
     document: str | None = ""
     target: str | None = "online"
 
@@ -141,6 +142,16 @@ class SendMessageBody(BaseModel):
 class StartRunBody(BaseModel):
     templateId: int
     inputs: dict[str, Any] | None = None
+
+
+class StartCompositeRunBody(BaseModel):
+    items: list[dict[str, Any]] = Field(default_factory=list, description="多业务子项：每项含 templateId、label、params/inputs、可选 document")
+    polish: bool = False
+    polishInstruction: str = ""
+
+
+class PolishRunBody(BaseModel):
+    instruction: str = ""
 
 
 class ConfirmRunBody(BaseModel):
@@ -162,6 +173,7 @@ async def open_chat_session(
         body.inputs,
         body.document,
         body.target or "online",
+        items=body.items,
         caller=caller,
     )
 
@@ -241,6 +253,42 @@ async def start_chat_run(
         caller=caller,
     )
     return {"message": msg, "session": session}
+
+
+@chat_router.post("/sessions/{sid}/composite-runs")
+async def start_chat_composite_run(
+    request: Request,
+    sid: str,
+    body: StartCompositeRunBody,
+    caller: ChatCaller = Depends(require_chat_caller),
+) -> dict[str, Any]:
+    """发起多商品 × 多模板复合核查与汇总大模板拼装运行。#Created By AiCoding(codex)"""
+    msg, session = await _chat(request).start_composite_run(
+        sid,
+        body.items,
+        polish=body.polish,
+        polish_instruction=body.polishInstruction,
+        caller=caller,
+    )
+    return {"message": msg, "session": session}
+
+
+@chat_router.post("/runs/{run_id}/polish")
+async def polish_chat_run(
+    request: Request,
+    run_id: str,
+    body: PolishRunBody | None = None,
+    sessionId: str | None = None,
+    caller: ChatCaller = Depends(require_chat_caller),
+) -> dict[str, Any]:
+    """对已完成的报告一键执行大模型二次润色（追加新版本，保留确定性原版）。#Created By AiCoding(codex)"""
+    expected_sid = _extract_expected_sid(request, sessionId)
+    return await _chat(request).polish_run(
+        run_id,
+        (body.instruction if body else ""),
+        caller=caller,
+        expected_sid=expected_sid,
+    )
 
 
 @chat_router.get("/runs/{run_id}/raw")

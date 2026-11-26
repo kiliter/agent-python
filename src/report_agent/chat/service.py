@@ -20,6 +20,12 @@ from typing import Any, Literal
 from ..domain.jinja_env import render_body
 from ..domain.resources import ResourceSet
 from ..domain.template import Template
+from ..runtime.composite import (
+    MAX_COMPOSITE_ITEMS,
+    CompositeItemRequest,
+    CompositeRunner,
+    CompositeRunRequest,
+)
 from ..runtime.runner import AgentRunner, RunRequest
 from ..runtime.text_tools import safe_regex_fullmatch
 from ..store.fsutil import now_iso
@@ -380,12 +386,14 @@ class ChatService:
         elif kind == "run":
             tid = int(out.get("templateId", 0))
             tpl = rs.templates.get(tid)
-            out["templateOffline"] = tpl is None or tpl.offline
+            out["templateOffline"] = False if out.get("isComposite") else (tpl is None or tpl.offline)
             rid = str(out.get("runId") or "")
             live_steps = self.manager.get_steps(rid) if rid else None
             out["steps"] = _merge_steps(out.get("steps") or [], live_steps)
             out["missingShown"] = list(out.get("missingShown") or [])
             out["versions"] = [dict(v) for v in (out.get("versions") or []) if isinstance(v, dict)]
+            if isinstance(out.get("compositeItems"), list):
+                out["compositeItems"] = [dict(x) for x in out["compositeItems"] if isinstance(x, dict)]
         return out
 
     def _build_view(
@@ -425,6 +433,7 @@ class ChatService:
             "updatedAt": str(session["updatedAt"]),
             "inputs": cur_inputs,
             "inputSources": cur_sources,
+            "items": copy.deepcopy(session.get("items") or []),
             "inputsVersion": int(session.get("inputsVersion", 1)),
             "documentChars": len(session.get("document") or ""),
             "activeRunId": active_run_id,
@@ -441,6 +450,42 @@ class ChatService:
             view["inputsChanged"] = inputs_changed
         return view
 
+    @staticmethod
+    def _normalize_session_items(raw_items: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        """清洗上层传入的多商品子项列表（兼容平铺字段或嵌套 params 对象）。#Created By AiCoding(codex)"""
+        if not raw_items:
+            return []
+        out: list[dict[str, Any]] = []
+        for idx, raw in enumerate(raw_items[:MAX_COMPOSITE_ITEMS], start=1):
+            if not isinstance(raw, dict):
+                continue
+            params: dict[str, str] = {}
+            nested = raw.get("params") or raw.get("inputs")
+            if isinstance(nested, dict):
+                for k, v in nested.items():
+                    ks = str(k).strip()
+                    vs = "" if v is None else str(v).strip()
+                    if ks and vs:
+                        params[ks] = vs
+            for k, v in raw.items():
+                if k in ("params", "inputs", "document", "label", "templateId"):
+                    continue
+                ks = str(k).strip()
+                vs = "" if v is None else str(v).strip()
+                if ks and vs and ks not in params:
+                    params[ks] = vs
+            label = str(raw.get("label") or params.get("业务名称") or f"业务 {idx}").strip()
+            doc_val = "" if raw.get("document") is None else str(raw.get("document"))
+            tid_raw = raw.get("templateId")
+            tid = int(tid_raw) if isinstance(tid_raw, int) and not isinstance(tid_raw, bool) and tid_raw > 0 else None
+            entry: dict[str, Any] = {"label": label, "params": params}
+            if doc_val:
+                entry["document"] = doc_val
+            if tid is not None:
+                entry["templateId"] = tid
+            out.append(entry)
+        return out
+
     # ------------------------------------------------------------------ 会话生命周期
     async def open_session(
         self,
@@ -450,6 +495,7 @@ class ChatService:
         document: str | None = "",
         target: str = "online",
         *,
+        items: list[dict[str, Any]] | None = None,
         caller: ChatCaller,
     ) -> dict[str, Any]:
         """创建或按 (userId, orderId) 恢复会话，比对入参指纹处理更新与重启中断恢复。"""
@@ -480,7 +526,8 @@ class ChatService:
             if str(k).strip()
         }
         clean_doc = "" if document is None else str(document)
-        fp = inputs_fingerprint(clean_inputs, clean_doc)
+        clean_items = self._normalize_session_items(items)
+        fp = inputs_fingerprint(clean_inputs, clean_doc, clean_items or None)
         sid = session_id_for(uid, oid)
         _, rs = await self._capture_snapshot(tgt, allow_empty=True)
 
@@ -499,6 +546,7 @@ class ChatService:
                     "updatedAt": now,
                     "inputs": init_inputs,
                     "inputSources": init_sources,
+                    "items": clean_items,
                     "inputsVersion": 1,
                     "document": clean_doc,
                     "fingerprint": fp,
@@ -549,6 +597,7 @@ class ChatService:
 
                 session["inputs"] = merged_inputs
                 session["inputSources"] = merged_sources
+                session["items"] = clean_items
                 session["document"] = clean_doc
                 session["fingerprint"] = fp
 
@@ -1581,6 +1630,264 @@ class ChatService:
         await self.resolve_session_for_run(run_id, caller=caller, expected_sid=expected_sid)
         self.manager.cancel(run_id.strip())
         return {"ok": True}
+
+    async def start_composite_run(
+        self,
+        sid: str,
+        items: list[dict[str, Any]],
+        *,
+        polish: bool = False,
+        polish_instruction: str = "",
+        caller: ChatCaller,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """发起多商品 × 多模板复合核查运行，后台并发执行、Jinja2 确定性拼装并可选二次润色。#Created By AiCoding(codex)"""
+        sid = self._check_sid_format(sid)
+        if not items:
+            raise ChatError(400, "EMPTY_ITEMS", "至少需要选择 1 个业务子项")
+        if len(items) > MAX_COMPOSITE_ITEMS:
+            raise ChatError(400, "TOO_MANY_ITEMS", f"单次复合核查最多支持 {MAX_COMPOSITE_ITEMS} 项业务")
+
+        async with self.store.lock_for(sid):
+            session = await self.store.aget(sid)
+            if session is None:
+                raise ChatError(404, "SESSION_NOT_FOUND", f"会话 {sid} 不存在")
+            target = str(session.get("target") or "online")
+            self._ensure_caller_allowed(target, caller)
+            if self._heal_interrupted_in_place(session):
+                session = await self.store.asave(session)
+            if self.manager.has_active_run(sid) is not None:
+                raise ChatError(409, "RUN_IN_PROGRESS", "当前已有正在运行的任务，请等待完成或先停止后再启动")
+
+            rev, rs = await self._capture_snapshot(target)
+            comp_items: list[CompositeItemRequest] = []
+            preview_items: list[dict[str, Any]] = []
+            for idx, raw in enumerate(items, start=1):
+                tid_val = raw.get("templateId")
+                if not isinstance(tid_val, int) or isinstance(tid_val, bool) or tid_val <= 0:
+                    raise ChatError(400, "INVALID_TEMPLATE_ID", f"第 {idx} 项模板编号不合法")
+                tpl = rs.templates.get(tid_val)
+                if tpl is None or (tpl.offline and target == "online"):
+                    raise ChatError(400, "TEMPLATE_UNAVAILABLE", f"第 {idx} 项模板 #{tid_val} 不存在或已下线")
+                raw_params = raw.get("params") or raw.get("inputs") or {}
+                params_clean = {
+                    str(k).strip(): ("" if v is None else str(v)).strip()
+                    for k, v in (raw_params.items() if isinstance(raw_params, dict) else ())
+                    if str(k).strip()
+                }
+                label = str(raw.get("label") or params_clean.get("业务名称") or tpl.name).strip()
+                sub_doc = None if raw.get("document") is None else str(raw.get("document"))
+                comp_items.append(
+                    CompositeItemRequest(template_id=tid_val, label=label, params=params_clean, document=sub_doc)
+                )
+                preview_items.append({
+                    "index": idx,
+                    "label": label,
+                    "templateId": tid_val,
+                    "templateName": tpl.name,
+                    "status": "RUNNING",
+                    "foundCount": 0,
+                    "totalCount": len(tpl.definition.fields),
+                    "missingShown": [],
+                    "error": None,
+                })
+
+            run_id = f"cmp-{new_run_id()}"
+            order_inputs = dict(session.get("inputs") or {})
+            if session.get("orderId") and "平台流水号" not in order_inputs:
+                order_inputs["平台流水号"] = str(session["orderId"])
+            card: dict[str, Any] = {
+                "id": self._next_msg_id(session, "m_run"),
+                "role": "assistant",
+                "kind": "run",
+                "createdAt": now_iso(),
+                "runId": run_id,
+                "templateId": 0,
+                "templateName": f"复合工单汇总（{len(comp_items)} 项业务）",
+                "isComposite": True,
+                "compositeItems": preview_items,
+                "sharedGatewayHits": 0,
+                "status": "RUNNING",
+                "rev": rev,
+                "inputsVersion": int(session.get("inputsVersion", 1)),
+                "stale": False,
+                "templateOffline": False,
+                "steps": [],
+                "durationMs": 0,
+                "error": None,
+                "missingShown": [],
+                "foundCount": 0,
+                "totalCount": 0,
+                "versions": [],
+                "confirmed": False,
+            }
+            session.setdefault("messages", []).append(card)
+            await self.store.asave(session)
+            self._remember_run(run_id, sid)
+
+            req = CompositeRunRequest(
+                order=order_inputs,
+                document=str(session.get("document") or ""),
+                items=comp_items,
+                polish=bool(polish),
+                polish_instruction=(polish_instruction or "").strip(),
+                target="draft" if target == "draft" else "online",
+                entry="聊天窗口",
+                operator=f"chat:{session['userId']}",
+                composite_run_id=run_id,
+            )
+
+            async def _on_complete(comp: RunCompletion) -> dict[str, Any]:
+                async with self.store.lock_for(sid):
+                    cur = await self.store.aget(sid)
+                    if cur is None:
+                        return dict(card)
+                    target_card = next(
+                        (
+                            m for m in (cur.get("messages") or [])
+                            if isinstance(m, dict) and m.get("kind") == "run" and m.get("runId") == run_id
+                        ),
+                        None,
+                    )
+                    if target_card is None:
+                        return dict(card)
+                    target_card["steps"] = list(comp.steps)
+                    target_card["durationMs"] = comp.duration_ms
+                    if comp.cancelled:
+                        target_card["status"] = "CANCELLED"
+                        target_card["error"] = comp.error or "复合运行已手动停止"
+                    elif comp.outcome is None:
+                        target_card["status"] = "FAILED"
+                        target_card["error"] = comp.error or "复合运行失败"
+                    else:
+                        out = comp.outcome
+                        st = str(out.get("status") or "FAILED")
+                        target_card["status"] = st
+                        target_card["rev"] = str(out.get("rev") or rev)
+                        target_card["foundCount"] = int(out.get("foundCount") or 0)
+                        target_card["totalCount"] = int(out.get("totalCount") or 0)
+                        target_card["missingShown"] = list(out.get("missingShown") or [])
+                        target_card["sharedGatewayHits"] = int(out.get("sharedGatewayHits") or 0)
+                        target_card["compositeItems"] = [
+                            {
+                                "index": it["index"],
+                                "label": it["label"],
+                                "runId": it["runId"],
+                                "templateId": it["templateId"],
+                                "templateName": it["templateName"],
+                                "status": it["status"],
+                                "foundCount": it["foundCount"],
+                                "totalCount": it["totalCount"],
+                                "missingShown": list(it.get("missingShown") or []),
+                                "error": it.get("error"),
+                            }
+                            for it in (out.get("items") or [])
+                        ]
+                        target_card["error"] = comp.error or out.get("polishError")
+                        versions: list[dict[str, Any]] = []
+                        assembled_md = str(out.get("assembledMarkdown") or "")
+                        if assembled_md.strip():
+                            versions.append({
+                                "no": 1,
+                                "kind": "original",
+                                "markdown": assembled_md,
+                                "createdAt": now_iso(),
+                                "note": "Jinja2 汇总大模板确定性拼装（各子项经强证据核验）",
+                            })
+                        polished_md = out.get("polishedMarkdown")
+                        if isinstance(polished_md, str) and polished_md.strip():
+                            versions.append({
+                                "no": len(versions) + 1,
+                                "kind": "rewrite",
+                                "markdown": polished_md,
+                                "createdAt": now_iso(),
+                                "note": "大模型二次润色（未经证据校验）",
+                            })
+                        target_card["versions"] = versions
+                    await self.store.asave(cur)
+                    _, fresh_rs = await self._capture_snapshot(str(cur.get("target") or "online"), allow_empty=True)
+                    return self._format_message_view(target_card, fresh_rs, cur.get("inputs") or {})
+
+            self.manager.start_composite(sid, req, resources=rs, on_complete=_on_complete)
+            view = self._build_view(session, rs)
+            card_view = self._format_message_view(card, rs, session.get("inputs") or {})
+            return card_view, view
+
+    async def polish_run(
+        self,
+        run_id: str,
+        instruction: str = "",
+        *,
+        caller: ChatCaller,
+        expected_sid: str | None = None,
+    ) -> dict[str, Any]:
+        """对已完成的运行报告一键执行大模型二次润色，追加为新版本并返回更新后的运行卡片。#Created By AiCoding(codex)"""
+        sid = await self.resolve_session_for_run(run_id, caller=caller, expected_sid=expected_sid)
+        rid = run_id.strip()
+
+        async with self.store.lock_for(sid):
+            session = await self.store.aget(sid)
+            if session is None:
+                raise ChatError(404, "SESSION_NOT_FOUND", f"会话 {sid} 不存在")
+            target = str(session.get("target") or "online")
+            self._ensure_caller_allowed(target, caller)
+            card = next(
+                (
+                    m for m in (session.get("messages") or [])
+                    if isinstance(m, dict) and m.get("kind") == "run" and m.get("runId") == rid
+                ),
+                None,
+            )
+            if card is None:
+                raise ChatError(404, "RUN_NOT_FOUND", f"运行记录 {rid} 不存在")
+            if card.get("status") not in ("SUCCESS", "PARTIAL"):
+                raise ChatError(400, "NOT_POLISHABLE", "仅已完成（SUCCESS / PARTIAL）的报告支持二次润色")
+            versions = [v for v in (card.get("versions") or []) if isinstance(v, dict)]
+            if not versions:
+                raise ChatError(400, "NOT_POLISHABLE", "当前运行没有可供润色的报告正文")
+            # 优先以 v1 确定性核验原版作为润色基底，防止多轮润色信息漂移
+            base_md = str(versions[0].get("markdown") or versions[-1].get("markdown") or "")
+            order_ctx = dict(session.get("inputs") or {})
+
+        # 锁外调用大模型润色，不阻塞同会话其它只读操作
+        try:
+            polished_md = await CompositeRunner(self.runner).polish_markdown(
+                base_md,
+                order=order_ctx,
+                instruction=(instruction or "").strip(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            safe_reason = sanitize_error_text(exc, fallback=type(exc).__name__)
+            raise ChatError(502, "POLISH_FAILED", f"大模型二次润色失败：{safe_reason}") from exc
+
+        async with self.store.lock_for(sid):
+            cur = await self.store.aget(sid)
+            if cur is None:
+                raise ChatError(404, "SESSION_NOT_FOUND", f"会话 {sid} 不存在")
+            target_card = next(
+                (
+                    m for m in (cur.get("messages") or [])
+                    if isinstance(m, dict) and m.get("kind") == "run" and m.get("runId") == rid
+                ),
+                None,
+            )
+            if target_card is None:
+                raise ChatError(404, "RUN_NOT_FOUND", f"运行记录 {rid} 不存在")
+            cur_versions = target_card.setdefault("versions", [])
+            next_no = max((int(v.get("no", 0)) for v in cur_versions if isinstance(v, dict)), default=0) + 1
+            new_ver = {
+                "no": next_no,
+                "kind": "rewrite",
+                "markdown": polished_md,
+                "createdAt": now_iso(),
+                "note": (instruction or "").strip() or "大模型二次润色（未经证据校验）",
+            }
+            cur_versions.append(new_ver)
+            target_card["confirmed"] = False
+            await self.store.asave(cur)
+            _, rs = await self._capture_snapshot(str(cur.get("target") or "online"), allow_empty=True)
+            card_view = self._format_message_view(target_card, rs, cur.get("inputs") or {})
+            session_view = self._build_view(cur, rs)
+        return {"message": card_view, "version": new_ver, "versionNo": next_no, "session": session_view}
 
     async def confirm_run(
         self,

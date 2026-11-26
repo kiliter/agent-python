@@ -14,10 +14,36 @@ from typing import Any
 
 from ..domain.api_contract import ApiContract
 from .base import ApiCallResult, decode_xml, parse_xml, xml_to_json_data
+from .http_client import parse_http_response, prepare_http_request
 from .unified_xml import (build_masked_request_json, build_request_xml, mask_xml, parse_gateway_json_response,
                           parse_gateway_response)
 
 _SAFE_MOCK_NAME_RE = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
+_SAFE_MOCK_ROUTE_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+
+
+def _extract_http_mock_route(args: dict[str, Any]) -> str:
+    """从常规 HTTP 入参中提取可用于定位专属 Mock 样例的安全路由值（优先纯数字/常见手机号参数）。#Created By AiCoding(codex)"""
+    if not isinstance(args, dict):
+        return ""
+    for preferred in ("手机号码", "mobile", "phone", "userMobile", "route_value"):
+        val = str(args.get(preferred) or "").strip()
+        if val and _SAFE_MOCK_ROUTE_RE.match(val):
+            return val
+    for val in args.values():
+        s = str(val or "").strip()
+        if s and s.isascii() and s.isdigit() and len(s) <= 32:
+            return s
+    return ""
+
+
+def _http_mock_exts(resp_format: str) -> tuple[str, ...]:
+    fmt = (resp_format or "auto").lower()
+    if fmt == "xml":
+        return ("xml", "json", "txt")
+    if fmt == "text":
+        return ("txt", "json", "xml")
+    return ("json", "xml", "txt")
 
 
 class MockGatewayClient:
@@ -66,6 +92,8 @@ class MockGatewayClient:
 
     async def invoke(self, contract: ApiContract, args: dict[str, Any]) -> ApiCallResult:
         start = time.monotonic()
+        if contract.is_http:
+            return self._invoke_http_mock(contract, args, start)
         try:
             request = contract.build_request(args)
             contract.build_headers(args)
@@ -122,3 +150,36 @@ class MockGatewayClient:
             text = decode_xml(raw_bytes, None)
             return parse_gateway_response(contract, text, 200, int((time.monotonic() - start) * 1000), preview)
         return ApiCallResult(ok=False, error=f"mock 模式下没有找到样例响应 {contract.name}.xml", request_preview=preview)
+
+    def _invoke_http_mock(self, contract: ApiContract, args: dict[str, Any], start: float) -> ApiCallResult:
+        """常规 HTTP 接口本地 Mock 回放：按 <接口名>[.<路由值>].<json|xml|txt> 查找样例并走同一响应解析链路。#Created By AiCoding(codex)"""
+        try:
+            prepared = prepare_http_request(contract, args)
+        except ValueError as exc:
+            return ApiCallResult(ok=False, error=f"HTTP 请求组装失败：{exc}")
+        if not _SAFE_MOCK_NAME_RE.match(contract.name or ""):
+            return ApiCallResult(ok=False, error=f"非法的接口名称：{contract.name!r}",
+                                 request_preview=prepared.preview)
+        roots = self._search_roots()
+        route = _extract_http_mock_route(args)
+        exts = _http_mock_exts(contract.response.format)
+        candidates: list[str] = []
+        if route:
+            candidates.extend(f"{contract.name}.{route}.{ext}" for ext in exts)
+        candidates.extend(f"{contract.name}.{ext}" for ext in exts)
+        hit = self._find_candidate(candidates, roots)
+        if hit is None:
+            return ApiCallResult(
+                ok=False,
+                error=f"mock 模式下没有找到样例响应 {contract.name}.{exts[0]}（也支持 .xml / .txt）",
+                request_preview=prepared.preview,
+            )
+        try:
+            raw_bytes = hit.read_bytes()
+        except OSError as exc:
+            return ApiCallResult(ok=False, error=f"读取样例响应失败：{exc}", request_preview=prepared.preview)
+        ext_ct = {".json": "application/json", ".xml": "application/xml", ".txt": "text/plain"}.get(
+            hit.suffix.lower(), ""
+        )
+        cost = int((time.monotonic() - start) * 1000)
+        return parse_http_response(contract, raw_bytes, 200, cost, prepared.preview, content_type=ext_ct)

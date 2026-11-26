@@ -53,19 +53,26 @@ def test_prod_seed_loads_and_validates_zero_warnings():
 
 
 def test_template_router_skill_coverage_and_cross_validation():
-    """验证生产 seed 中 template-router 覆盖全部 33 个在线模板，且交叉校验准确拦截各类违例。#Created By AiCoding(codex)"""
+    """验证生产 seed 中 template-router 按子目录分层拆分并覆盖全部 33 个在线模板，且交叉校验准确拦截各类违例。#Created By AiCoding(codex)"""
     rs = load_resource_dir(PROD_SEED_DIR)
     assert ROUTER_SKILL_ID in rs.skills
     router = rs.skills[ROUTER_SKILL_ID]
     assert router.meta.apis == []
-    covered = {int(m.group(1)) for m in _ROUTER_TPL_HEADING_RE.finditer(router.body)}
+    assert router.scope == "chat"
+    assert len(router.docs) == 6
+    covered = {
+        int(m.group(1))
+        for text in (router.body, *router.docs.values())
+        for m in _ROUTER_TPL_HEADING_RE.finditer(text)
+    }
     assert covered == set(range(100, 133))
     assert validate_all(rs) == []
 
     # 1) 声明业务接口时报错 ROUTER_SKILL_HAS_APIS
     bad_api_skill = parse_skill_markdown(
         "---\nname: template-router\ntitle: 模板路由\ndescription: 路由\napis:\n  - querySMSSendInfo\n---\n\n"
-        + router.body
+        + router.body,
+        docs=router.docs,
     )
     api_issues = validate_skill(bad_api_skill, rs)
     assert any(i.level == "error" and i.code == "ROUTER_SKILL_HAS_APIS" for i in api_issues)
@@ -111,11 +118,13 @@ def test_template_router_skill_coverage_and_cross_validation():
 
 
 def test_no_customer_phone_input_collision():
-    """验证所有模板不再定义与字段同名的“客户号码”入参（消除 106/107/131/132 发布警告）。#Created By AiCoding(codex)"""
+    """验证所有模板不再定义与字段同名的“客户号码”入参，且全部声明可选入参「申诉内容」。#Created By AiCoding(codex)"""
     rs = load_resource_dir(PROD_SEED_DIR)
     for tid, tpl in rs.templates.items():
         input_keys = [i.key for i in tpl.definition.inputs]
         assert "客户号码" not in input_keys, f"模板 {tid} 仍包含冗余入参 客户号码"
+        appeal_inp = next((i for i in tpl.definition.inputs if i.key == "申诉内容"), None)
+        assert appeal_inp is not None and appeal_inp.required is False, f"模板 {tid} 缺少可选入参「申诉内容」"
     for tid in (106, 107, 131, 132):
         field_names = {f.name for f in rs.templates[tid].definition.fields}
         assert "客户号码" in field_names

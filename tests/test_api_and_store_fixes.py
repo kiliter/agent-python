@@ -270,7 +270,7 @@ def test_fine_grained_draft_optimistic_locking(client: TestClient):
     r5 = client.put(
         "/api/v1/templates/1001/skills",
         headers=h,
-        json={"skills": ["办理短信核查", "document-match"], "revision": 4},
+        json={"skills": ["document-match"], "revision": 4},
     )
     assert r5.status_code == 200 and r5.json()["revision"] == 5
 

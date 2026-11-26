@@ -33,7 +33,7 @@ const yamlEditorRef = ref<InstanceType<typeof CodeMirrorEditor> | null>(null)
 const visualEditorRef = ref<InstanceType<typeof ApiVisualEditor> | null>(null)
 
 const statusFilter = ref<'ALL' | 'ONLINE' | 'DRAFT'>('ALL')
-const protoFilter = ref<'ALL' | 'XML' | 'JSON'>('ALL')
+const protoFilter = ref<'ALL' | 'XML' | 'JSON' | 'HTTP'>('ALL')
 const refreshing = ref(false)
 
 const api = computed(() => store.currentApi)
@@ -45,17 +45,40 @@ function resolveSkillDisplayName(skillKey: string): string {
   return hit?.name || skillKey
 }
 
-/** 判断列表项是否为统一网关 JSON 协议 */
-function isJsonApiItem(item: Partial<ApiItem> & { connector?: string; format?: string }): boolean {
-  if (item.connector === 'unified-gateway-json') return true
-  if (item.format && item.format.toUpperCase() === 'JSON') return true
-  if (item.type && item.type.toUpperCase().includes('JSON')) return true
-  return false
+/** 识别接口协议大类：HTTP / JSON / XML */
+function getApiProtoKind(
+  item: Partial<ApiItem> & { connector?: string; format?: string },
+): 'HTTP' | 'JSON' | 'XML' {
+  if (
+    item.connector === 'http' ||
+    (item.format && item.format.toUpperCase() === 'HTTP') ||
+    (item.type && item.type.toUpperCase().includes('HTTP'))
+  ) {
+    return 'HTTP'
+  }
+  if (
+    item.connector === 'unified-gateway-json' ||
+    (item.format && item.format.toUpperCase() === 'JSON') ||
+    (item.type && item.type.toUpperCase().includes('JSON'))
+  ) {
+    return 'JSON'
+  }
+  return 'XML'
 }
 
-/** 规范化展示列表中的报文协议标签（统一网关 XML vs 统一网关 JSON） */
+/** 根据协议大类返回徽标样式类 */
+function protoPillClass(kind: 'HTTP' | 'JSON' | 'XML'): string {
+  if (kind === 'HTTP') return 'is-http'
+  return kind === 'JSON' ? 'is-json' : 'is-xml'
+}
+
+/** 规范化展示列表中的报文协议标签（统一网关 XML / 统一网关 JSON / 常规 HTTP） */
 function formatApiProtoLabel(item: Partial<ApiItem> & { connector?: string; format?: string }): string {
-  if (isJsonApiItem(item)) {
+  const kind = getApiProtoKind(item)
+  if (kind === 'HTTP') {
+    return item.type && item.type.toUpperCase().includes('HTTP') ? item.type : '常规 HTTP'
+  }
+  if (kind === 'JSON') {
     return item.type && item.type.toUpperCase().includes('JSON') ? item.type : '统一网关 JSON'
   }
   if (item.type && item.type.toUpperCase().includes('XML')) {
@@ -103,11 +126,15 @@ const apiOverview = computed(() => {
 
   let xmlCount = 0
   let jsonCount = 0
+  let httpCount = 0
   let totalCalls7d = 0
   const latencies: number[] = []
 
   for (const item of list) {
-    if (isJsonApiItem(item)) {
+    const kind = getApiProtoKind(item)
+    if (kind === 'HTTP') {
+      httpCount += 1
+    } else if (kind === 'JSON') {
       jsonCount += 1
     } else {
       xmlCount += 1
@@ -118,11 +145,12 @@ const apiOverview = computed(() => {
   }
 
   const protoSummary =
-    total === 0 ? '暂无协议样本' : `XML ${xmlCount} · JSON ${jsonCount}`
+    total === 0 ? '暂无协议样本' : `XML ${xmlCount} · JSON ${jsonCount} · HTTP ${httpCount}`
 
   const barWidth = 76
-  const xmlW = total > 0 ? (jsonCount === 0 ? barWidth : Math.round((xmlCount / total) * barWidth)) : 0
-  const jsonW = total > 0 ? Math.max(0, barWidth - xmlW) : 0
+  const xmlW = total > 0 ? Math.round((xmlCount / total) * barWidth) : 0
+  const jsonW = total > 0 ? Math.round((jsonCount / total) * barWidth) : 0
+  const httpW = total > 0 ? Math.max(0, barWidth - xmlW - jsonW) : 0
 
   const pubW = total > 0 ? Math.round((published / total) * barWidth) : 0
   const pubDraftW = total > 0 ? Math.round((publishedDraft / total) * barWidth) : 0
@@ -137,11 +165,13 @@ const apiOverview = computed(() => {
     draft,
     xmlCount,
     jsonCount,
+    httpCount,
     referenced,
     refRateText,
     protoSummary,
     xmlW,
     jsonW,
+    httpW,
     pubW,
     pubDraftW,
     totalCalls7d,
@@ -157,8 +187,7 @@ const displayedApis = computed(() =>
       if (a.status !== 'DRAFT') return false
     }
 
-    if (protoFilter.value === 'JSON' && !isJsonApiItem(a)) return false
-    if (protoFilter.value === 'XML' && isJsonApiItem(a)) return false
+    if (protoFilter.value !== 'ALL' && getApiProtoKind(a) !== protoFilter.value) return false
     return true
   }),
 )
@@ -203,40 +232,41 @@ function onVisualYamlUpdate(nextVal: string) {
   yamlText.value = nextVal
 }
 
-/** 从当前实时 YAML 源码中无损提取协议类型、标题、交易编码、入参与列映射（支持未保存即试调用） */
+/** 从当前实时 YAML 源码中无损提取协议类型、标题、交易编码/URL、入参与列映射（支持未保存即试调用） */
 const liveMeta = computed(() => {
-  const fallbackIsJson = isJsonApiItem(api.value)
+  const fallbackKind = getApiProtoKind(api.value)
+  const fallbackMeta = {
+    protoKind: fallbackKind,
+    isJson: fallbackKind === 'JSON',
+    isHttp: fallbackKind === 'HTTP',
+    title: api.value.title || '',
+    processCode: api.value.processCode || '',
+    method: api.value.method || 'POST',
+    url: api.value.url || '',
+    params: api.value.params || [],
+    columns: {} as Record<string, string>,
+  }
   const raw = store.apiYamlText
   if (!raw || !raw.trim()) {
-    return {
-      isJson: fallbackIsJson,
-      title: api.value.title || '',
-      processCode: api.value.processCode || '',
-      params: api.value.params || [],
-      columns: {} as Record<string, string>,
-    }
+    return fallbackMeta
   }
 
   try {
     const parsed = YAML.parse(raw)
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return {
-        isJson: fallbackIsJson,
-        title: api.value.title || '',
-        processCode: api.value.processCode || '',
-        params: api.value.params || [],
-        columns: {} as Record<string, string>,
-      }
+      return fallbackMeta
     }
 
     const doc = parsed as Record<string, unknown>
     const connector = typeof doc.connector === 'string' ? doc.connector.trim() : ''
-    const isJson =
-      connector === 'unified-gateway-json'
-        ? true
-        : connector === 'unified-gateway-xml'
-          ? false
-          : fallbackIsJson
+    const protoKind: 'HTTP' | 'JSON' | 'XML' =
+      connector === 'http'
+        ? 'HTTP'
+        : connector === 'unified-gateway-json'
+          ? 'JSON'
+          : connector === 'unified-gateway-xml'
+            ? 'XML'
+            : fallbackKind
 
     const title = typeof doc.title === 'string' ? doc.title.trim() : api.value.title || ''
     const processCode =
@@ -245,6 +275,11 @@ const liveMeta = computed(() => {
         : typeof doc.process_code === 'string'
           ? doc.process_code.trim()
           : api.value.processCode || ''
+    const method =
+      typeof doc.method === 'string' && doc.method.trim()
+        ? doc.method.trim().toUpperCase()
+        : api.value.method || 'POST'
+    const url = typeof doc.url === 'string' ? doc.url.trim() : api.value.url || ''
 
     // 动态解析 input.properties 与 input.required
     let params: ApiParamItem[] = api.value.params || []
@@ -302,20 +337,18 @@ const liveMeta = computed(() => {
     }
 
     return {
-      isJson,
+      protoKind,
+      isJson: protoKind === 'JSON',
+      isHttp: protoKind === 'HTTP',
       title,
       processCode,
+      method,
+      url,
       params,
       columns,
     }
   } catch {
-    return {
-      isJson: fallbackIsJson,
-      title: api.value.title || '',
-      processCode: api.value.processCode || '',
-      params: api.value.params || [],
-      columns: {} as Record<string, string>,
-    }
+    return fallbackMeta
   }
 })
 
@@ -363,22 +396,33 @@ async function handleRunTestCall() {
 
 const testResult = computed(() => store.apiTestResult)
 
-/** 当前试调用结果的实际协议标识（优先读后端返回 format/connector，否则读当前实时配置协议） */
-const activeResultProto = computed<'JSON' | 'XML'>(() => {
+/** 当前试调用结果是否为常规 HTTP 连接器 */
+const activeResultIsHttp = computed<boolean>(() => {
   const res = testResult.value
-  if (res) {
-    if (res.format === 'json' || res.connector === 'unified-gateway-json') return 'JSON'
-    if (res.format === 'xml' || res.connector === 'unified-gateway-xml') return 'XML'
-    const rawSample = (res.rawBody || res.rawXml || res.requestBody || res.requestXml || '').trim()
-    if (rawSample.startsWith('{') || rawSample.startsWith('[')) return 'JSON'
-    if (rawSample.startsWith('<')) return 'XML'
-  }
-  return liveMeta.value.isJson ? 'JSON' : 'XML'
+  if (res?.connector) return res.connector === 'http'
+  return liveMeta.value.isHttp
 })
 
-function formatPayloadForDisplay(raw: string, proto: 'JSON' | 'XML'): string {
+/** 当前试调用结果的实际响应报文格式（JSON / XML / TEXT / HTTP） */
+const activeResultProto = computed<'JSON' | 'XML' | 'TEXT' | 'HTTP'>(() => {
+  const res = testResult.value
+  if (res) {
+    if (res.format === 'json') return 'JSON'
+    if (res.format === 'xml') return 'XML'
+    if (res.format === 'text') return 'TEXT'
+    if (res.connector === 'unified-gateway-json') return 'JSON'
+    if (res.connector === 'unified-gateway-xml') return 'XML'
+    const rawSample = (res.rawBody || res.rawXml || '').trim()
+    if (rawSample.startsWith('{') || rawSample.startsWith('[')) return 'JSON'
+    if (rawSample.startsWith('<')) return 'XML'
+    if (res.connector === 'http' || res.format === 'http') return 'HTTP'
+  }
+  return liveMeta.value.protoKind
+})
+
+function formatPayloadForDisplay(raw: string, proto: 'JSON' | 'XML' | 'TEXT' | 'HTTP'): string {
   if (!raw) return ''
-  if (proto === 'JSON') {
+  if (proto === 'JSON' || proto === 'HTTP') {
     const trimmed = raw.trim()
     if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
       try {
@@ -395,6 +439,7 @@ const requestPayloadText = computed(() => {
   const res = testResult.value
   if (!res) return ''
   const raw = res.requestBody ?? res.requestXml ?? ''
+  if (activeResultIsHttp.value) return raw
   return formatPayloadForDisplay(raw, activeResultProto.value)
 })
 
@@ -581,6 +626,36 @@ function handleDiscardDraft() {
     .catch(() => {})
 }
 
+/** 判定 API 不可删除的原因（空字符串表示允许删除）：要求无任何技能关联 */
+function apiDeleteDisabledReason(item: ApiItem): string {
+  if (item.refs && item.refs.length > 0) {
+    return `仍有 ${item.refs.length} 个技能关联此 API，请先解除技能关联后再删除`
+  }
+  return ''
+}
+
+/** 删除指定 API（二次确认） */
+function handleDeleteApi(item: ApiItem) {
+  const reason = apiDeleteDisabledReason(item)
+  if (reason) {
+    store.showToast(reason, 'warning')
+    return
+  }
+  const isDraftOnly = item.status === 'DRAFT' && (!item.onlineRev || item.onlineRev === '—')
+  const tip = isDraftOnly
+    ? `确认删除未发布草稿 API「${item.title}」（${item.name}）吗？此操作不可撤销。`
+    : `确认删除 API「${item.title}」（${item.name}）吗？系统将生成新的发布版本移除该接口（历史版本仍可在 Git 中追溯）。`
+  ElMessageBox.confirm(tip, '确认删除 API', {
+    confirmButtonText: '确认删除',
+    cancelButtonText: '取消',
+    type: 'warning',
+  })
+    .then(async () => {
+      await store.deleteApi(item.name)
+    })
+    .catch(() => {})
+}
+
 /** 把历史版本内容恢复到草稿（不直接发布） */
 function handleRollbackRevision(rev: string) {
   const name = store.selectedApiName
@@ -706,6 +781,16 @@ function handleDirectRollbackApi(rev: string) {
               >
                 <title>统一网关 JSON：{{ apiOverview.jsonCount }} 个</title>
               </rect>
+              <rect
+                v-if="apiOverview.httpW > 0"
+                :x="apiOverview.xmlW + apiOverview.jsonW"
+                y="1"
+                :width="apiOverview.httpW"
+                height="6"
+                fill="#7c3aed"
+              >
+                <title>常规 HTTP：{{ apiOverview.httpCount }} 个</title>
+              </rect>
             </svg>
           </div>
         </div>
@@ -793,6 +878,16 @@ function handleDirectRollbackApi(rev: string) {
               <span>JSON</span>
               <span class="seg-count mono">{{ apiOverview.jsonCount }}</span>
             </button>
+            <button
+              type="button"
+              role="tab"
+              class="seg-filter-btn"
+              :class="{ active: protoFilter === 'HTTP' }"
+              @click="protoFilter = 'HTTP'"
+            >
+              <span>HTTP</span>
+              <span class="seg-count mono">{{ apiOverview.httpCount }}</span>
+            </button>
           </div>
 
           <input
@@ -854,7 +949,15 @@ function handleDirectRollbackApi(rev: string) {
             >
               <td>
                 <div class="mono api-name-code">{{ a.name }}</div>
-                <div v-if="a.processCode" class="mono row-sub-id">编码: {{ a.processCode }}</div>
+                <div
+                  v-if="getApiProtoKind(a) === 'HTTP' && a.url"
+                  class="mono row-sub-id"
+                  :title="`${a.method || 'POST'} ${a.url}`"
+                  style="max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap"
+                >
+                  {{ a.method || 'POST' }} {{ a.url }}
+                </div>
+                <div v-else-if="a.processCode" class="mono row-sub-id">编码: {{ a.processCode }}</div>
               </td>
               <td class="api-desc-cell">
                 <div class="row-primary-name" :title="a.title">{{ a.title }}</div>
@@ -872,7 +975,7 @@ function handleDirectRollbackApi(rev: string) {
               <td style="white-space: nowrap">
                 <span
                   class="chip-tag proto-pill"
-                  :class="isJsonApiItem(a) ? 'is-json' : 'is-xml'"
+                  :class="protoPillClass(getApiProtoKind(a))"
                 >
                   <span class="proto-dot"></span>
                   <span>{{ formatApiProtoLabel(a) }}</span>
@@ -934,6 +1037,14 @@ function handleDirectRollbackApi(rev: string) {
                   <button class="btn-link" @click="store.openApiDetail(a.name, 'test')">
                     试调用
                   </button>
+                  <button
+                    class="btn-link danger"
+                    :disabled="Boolean(apiDeleteDisabledReason(a))"
+                    :title="apiDeleteDisabledReason(a) || '删除该 API'"
+                    @click="handleDeleteApi(a)"
+                  >
+                    删除
+                  </button>
                 </div>
               </td>
             </tr>
@@ -949,7 +1060,7 @@ function handleDirectRollbackApi(rev: string) {
           </template>
         </span>
         <span class="footer-tip">
-          点击任意 API 行可进入可视化编辑器、查看 YAML 源码或发起 XML / JSON 双协议在线试调用
+          点击任意 API 行可进入可视化编辑器、查看 YAML 源码或发起 XML / JSON / 常规 HTTP 在线试调用
         </span>
       </div>
     </div>
@@ -965,9 +1076,17 @@ function handleDirectRollbackApi(rev: string) {
           <span v-if="liveMeta.title || api.title" class="chip-tag id-code-chip">
             {{ liveMeta.title || api.title }}
           </span>
-          <span class="chip-tag proto-pill" :class="liveMeta.isJson ? 'is-json' : 'is-xml'">
+          <span class="chip-tag proto-pill" :class="protoPillClass(liveMeta.protoKind)">
             <span class="proto-dot"></span>
-            <span>{{ liveMeta.isJson ? '统一网关 JSON' : '统一网关 XML' }}</span>
+            <span>
+              {{
+                liveMeta.isHttp
+                  ? '常规 HTTP'
+                  : liveMeta.isJson
+                    ? '统一网关 JSON'
+                    : '统一网关 XML'
+              }}
+            </span>
           </span>
           <StatusTag :status="api.status" />
           <span
@@ -1003,6 +1122,14 @@ function handleDirectRollbackApi(rev: string) {
             @click="handleDiscardDraft"
           >
             放弃草稿
+          </button>
+          <button
+            class="btn btn-danger-ghost"
+            :disabled="Boolean(apiDeleteDisabledReason(api))"
+            :title="apiDeleteDisabledReason(api) || '删除该 API'"
+            @click="handleDeleteApi(api)"
+          >
+            删除
           </button>
           <button
             class="btn"
@@ -1073,11 +1200,27 @@ function handleDirectRollbackApi(rev: string) {
       <div class="card-header pane-header">
         <div class="card-title pane-title">
           <span>API 配置</span>
-          <span class="chip-tag proto-pill" :class="liveMeta.isJson ? 'is-json' : 'is-xml'">
+          <span class="chip-tag proto-pill" :class="protoPillClass(liveMeta.protoKind)">
             <span class="proto-dot"></span>
-            <span>{{ liveMeta.isJson ? '统一网关 JSON' : '统一网关 XML' }}</span>
+            <span>
+              {{
+                liveMeta.isHttp
+                  ? '常规 HTTP'
+                  : liveMeta.isJson
+                    ? '统一网关 JSON'
+                    : '统一网关 XML'
+              }}
+            </span>
           </span>
-          <span v-if="liveMeta.processCode" class="chip-tag mono pane-sub-chip">
+          <span
+            v-if="liveMeta.isHttp && liveMeta.url"
+            class="chip-tag mono pane-sub-chip"
+            :title="`${liveMeta.method} ${liveMeta.url}`"
+            style="max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap"
+          >
+            {{ liveMeta.method }} {{ liveMeta.url }}
+          </span>
+          <span v-else-if="liveMeta.processCode" class="chip-tag mono pane-sub-chip">
             交易码: {{ liveMeta.processCode }}
           </span>
         </div>
@@ -1182,9 +1325,17 @@ function handleDirectRollbackApi(rev: string) {
       <div class="card test-param-card">
         <div class="test-param-body">
           <div class="test-param-inputs">
-            <span class="chip-tag proto-pill" :class="liveMeta.isJson ? 'is-json' : 'is-xml'">
+            <span class="chip-tag proto-pill" :class="protoPillClass(liveMeta.protoKind)">
               <span class="proto-dot"></span>
-              <span>{{ liveMeta.isJson ? 'JSON 报文' : 'XML 报文' }}</span>
+              <span>
+                {{
+                  liveMeta.isHttp
+                    ? `${liveMeta.method} HTTP`
+                    : liveMeta.isJson
+                      ? 'JSON 报文'
+                      : 'XML 报文'
+                }}
+              </span>
             </span>
             <span class="test-param-title">试调用入参：</span>
             <span v-if="effectiveApiParams.length === 0" class="muted-text">
@@ -1226,7 +1377,8 @@ function handleDirectRollbackApi(rev: string) {
           </svg>
           <span>
             填写业务测试入参后点击「发起调用」，此处将展示脱敏
-            {{ liveMeta.isJson ? 'JSON' : 'XML' }} 请求/响应报文与结构化解析记录
+            {{ liveMeta.isHttp ? 'HTTP' : liveMeta.isJson ? 'JSON' : 'XML' }}
+            请求/响应报文与结构化解析记录
           </span>
         </div>
       </div>
@@ -1238,11 +1390,13 @@ function handleDirectRollbackApi(rev: string) {
         >
           <span>
             <template v-if="testResult.ok">
-              统一网关调用成功（{{ activeResultProto }} 协议）<template v-if="testResult.noData">
+              {{ activeResultIsHttp ? '常规 HTTP 接口调用成功' : '统一网关调用成功' }}（{{ activeResultProto }}<template v-if="activeResultIsHttp"> 响应</template><template v-else> 协议</template>）<template v-if="testResult.noData">
                 · 接口未返回业务记录
               </template>，共解析 {{ testResult.records.length }} 条记录
             </template>
-            <template v-else>统一网关调用失败：{{ testResult.error || '未知错误' }}</template>
+            <template v-else>
+              {{ activeResultIsHttp ? '常规 HTTP 接口调用失败' : '统一网关调用失败' }}：{{ testResult.error || '未知错误' }}
+            </template>
           </span>
           <span class="mono">
             耗时 {{ testResult.costMs }} ms<template v-if="testResult.httpStatus !== null">
@@ -1255,20 +1409,28 @@ function handleDirectRollbackApi(rev: string) {
           <div class="card card-fill pane-card">
             <div class="card-header pane-header">
               <div class="card-title pane-title">
-                <span>网关请求报文 &amp; 原始响应报文 ({{ activeResultProto }})</span>
+                <span>
+                  {{
+                    activeResultIsHttp
+                      ? `HTTP 请求详情 & 原始响应体 (${activeResultProto})`
+                      : `网关请求报文 & 原始响应报文 (${activeResultProto})`
+                  }}
+                </span>
                 <span
                   class="chip-tag proto-pill"
-                  :class="activeResultProto === 'JSON' ? 'is-json' : 'is-xml'"
+                  :class="activeResultIsHttp ? 'is-http' : activeResultProto === 'JSON' ? 'is-json' : 'is-xml'"
                 >
                   <span class="proto-dot"></span>
-                  <span>{{ activeResultProto }} 报文</span>
+                  <span>{{ activeResultIsHttp ? `HTTP · ${activeResultProto}` : `${activeResultProto} 报文` }}</span>
                 </span>
               </div>
             </div>
             <div class="card-scroll" style="display: flex; flex-direction: column; gap: 12px">
               <div>
                 <div class="xml-box-head">
-                  <span>请求报文（{{ activeResultProto }} · 已脱敏，可折叠）</span>
+                  <span>
+                    {{ activeResultIsHttp ? 'HTTP 请求（URL / 请求头 / 请求体 · 已脱敏，可折叠）' : `请求报文（${activeResultProto} · 已脱敏，可折叠）` }}
+                  </span>
                   <div style="display: flex; gap: 8px">
                     <button class="btn-link" @click="store.toggleFold('apiRequestXml')">
                       {{ store.expandedTexts.apiRequestXml ? '收起' : '展开全文' }}
@@ -1821,6 +1983,16 @@ function handleDirectRollbackApi(rev: string) {
 
 .proto-pill.is-json .proto-dot {
   background-color: var(--success);
+}
+
+.proto-pill.is-http {
+  background-color: rgba(124, 58, 237, 0.12);
+  border-color: rgba(124, 58, 237, 0.34);
+  color: #6d28d9;
+}
+
+.proto-pill.is-http .proto-dot {
+  background-color: #7c3aed;
 }
 
 .chip-wrap {

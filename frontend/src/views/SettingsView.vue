@@ -23,6 +23,8 @@ import {
   Eye,
   EyeOff,
   KeyRound,
+  Layers,
+  Play,
   Trash2,
 } from 'lucide-vue-next'
 import { usePlatformStore, type SettingsSubView } from '@/stores/platform'
@@ -40,6 +42,7 @@ import CodeMirrorEditor from '@/components/CodeMirrorEditor.vue'
 
 const store = usePlatformStore()
 const sysPromptEditorRef = ref<InstanceType<typeof CodeMirrorEditor> | null>(null)
+const compositeEditorRef = ref<InstanceType<typeof CodeMirrorEditor> | null>(null)
 
 // ==================== 1. 顶部子视图切换 ====================
 const activeSubView = computed<SettingsSubView>({
@@ -127,6 +130,143 @@ function handleDiscardDraft() {
   )
     .then(async () => {
       await store.discardSysPromptDraft()
+    })
+    .catch(() => {})
+}
+
+// ==================== 2.5 多业务汇总大模板工作区（Jinja2 确定性拼装模板） ====================
+const isCompositeDirty = computed(
+  () =>
+    store.compositeTemplateState !== null &&
+    store.compositeTemplateText !== store.compositeTemplateState.templateText,
+)
+const hasCompositeDraft = computed(() => Boolean(store.compositeTemplateState?.draft))
+const onlineCompositeText = computed(() => store.compositeTemplateState?.onlineText || '')
+const onlineCompositeRev = computed(() => store.compositeTemplateState?.onlineRev || '')
+const defaultCompositeText = computed(() => store.compositeTemplateState?.defaultText || '')
+const compositeLineCount = computed(() =>
+  store.compositeTemplateText ? store.compositeTemplateText.split(/\r?\n/).length : 0,
+)
+const compositePreviewLoading = ref(false)
+const compositePreviewText = ref('')
+const compositePreviewError = ref('')
+
+async function handlePreviewComposite() {
+  compositePreviewLoading.value = true
+  compositePreviewError.value = ''
+  try {
+    const res = await store.previewCompositeTemplate(store.compositeTemplateText)
+    if (!res) return
+    if (res.ok) {
+      compositePreviewText.value = res.rendered
+      compositePreviewError.value = ''
+    } else {
+      compositePreviewError.value = res.error || '模板语法或渲染失败'
+    }
+  } finally {
+    compositePreviewLoading.value = false
+  }
+}
+
+watch(activeSubView, val => {
+  if (val === 'composite-template' && !compositePreviewText.value && !compositePreviewError.value) {
+    void handlePreviewComposite()
+  }
+})
+
+function handleCompositeUndo() {
+  compositeEditorRef.value?.undoEdit()
+}
+
+function handleCompositeRedo() {
+  compositeEditorRef.value?.redoEdit()
+}
+
+function handleCompositeLoadOnline() {
+  if (!onlineCompositeText.value) return
+  store.compositeTemplateText = onlineCompositeText.value
+  store.showToast('已载入线上版本汇总大模板（可按 Ctrl+Z 撤销）', 'info')
+}
+
+function handleCompositeLoadDefault() {
+  if (!defaultCompositeText.value) return
+  ElMessageBox.confirm(
+    '确认用平台内置默认汇总大模板替换编辑器内容吗？替换后需保存草稿或发布上线才会生效。',
+    '恢复平台默认模板',
+    { confirmButtonText: '确认替换', cancelButtonText: '取消', type: 'warning' },
+  )
+    .then(() => {
+      store.compositeTemplateText = defaultCompositeText.value
+      void handlePreviewComposite()
+      store.showToast('已载入平台默认汇总大模板，可继续编辑并保存', 'info')
+    })
+    .catch(() => {})
+}
+
+async function handleSaveCompositeDraft() {
+  await store.saveCompositeTemplateDraft()
+}
+
+function handlePublishComposite() {
+  ElMessageBox.prompt(
+    '发布多业务汇总大模板后，所有复合工单（一单多业务）将立即按此 Jinja2 模板进行确定性拼装。可填写发布说明（选填）：',
+    '确认发布汇总大模板',
+    {
+      confirmButtonText: '确认发布',
+      cancelButtonText: '取消',
+      type: 'warning',
+      inputPlaceholder: '发布说明（选填）',
+    },
+  )
+    .then(async ({ value }) => {
+      await store.publishCompositeTemplate((value || '').trim())
+    })
+    .catch(() => {})
+}
+
+function handleDiscardCompositeDraft() {
+  if (!hasCompositeDraft.value) return
+  ElMessageBox.confirm(
+    '确认放弃汇总大模板草稿吗？放弃后将恢复为线上生效内容，此操作不可撤销。',
+    '确认放弃草稿',
+    { confirmButtonText: '确认放弃', cancelButtonText: '取消', type: 'warning' },
+  )
+    .then(async () => {
+      await store.discardCompositeTemplateDraft()
+      void handlePreviewComposite()
+    })
+    .catch(() => {})
+}
+
+function handleRollbackCompositeRev(rev: string, mode: 'draft_only' | 'publish_now') {
+  if (!rev) return
+  if (mode === 'draft_only') {
+    ElMessageBox.confirm(
+      `确认将汇总大模板历史版本 ${rev} 恢复至工作区草稿吗？恢复后可在编辑器核对预览再决定是否发布。`,
+      `恢复草稿 · ${rev}`,
+      { confirmButtonText: '恢复至草稿', cancelButtonText: '取消', type: 'info' },
+    )
+      .then(async () => {
+        await store.rollbackCompositeTemplate(rev, 'draft_only', `从 ${rev} 恢复至草稿`)
+        void handlePreviewComposite()
+      })
+      .catch(() => {})
+    return
+  }
+  ElMessageBox.prompt(
+    `确认将汇总大模板直接回退至历史版本 ${rev} 并立即发布上线吗？请填写回退说明（必填）：`,
+    `回退上线 · ${rev}`,
+    {
+      confirmButtonText: '确认回退上线',
+      cancelButtonText: '取消',
+      type: 'warning',
+      inputPlaceholder: '例如：新版汇总排版异常，回退至稳定版',
+      inputValidator: val => (val && val.trim().length > 0 ? true : '请填写回退说明'),
+    },
+  )
+    .then(async ({ value }) => {
+      await store.rollbackCompositeTemplate(rev, 'publish_now', value.trim())
+      void handlePreviewComposite()
     })
     .catch(() => {})
 }
@@ -955,24 +1095,33 @@ watch(
   { immediate: true },
 )
 
+const runtimeFormInitialSnapshot = ref<string>('')
+
+const isRuntimeFormModified = computed(() => {
+  if (!isEditingRuntime.value) return false
+  return JSON.stringify(runtimeForm) !== runtimeFormInitialSnapshot.value
+})
+
 function startEditRuntime() {
   populateRuntimeForm(effectiveRuntimeConfig.value)
+  runtimeFormInitialSnapshot.value = JSON.stringify(runtimeForm)
   isEditingRuntime.value = true
 }
 
 function cancelEditRuntime() {
   populateRuntimeForm(effectiveRuntimeConfig.value)
+  runtimeFormInitialSnapshot.value = ''
   isEditingRuntime.value = false
 }
 
-watch(isEditingRuntime, editing => {
-  store.runtimeFormDirty = editing
+watch(isRuntimeFormModified, modified => {
+  store.runtimeFormDirty = modified
 })
 
 watch(
   () => store.runtimeFormDirty,
   dirty => {
-    if (!dirty && isEditingRuntime.value) {
+    if (!dirty && isEditingRuntime.value && isRuntimeFormModified.value) {
       cancelEditRuntime()
     }
   },
@@ -980,6 +1129,11 @@ watch(
 
 async function handleSaveRuntimeConfig() {
   if (savingRuntime.value) return
+  if (!isRuntimeFormModified.value) {
+    store.showToast('运行配置与当前生效值一致，无需保存', 'info')
+    cancelEditRuntime()
+    return
+  }
   if (runtimeForm.gatewayMode === 'live') {
     const url = runtimeForm.gatewayUrl.trim()
     if (!url || !/^https?:\/\//i.test(url)) {
@@ -1812,6 +1966,18 @@ onMounted(async () => {
         >
           <SlidersHorizontal :size="13" />
           <span>提示词与运行配置</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          class="settings-seg-btn"
+          :class="{ active: activeSubView === 'composite-template' }"
+          :aria-selected="activeSubView === 'composite-template'"
+          @click="switchSubView('composite-template')"
+        >
+          <Layers :size="13" />
+          <span>汇总大模板</span>
+          <span v-if="hasCompositeDraft || isCompositeDirty" class="seg-badge mono">草稿</span>
         </button>
         <button
           type="button"
@@ -3061,6 +3227,166 @@ onMounted(async () => {
       </section>
     </div>
 
+    <!-- ==================== 子视图 1.5：多业务汇总大模板（Jinja2 确定性拼装 + 实时样例预览） ==================== -->
+    <div v-else-if="activeSubView === 'composite-template'" class="composite-tpl-grid">
+      <!-- 左栏：Jinja2 汇总大模板编辑器 -->
+      <div class="card card-fill settings-prompt-card">
+        <div class="card-header settings-prompt-header">
+          <div class="card-title" style="flex-wrap: wrap; gap: 7px">
+            <span>多业务复合工单 · 汇总大模板（Jinja2）</span>
+            <StatusTag :status="store.compositeTemplateStatus" />
+            <span v-if="onlineCompositeRev" class="chip-tag mono">
+              线上版本 {{ onlineCompositeRev }}
+            </span>
+            <span v-if="isCompositeDirty" class="settings-dirty-badge">未保存修改</span>
+          </div>
+
+          <div class="settings-toolbar-btns">
+            <button type="button" class="btn btn-sm" title="撤销" @click="handleCompositeUndo">
+              ↶ 撤销
+            </button>
+            <button type="button" class="btn btn-sm" title="重做" @click="handleCompositeRedo">
+              ↷ 重做
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm"
+              :disabled="!onlineCompositeText"
+              title="载入当前线上版本"
+              @click="handleCompositeLoadOnline"
+            >
+              ↺ 线上版
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm"
+              :disabled="!defaultCompositeText"
+              title="载入平台内置默认汇总模板"
+              @click="handleCompositeLoadDefault"
+            >
+              默认模板
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm"
+              :disabled="!hasCompositeDraft"
+              @click="handleDiscardCompositeDraft"
+            >
+              放弃草稿
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm"
+              :title="`保存汇总大模板草稿 (${store.saveShortcutHint})`"
+              @click="handleSaveCompositeDraft"
+            >
+              保存草稿
+              <kbd class="btn-kbd">{{ store.saveShortcutHint }}</kbd>
+            </button>
+            <button type="button" class="btn btn-sm btn-primary" @click="handlePublishComposite">
+              发布上线
+            </button>
+          </div>
+        </div>
+
+        <div class="settings-prompt-subbar">
+          <span>
+            可用变量：<code class="mono">order</code>（公用入参）、
+            <code class="mono">items</code>（子项 <code class="mono">.label/.templateName/.status/.report/.error</code>）、
+            <code class="mono">summary</code>（<code class="mono">.totalItems/.successCount/.partialCount/.failedCount</code>）
+          </span>
+          <span class="mono">{{ compositeLineCount }} 行 · {{ store.compositeTemplateText.length }} 字符</span>
+        </div>
+
+        <div class="settings-editor-wrap">
+          <CodeMirrorEditor
+            ref="compositeEditorRef"
+            v-model="store.compositeTemplateText"
+            lang="markdown"
+            fill
+            @save="handleSaveCompositeDraft"
+          />
+        </div>
+      </div>
+
+      <!-- 右栏：实时样例渲染预览 + 版本历史 -->
+      <div class="composite-right-col">
+        <div class="card composite-preview-card">
+          <div class="card-header settings-spec-header">
+            <div class="card-title" style="gap: 6px">
+              <span>样例实时渲染预览（三项业务模拟）</span>
+            </div>
+            <div class="spec-head-actions">
+              <button
+                type="button"
+                class="btn btn-sm btn-primary"
+                :disabled="compositePreviewLoading"
+                @click="handlePreviewComposite"
+              >
+                <Play :size="12" />
+                <span>{{ compositePreviewLoading ? '渲染中…' : '立即渲染预览' }}</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="composite-preview-body">
+            <div v-if="compositePreviewError" class="composite-preview-err">
+              <strong>模板语法或渲染错误：</strong>{{ compositePreviewError }}
+            </div>
+            <pre v-else class="composite-preview-pre">{{ compositePreviewText || '点击「立即渲染预览」查看多业务确定性拼装效果' }}</pre>
+          </div>
+        </div>
+
+        <div class="card composite-history-card">
+          <div class="card-header settings-spec-header">
+            <div class="card-title" style="gap: 6px">
+              <History :size="13" />
+              <span>汇总大模板版本历史</span>
+              <span class="chip-tag mono">{{ store.compositeTemplateRevisions.length }}</span>
+            </div>
+          </div>
+          <div class="composite-rev-list">
+            <div v-if="!store.compositeTemplateRevisions.length" class="empty-inline-msg">
+              暂无历史发布版本（发布上线后将自动记录版本时间线）
+            </div>
+            <div
+              v-for="rev in store.compositeTemplateRevisions"
+              :key="rev.rev"
+              class="composite-rev-item"
+            >
+              <div class="composite-rev-top">
+                <div style="display: flex; align-items: center; gap: 6px">
+                  <span class="settings-rev-badge mono" :class="{ online: rev.online }">{{ rev.rev }}</span>
+                  <span v-if="rev.online" class="settings-online-tag">当前线上</span>
+                  <span class="mono ts-time">{{ rev.time }}</span>
+                </div>
+                <div style="display: flex; gap: 6px">
+                  <button
+                    type="button"
+                    class="btn btn-xs"
+                    @click="handleRollbackCompositeRev(rev.rev, 'draft_only')"
+                  >
+                    恢复草稿
+                  </button>
+                  <button
+                    v-if="!rev.online"
+                    type="button"
+                    class="btn btn-xs btn-primary"
+                    @click="handleRollbackCompositeRev(rev.rev, 'publish_now')"
+                  >
+                    回退上线
+                  </button>
+                </div>
+              </div>
+              <div class="composite-rev-note">
+                {{ rev.note || rev.summary || '发布汇总大模板' }} · 操作人：{{ rev.operator || '—' }}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- ==================== 子视图 3：引擎与网关运行配置历史版本及回滚（Requirement #5） ==================== -->
     <div v-else class="rollback-split-grid">
       <aside class="card card-fill rollback-sidebar-card">
@@ -4038,5 +4364,106 @@ onMounted(async () => {
   text-align: center;
   color: var(--text-secondary);
   font-size: 12px;
+}
+
+/* ==================== 多业务汇总大模板布局 ==================== */
+.composite-tpl-grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(360px, 1fr);
+  gap: 10px;
+  overflow: hidden;
+}
+
+.composite-right-col {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: hidden;
+}
+
+.composite-preview-card {
+  flex: 1.35;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.composite-preview-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 14px;
+  background: var(--bg-subtle);
+}
+
+.composite-preview-pre {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.composite-preview-err {
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  color: var(--danger);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.composite-history-card {
+  flex: 0.75;
+  min-height: 160px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.composite-rev-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.composite-rev-item {
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-light);
+  background: var(--bg-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.composite-rev-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.composite-rev-note {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.btn-xs {
+  height: 22px;
+  padding: 0 7px;
+  font-size: 11px;
 }
 </style>

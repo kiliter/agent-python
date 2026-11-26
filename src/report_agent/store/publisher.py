@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from ..domain.resources import Issue, ResourceSet, load_resource_dir, validate_all
+from ..domain.resources import ROUTER_SKILL_ID, Issue, ResourceSet, load_resource_dir, validate_all
 from ..domain.template import OFFLINE_FILE
 from .drafts import DraftStore
 from .fsutil import append_audit, atomic_write_text, now_iso, replace_dir_contents, trees_equal
@@ -105,10 +105,41 @@ class Publisher:
                 base_keys = {_issue_key(i) for i in validate_all(base_rs)}
                 new_issues = validate_all(new_rs)
                 changed = {(c.ref.kind, c.ref.key) for c in changes}
-                blocking = [i for i in new_issues if i.level == "error" and _issue_key(i) not in base_keys]
+                # #Created By AiCoding(codex) 模板删除或下线时，不被未同步修改的 template-router 残留标题阻断，转为 warning 提示；
+                # 直接编辑发布 template-router 本身时仍保持 error 强校验。
+                router_touched = ("skill", ROUTER_SKILL_ID) in changed
+                has_tpl_remove = any(c.ref.kind == "template" and c.action in ("delete", "offline") for c in changes)
+                blocking: list[Issue] = []
+                extra_warnings: list[Issue] = []
+                for issue in new_issues:
+                    if issue.level != "error" or _issue_key(issue) in base_keys:
+                        continue
+                    if (
+                        not router_touched
+                        and has_tpl_remove
+                        and issue.code == "ROUTER_TEMPLATE_NOT_FOUND"
+                        and issue.kind == "skill"
+                        and issue.key == ROUTER_SKILL_ID
+                    ):
+                        extra_warnings.append(
+                            Issue(
+                                "warning",
+                                issue.code,
+                                f"{issue.message}（不阻断当前操作，建议后续在 {ROUTER_SKILL_ID} 中同步清理）",
+                                issue.kind,
+                                issue.key,
+                                issue.field,
+                                issue.line,
+                            )
+                        )
+                        continue
+                    blocking.append(issue)
                 if blocking:
                     raise PublishError(blocking)
-                warnings = [i for i in new_issues if i.level == "warning" and (i.kind, i.key) in changed]
+                warnings = [
+                    *[i for i in new_issues if i.level == "warning" and (i.kind, i.key) in changed],
+                    *extra_warnings,
+                ]
 
                 if trees_equal(base_dir, build, ignore={".git", ".release.json", META_FILE}):
                     raise NothingToPublish("内容与线上版本一致，无需发布")
@@ -146,7 +177,7 @@ class Publisher:
                 raise
 
             for ch in changes:
-                if ch.source == "draft":
+                if ch.source == "draft" or ch.action == "delete":
                     self.drafts.delete(ch.ref)
             self.audit("publish", operator, {"rev": rev, "base": base_rev, "summary": summary, "note": note})
             try:

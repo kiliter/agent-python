@@ -7,6 +7,24 @@ const store = usePlatformStore()
 
 const currentRegDiff = computed(() => store.regressionDiffs[store.editingRegDiffIndex] ?? null)
 
+async function handleAdoptDiffField() {
+  const d = currentRegDiff.value
+  if (!d || !d.scope || !d.runIdA) return
+  const isRoute = d.kind === 'route_mismatch' || d.kind === 'route_diff'
+  await store.adoptRegressionBaseline(d.scope, d.caseId, {
+    runId: d.runIdA,
+    adoptFields: !isRoute,
+    adoptTemplate: isRoute,
+    ...(isRoute ? {} : { onlyField: d.field }),
+  })
+}
+
+function handleOpenRun(runId?: string | null) {
+  if (!runId) return
+  store.closeDrawer()
+  void store.openRunDetail(runId)
+}
+
 /** 格式化回归差异抽屉中的字段输出值（区分合法空列表 [] 与缺失空值） */
 function formatDiffFieldVal(fieldName: string, rawVal?: string): string {
   const isList = store.templateFields.find(f => f.name === fieldName)?.type === '列表'
@@ -73,8 +91,33 @@ function formatDiffFieldVal(fieldName: string, rawVal?: string): string {
         </div>
       </div>
 
-      <div class="drawer-footer g-drawer-foot">
-        <button class="btn" @click="store.closeDrawer()">关闭</button>
+      <div class="drawer-footer g-drawer-foot" style="display: flex; gap: 8px; justify-content: flex-end; align-items: center">
+        <button
+          v-if="currentRegDiff?.runIdA"
+          class="btn btn-sm"
+          @click="handleOpenRun(currentRegDiff.runIdA)"
+        >
+          查看版本 A 详单
+        </button>
+        <button
+          v-if="currentRegDiff?.runIdB"
+          class="btn btn-sm"
+          @click="handleOpenRun(currentRegDiff.runIdB)"
+        >
+          查看版本 B 详单
+        </button>
+        <button
+          v-if="currentRegDiff?.scope && currentRegDiff?.runIdA"
+          class="btn btn-sm btn-primary"
+          @click="handleAdoptDiffField"
+        >
+          {{
+            currentRegDiff.kind === 'route_mismatch' || currentRegDiff.kind === 'route_diff'
+              ? '锁定版本 A 模板为期望模板'
+              : '采纳版本 A 为期望基线'
+          }}
+        </button>
+        <button class="btn btn-sm" @click="store.closeDrawer()">关闭</button>
       </div>
     </div>
   </div>

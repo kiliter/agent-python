@@ -13,7 +13,7 @@ sources:
   - src/report_agent/store/cases.py
   - src/report_agent/store/runs.py
   - src/report_agent/store/runtime_config.py
-updated: 2026-11-13
+updated: 2026-11-26
 ---
 
 # 文件化资源存储与 Git 原子发布机制
@@ -42,7 +42,10 @@ DATA_DIR/
 │   └── current -> rN            # 指向当前线上生效版本的相对路径软链接
 ├── runs/YYYY/MM/DD/             # 按日分区的运行索引 index.jsonl 与详情 <runId>.json
 ├── chats/<sid[:2]>/             # 嵌入式聊天窗口按哈希二级分片的会话文件 <sessionId>.json
-├── cases/<templateId>/          # 回归测试用例 <caseId>.yaml
+├── cases/
+│   ├── auto/                    # 未绑定模板的自动路由回归用例 <caseId>.yaml（支持 expectedTemplateId）
+│   └── <templateId>/            # 固定绑定模板的回归测试用例 <caseId>.yaml
+├── regressions/                 # 批量回归批次索引 index.jsonl 与完整结果 <batchId>.json（默认保留最近 50 批）
 ├── mock-gateway/                # 本地覆盖的 Mock 响应报文
 ├── config/
 │   ├── users.yaml               # 工作台用户与 PBKDF2 口令哈希
@@ -84,7 +87,7 @@ flowchart LR
 
 关键工程保证：
 - **并发发布串行化**：`Publisher` 内部持有进程级 `threading.Lock`，确保同一时刻只有一个发布/回退/下线操作修改 `repo/` 与分配递增版本号 `r{N+1}`。
-- **全量交叉引用门禁**：即使只发布一个 Skill 或删除一个接口，也会把候选整棵资源树加载出来跑 `validate_all()`——若某线上模板仍在引用被删改的 Skill/API，发布会被 422 `PUBLISH_BLOCKED` 拦截并自动回滚 `repo/` 工作区。
+- **全量交叉引用门禁与删除保护**：即使只发布一个 Skill 或删除资源，也会把候选整棵资源树加载出来跑 `validate_all()`——若某线上模板/技能仍在引用被删改的 Skill/API，发布会被 422 `PUBLISH_BLOCKED` 拦截并自动回滚 `repo/` 工作区。资源删除遵循五项治理规则：① 模板可直接删除（`DELETE /api/v1/templates/{tid}`，删除/下线模板时未修改 `template-router` 触发的 `ROUTER_TEMPLATE_NOT_FOUND` 转为 `warnings` 不阻断发布，纯草稿直删，已发布发新版本并默认清理 `cases/{tid}/`）；② 仅允许删除 `scope == "template"` 的技能（线上或草稿为 `global` / `chat` 返回 `400 SKILL_DELETE_FORBIDDEN`）；③ 技能删除前须无任何线上或草稿模板关联（否则 `409 RESOURCE_IN_USE`）；④ API 删除前须无任何线上或草稿技能（含 `template` / `global` / `chat`）关联（否则 `409 RESOURCE_IN_USE`）；⑤ 挂在 `global` 技能下的基础 API 因此天然受保护无法误删。
 - **POSIX 原子软链切换（`ReleaseStore.switch_current`）**：先在同目录创建临时软链 `.current.<pid>.tmp -> rN`，再调用 `os.replace` 原子覆盖 `current`。线上高并发读取在任何微秒都不会读到“写了一半的目录”或空指针。
 - **两种回退手段**：
   - **资源级回退（`rollback_resource`）**：支持 `draft_only`（把历史版本内容提取为草稿先试跑；若目标历史版本含 `.offline` 下线标记，显式返回 `targetOffline: True` 与 `warning` 提示）或 `publish_now`（生成新版本 `r{N+1}` 上线该资源的历史状态，不影响其它资源）；

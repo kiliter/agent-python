@@ -25,11 +25,11 @@
 
 | HTTP | code | 含义 |
 |---|---|---|
-| 400 | `BAD_REQUEST` / `INVALID_RESOURCE` / `INVALID_INPUT` / `INVALID_PARAMS` / `FIELD_IN_USE` / `NO_DRAFT` / `*_EXISTS` | 请求内容不合法 |
+| 400 | `BAD_REQUEST` / `INVALID_RESOURCE` / `INVALID_TEMPLATE_ID` / `INVALID_INPUT` / `INVALID_PARAMS` / `FIELD_IN_USE` / `NO_DRAFT` / `*_EXISTS` | 请求内容不合法（自动路由命中模板但缺少必填入参时，`INVALID_INPUT` 响应额外附带 `templateId`、`templateName`、`routing`，且不写入运行记录） |
 | 401 | `UNAUTHORIZED` / `INVALID_CREDENTIALS` / `INVALID_API_KEY` | 未登录、密码错误、API Key 错误 |
 | 404 | `NOT_FOUND` / `RELEASE_NOT_FOUND` / `TEMPLATE_UNAVAILABLE` | 资源不存在 |
 | 409 | `DRAFT_CONFLICT`（附 `current` 草稿元数据） / `NOTHING_TO_PUBLISH` | 草稿被别人改过 / 与线上一致无需发布 |
-| 422 | `PUBLISH_BLOCKED`（附 `issues`） / `VALIDATION_ERROR` | 发布校验不通过 / 请求体结构错误 |
+| 422 | `PUBLISH_BLOCKED`（附 `issues`） / `TEMPLATE_ROUTE_FAILED`（附 `reason`、`candidates`） / `VALIDATION_ERROR` | 发布校验不通过 / 未传 `templateId` 时自动路由无可用在线模板或匹配失败（不写入运行记录） / 请求体结构错误 |
 | 429 | `LOGIN_LOCKED` | 连续登录失败 5 次，锁定 5 分钟 |
 
 ## 2. 前端必须修改的地方（不改就无法真实联调）
@@ -76,8 +76,9 @@
 | GET | `/templates` | – | `TemplateItem[]` | 现有。多了 `description`、`skillNames`、`draftRevision` |
 | POST | `/templates` | `{id, name, description?, skills?}` | `TemplateItem` | 现有，生成草稿 |
 | POST | `/templates/{id}/copy` | `{newId, newName, copyCases?=true}` | `TemplateItem` | 现有，`sourceId` 取自路径 |
-| POST | `/templates/{id}/offline` | `{reason?}` | `{id, status, rev}` | 现有。下线会生成新版本 |
+| POST | `/templates/{id}/offline` | `{reason?}` | `{id, status, rev, warnings?}` | 现有。下线会生成新版本（不被 `template-router` 阻断） |
 | POST | `/templates/{id}/restore` | – | `{id, status:'DRAFT'}` | 现有。恢复为草稿，发布后重新上线 |
+| DELETE | `/templates/{id}?deleteCases=true` | 可选 `{reason?, deleteCases?=true}` | `{id, deleted:true, rev, deletedCases, warnings}` | **新增**。可直接删除模板（纯草稿不发版 `rev=null`，已发布生成新版本，不被 `template-router` 阻断） |
 | GET | `/templates/{id}?version=working\|draft\|online\|rN` | – | `TemplateDetail` | **新增** |
 | GET | `/templates/{id}/fields` | – | `TemplateField[]` | 现有 |
 | GET | `/templates/cross-fields?exclude={id}` | – | `TemplateField[]`（带 `fromTemplate`） | 现有，建议带 `exclude` |
@@ -110,11 +111,13 @@
 | PUT | `/skills/{id}/draft` | `{markdown, revision?}` | `{savedAt, draft, issues}` | 现有。frontmatter 的 `name` 必须等于 id |
 | POST | `/skills/{id}/discard-draft`、`/validate`、`/publish`（`{note}`）、`/rollback` | | | `publish` 为现有，其余新增 |
 | GET | `/skills/{id}/revisions` | – | 同模板 | **新增** |
+| DELETE | `/skills/{id}` | 可选 `{reason?}` | `{id, deleted:true, rev}` | **新增**。仅允许删除 `scope=template`（`global`/`chat` 返回 400 `SKILL_DELETE_FORBIDDEN`）且无模板关联（否则 409 `RESOURCE_IN_USE`） |
 | GET | `/apis` | – | `ApiItem[]`（带 `params`、`fixedParams`、`processCode`） | 现有。参数表不再需要写死 |
 | POST | `/apis` | `{name, title, description, processCode?}` | `ApiItem` | 现有，自动生成骨架 YAML |
 | GET | `/apis/{name}?version=` | – | `{item, yamlText, draft}` | **新增** |
 | PUT | `/apis/{name}/draft` | `{yamlText}`；或 `{api:{title, description, timeoutMs, retry}}`（只改这几项） | `{savedAt, draft}` | 现有。YAML 不合法返回 400 |
 | POST | `/apis/{name}/publish`、`/discard-draft`、`/rollback`；GET `/revisions` | | | `publish` 为现有，其余新增 |
+| DELETE | `/apis/{name}` | 可选 `{reason?}` | `{name, deleted:true, rev}` | **新增**。要求无任何技能（含 `global`/`chat`）关联，否则返回 409 `RESOURCE_IN_USE` |
 | POST | `/apis/{name}/test-call` | `{params, yamlText?}` | `{ok, error, costMs, httpStatus, noData, rawXml, requestXml, records:[{row,...}], columns}` | 现有。`requestJson` 不再需要，`requestXml` 是脱敏后的实际报文 |
 | GET | `/settings/system-prompt` | – | `{sysPromptText, sysPromptStatus, onlineText, onlineRev, baseRev, draft}` | 现有 |
 | PUT | `/settings/system-prompt/draft` | `{sysPromptText, revision?}` | `{status, ...}` | 现有 |
@@ -138,8 +141,19 @@
 
 | 方法 | 路径 | 请求 | 响应 |
 |---|---|---|---|
-| POST | `/reports` | `{templateId, params:{入参名:值}, document, batchNo?}` | `{runId, status, templateId, rev, report, error, fields:[{name, visible, shown, status, value, source, reason}], missingShown, durationMs}` |
-| POST | `/reports/stream` | 同上 | SSE，`final` 为上面的结构 |
+| POST | `/reports` | `{templateId?, params:{入参名:值}, document, batchNo?}` | `{runId, status, templateId, templateName, rev, report, error, fields:[{name, visible, shown, status, value, source, reason}], missingShown, durationMs, routing?}` |
+| POST | `/reports/stream` | 同上 | SSE，`final` 为上面的结构；自动路由时在 `round=0` 先推送 `route_started` / 路由工具调用 / `route_completed`（或 `route_failed` + `event: error`） |
+| POST | `/reports/composite` | `{order:{公共入参}, document, items:[{templateId?, label?, params?, document?}], polish?=false, polishInstruction?, batchNo?}` | `{compositeRunId, runId, status, rev, durationMs, markdown, assembledMarkdown, polishedMarkdown, polished, polishError, sharedGatewayHits, foundCount, totalCount, missingShown, summary, order, items:[{..., templateId, templateName, routing?}]}` |
+| POST | `/reports/composite/polish` | `{markdown, order?, instruction?}` | `{markdown, verified: false}` |
+
+自动路由契约说明（未传 `templateId` 时）：
+
+- **触发条件**：`POST /reports`、`POST /reports/stream` 的 `templateId` 或 `POST /reports/composite` 的 `items[i].templateId` 省略或传 `null` 时，后端在单次请求锁定的同一份线上资源快照上先执行自动模板路由，再直接进入强证据填报管道；显式传入 `<= 0` 仍返回 `400 INVALID_TEMPLATE_ID`。
+- **路由策略与不阻塞原则**：优先调用 `template-router` Skill（L1 主索引 + L2 `references/*.md` 懒加载），若当前快照未配置该 Skill 则自动回退调用 `list_templates` + `get_template`；对有效在线候选按置信度（`高 > 中 > 低`）稳定排序，**始终按最高置信度模板直接运行填报（即使最高仅为 `低` 也不阻塞）**。
+- **响应向后兼容**：显式传入 `templateId` 时不返回 `routing` 字段；自动路由时在 `report` 响应（及 `GET /runs/{runId}` 详单、复合工单对应子项）中附带 `routing: AutoRouteInfo`（结构见第 4.3 节）。
+- **失败与缺参处理（不写入运行记录）**：
+  - 无可用在线模板、模型未给出任何有效在线候选或路由调用失败时，同步接口返回 `422 TEMPLATE_ROUTE_FAILED`（含 `reason`、`candidates`），SSE 接口推送 `event: error`，复合工单则仅标记对应子项 `FAILED` 不阻塞其他子项；
+  - 自动路由命中模板但缺少该模板必填入参时，返回 `400 INVALID_INPUT`，并在错误响应中额外附带 `templateId`、`templateName`、`routing` 与 `errors`，便于上游补参后重试。
 
 ### 3.6 暂不提供（第二阶段）
 
@@ -211,6 +225,18 @@ interface RunDetail {
   events: ProcessEvent[]          // 智能体轨迹，见第 5 节
   usage: { requests: number; toolCalls: number; inputTokens: number; outputTokens: number }
   skillsLoaded: string[]; validationRounds: { field: string; message: string }[][]; model: string
+  routing?: AutoRouteInfo | null  // 仅自动路由（未传 templateId）时有值
+}
+
+interface AutoRouteCandidate {
+  templateId: number; templateName?: string; level: '高'|'中'|'低'; reason: string
+}
+interface AutoRouteInfo {
+  auto: boolean                   // 自动路由固定为 true
+  templateId: number; templateName: string
+  confidence: '高'|'中'|'低'; reason: string
+  candidates: AutoRouteCandidate[]
+  skillsLoaded: string[]; durationMs: number
 }
 ```
 
@@ -231,8 +257,9 @@ data: {"seq":3,"type":"tool","atMs":812,"round":1,"tool":"load_skill","callId":"
 event: final
 data: {RunDetail 或 上游 report 结构}
 
-event: error          // 入参不合法、模板不存在等启动前错误
-data: {"code":"INVALID_INPUT","message":"...","errors":[...]}
+event: error          // 入参不合法、模板不存在、自动路由失败等启动前错误
+data: {"code":"INVALID_INPUT","message":"...","errors":[...],"templateId":101,"templateName":"...","routing":{...}}
+// 或路由失败：{"code":"TEMPLATE_ROUTE_FAILED","message":"...","reason":"...","candidates":[...]}
 ```
 
 `: keep-alive` 注释行每 15 秒发一次，前端忽略即可。客户端断开不会取消运行。
@@ -241,10 +268,13 @@ data: {"code":"INVALID_INPUT","message":"...","errors":[...]}
 
 | type | 附加字段 | 含义 |
 |---|---|---|
-| `run_started` | `runId, templateId, templateName, rev, skills, apis` | 开始运行 |
+| `route_started` | `runId, rev, routerSkill` | 开始自动模板路由（`round=0`，未传 `templateId` 时触发；`routerSkill` 为 `template-router` 或 `null`） |
+| `route_completed` | `runId, templateId, templateName, confidence, reason, candidates, durationMs` | 自动模板路由完成，已按最高置信度选定模板准备填报（`round=0`） |
+| `route_failed` | `runId, error, reason, candidates` | 自动模板路由失败，未命中有效在线模板或路由异常（`round=0`） |
+| `run_started` | `runId, templateId, templateName, rev, skills, apis` | 开始填报运行 |
 | `model_request` | – | 第 `round` 轮请求模型 |
 | `model_text` | `text` | 模型输出的说明文字 |
-| `tool` | `tool, callId, args, ok, result` | 一次平台工具调用。`tool` 取值：`load_skill`、`call_api`、`query_result`、`normalize_text`、`text_contains`、`date_range`、`format_date`。`call_api` 的 `result` 带 `resultId`、`count`、`costMs` |
+| `tool` | `tool, callId, args, ok, result` | 一次平台工具调用。路由阶段（`round=0`）可能调用 `load_skill`、`list_templates`、`get_template`；填报阶段涵盖 `load_skill`、`call_api`、`query_result` 及 9 个确定性文本/日历/正则原语。`call_api` 的 `result` 带 `resultId`、`count`、`costMs` |
 | `report_rejected` | `attempt, issues:[{field, message}]` | 交卷被证据校验退回（时间线中的红色步骤） |
 | `report_accepted` | `attempt` | 交卷通过 |
 | `report_degraded` | `attempt, issues, fields` | 重试用完，`fields` 按“找不到”处理 |
