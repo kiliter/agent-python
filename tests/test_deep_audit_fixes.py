@@ -15,6 +15,7 @@ import threading
 from typing import Any
 import warnings
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
@@ -543,14 +544,15 @@ def test_7_logging_spa_testcall_name_auth_hardening_and_zero_deprecation(tmp_pat
     guard = LoginGuard(max_failures=5, lock_s=300, max_entries=32)
     for _ in range(5):
         guard.fail("admin")
-    with pytest.raises( Exception ):
+    with pytest.raises(HTTPException) as exc_info:
         guard.check("admin")
+    assert exc_info.value.status_code == 429
     for idx in range(200):
         guard.fail(f"spray-user-{idx}")
     assert len(guard._fails) <= 32
-    with pytest.raises(Exception) as locked_exc:
+    with pytest.raises(HTTPException) as locked_exc:
         guard.check("admin")
-    assert getattr(locked_exc.value, "status_code", None) == 429
+    assert locked_exc.value.status_code == 429
 
     # 6) build_model(llm_tool_choice_required=True) 零弃用警告
     with warnings.catch_warnings(record=True) as caught:

@@ -180,6 +180,11 @@ def _session_run_cards(session: dict[str, Any]) -> list[dict[str, Any]]:
     return [m for m in msgs if isinstance(m, dict) and m.get("kind") == "run" and m.get("runId")]
 
 
+def _allow_offline(deps: ChatDeps) -> bool:
+    """草稿联调模式（target='draft'）允许浏览、推荐与试跑包含未发布/已下线的草稿态模板。#Created By AiCoding(codex)"""
+    return str(deps.session.get("target") or "online") == "draft"
+
+
 def _clean_field_desc(desc: str) -> str:
     return strip_java_rule_note(desc, max_chars=240)
 
@@ -207,7 +212,11 @@ async def list_templates(ctx: RunContext[ChatDeps], keyword: str = "") -> list[d
     Args:
         keyword: 可选过滤关键词（匹配模板编号、名称或描述），留空返回全部在线模板。
     """
-    return list_online_templates(ctx.deps.resources, keyword=keyword)
+    return list_online_templates(
+        ctx.deps.resources,
+        keyword=keyword,
+        allow_offline=_allow_offline(ctx.deps),
+    )
 
 
 async def get_template(ctx: RunContext[ChatDeps], templateId: int) -> dict[str, Any]:
@@ -216,7 +225,11 @@ async def get_template(ctx: RunContext[ChatDeps], templateId: int) -> dict[str, 
     Args:
         templateId: 在线模板编号。
     """
-    return get_online_template(ctx.deps.resources, templateId)
+    return get_online_template(
+        ctx.deps.resources,
+        templateId,
+        allow_offline=_allow_offline(ctx.deps),
+    )
 
 
 async def get_run_result(ctx: RunContext[ChatDeps], runId: str) -> dict[str, Any]:
@@ -254,6 +267,8 @@ async def get_run_result(ctx: RunContext[ChatDeps], runId: str) -> dict[str, Any
         "status": card.get("status"),
         "templateId": card.get("templateId"),
         "templateName": card.get("templateName"),
+        "isComposite": bool(card.get("isComposite", False)),
+        "compositeItems": [dict(x) for x in (card.get("compositeItems") or []) if isinstance(x, dict)],
         "error": card.get("error"),
         "missingShown": list(card.get("missingShown") or []),
         "markdown": latest_md,
@@ -278,7 +293,8 @@ def _build_context_instructions(deps: ChatDeps, output_mode: str, settings: Any 
     max_doc_chars = cfg_int(settings, "chat_max_doc_chars", MAX_DOC_CHARS)
     max_run_cards = cfg_int(settings, "chat_max_run_cards", MAX_RUN_CARDS)
     max_md_preview = cfg_int(settings, "chat_max_markdown_preview_chars", MAX_MARKDOWN_PREVIEW)
-    online_count = sum(1 for t in rs.templates.values() if not t.offline)
+    allow_off = _allow_offline(deps)
+    online_count = sum(1 for t in rs.templates.values() if allow_off or not t.offline)
     chat_ids = rs.chat_skills()
     has_router = ROUTER_SKILL_NAME in chat_ids
     extra_chat_ids = [sid for sid in chat_ids if sid != ROUTER_SKILL_NAME]
@@ -552,7 +568,8 @@ class ChatAgent:
         @agent.output_validator
         async def _validate_action(ctx: RunContext[ChatDeps], out: ChatAction) -> ChatAction:
             rs = ctx.deps.resources
-            online_ids = sorted(tid for tid, t in rs.templates.items() if not t.offline)
+            allow_off = _allow_offline(ctx.deps)
+            online_ids = sorted(tid for tid, t in rs.templates.items() if allow_off or not t.offline)
 
             if out.action == "recommend":
                 if not out.recommendations:
@@ -563,12 +580,12 @@ class ChatAgent:
                 bad_ids = [
                     p.templateId
                     for p in out.recommendations
-                    if p.templateId not in rs.templates or rs.templates[p.templateId].offline
+                    if p.templateId not in rs.templates or (not allow_off and rs.templates[p.templateId].offline)
                 ]
                 if bad_ids:
                     raise ModelRetry(
                         f"推荐的模板编号 {bad_ids} 不存在或已下线；"
-                        f"只能推荐在线模板，当前可用在线模板编号：{online_ids}"
+                        f"只能推荐可用模板，当前可用模板编号：{online_ids}"
                     )
                 seen: set[int] = set()
                 deduped: list[RecommendPick] = []
@@ -586,13 +603,13 @@ class ChatAgent:
                 if out.templateId is None:
                     raise ModelRetry(
                         f"action={out.action!r} 必须指定有效的在线 templateId；"
-                        f"当前可用在线模板编号：{online_ids}"
+                        f"当前可用模板编号：{online_ids}"
                     )
                 tpl = rs.templates.get(out.templateId)
-                if tpl is None or tpl.offline:
+                if tpl is None or (not allow_off and tpl.offline):
                     raise ModelRetry(
                         f"模板编号 {out.templateId} 不存在或已下线；"
-                        f"当前可用在线模板编号：{online_ids}"
+                        f"当前可用模板编号：{online_ids}"
                     )
                 return out
 
@@ -760,6 +777,9 @@ class ChatAgent:
         """执行单轮聊天路由推理并返回通过校验的 ChatAction。"""
         _, rt_settings, _, _ = self._snapshot_runtime()
         max_hist = cfg_int(rt_settings, "chat_max_history_messages", MAX_HISTORY_MESSAGES)
+        trigger_msgs = cfg_int(rt_settings, "chat_compact_trigger_messages", COMPACT_TRIGGER_MESSAGES, min_val=2)
+        # 当未归档消息数尚未触发自动压缩（< trigger_msgs）时，避免被更小的 max_hist 提前截断产生滑窗断层
+        eff_max_hist = max(max_hist, trigger_msgs)
         req_limit = cfg_int(rt_settings, "chat_request_limit", CHAT_REQUEST_LIMIT)
         tool_limit = cfg_int(rt_settings, "chat_tool_calls_limit", CHAT_TOOL_CALLS_LIMIT)
         agent, timeout_s = self._get_or_build_agent()
@@ -768,7 +788,7 @@ class ChatAgent:
             text,
             auto=auto,
             memory_summary=memory_summary,
-            max_history_messages=max_hist,
+            max_history_messages=eff_max_hist,
         )
         async with asyncio.timeout(timeout_s):
             result = await agent.run(

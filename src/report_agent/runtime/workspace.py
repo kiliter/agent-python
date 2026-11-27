@@ -12,6 +12,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .singleflight import IdempotentSingleFlight
+
 
 @dataclass
 class ApiResult:
@@ -130,12 +132,23 @@ class Workspace:
     tool_calls: dict[str, ToolCall] = field(default_factory=dict)
     loaded_skills: list[str] = field(default_factory=list)
     validation_rounds: list[list[dict[str, str]]] = field(default_factory=list)
+    degraded_fields: set[str] = field(default_factory=set)
     _result_seq: int = 0
     _call_seq: int = 0
-    _idempotent_cache: dict[tuple[str, str], ApiResult] = field(default_factory=dict, repr=False)
-    _idempotent_inflight: dict[tuple[str, str], asyncio.Future[ApiResult]] = field(default_factory=dict, repr=False)
+    _api_singleflight: IdempotentSingleFlight[tuple[str, str], ApiResult] = field(
+        default_factory=lambda: IdempotentSingleFlight(is_success=lambda r: r.ok),
+        repr=False,
+    )
     _doc_index: Any = field(default=None, repr=False)
     _doc_index_source: str | None = field(default=None, repr=False)
+
+    @property
+    def _idempotent_cache(self) -> dict[tuple[str, str], ApiResult]:
+        return self._api_singleflight.cache
+
+    @property
+    def _idempotent_inflight(self) -> dict[tuple[str, str], asyncio.Future[ApiResult]]:
+        return self._api_singleflight.inflight
 
     def next_result_id(self) -> str:
         self._result_seq += 1

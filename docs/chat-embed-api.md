@@ -8,7 +8,7 @@
 | 方向 | 消息 | 说明 |
 |------|------|------|
 | iframe → 父 | `{type:'chat-ready', userId, orderId}` | 加载后每 500ms 发一次，收到 init 后停止；10s 内没收到 init 时页面显示「未收到上层参数」 |
-| 父 → iframe | `{type:'chat-init', apiKey, inputs, document, target?}` | `inputs` 为对象（值转字符串）；`target` 只有管理端模拟页会传 `'draft'` |
+| 父 → iframe | `{type:'chat-init', apiKey, inputs, items?, document, target?}` | `inputs` 为对象（值转字符串）；`items` 为可选多商品子项列表（用于单号码多业务复合工单）；`target` 只有管理端模拟页会传 `'draft'` |
 | iframe → 父 | `{type:'report-confirmed', userId, orderId, templateId, templateName, runId, status, markdown, edited, rewritten}` | 确认接口成功后发送 |
 | iframe → 父 | `{type:'chat-close-request'}` | 紧跟在 report-confirmed 之后发送，由父页面决定关闭该页内 Tab 页签或隐藏 iframe |
 
@@ -24,7 +24,9 @@
 
 chat-init 中的 `apiKey` 为空时不带 `X-API-Key`（同源模拟页依赖 Cookie / Bearer）。
 
-跨会话 `runId` 防越权：`/api/v1/chat/runs/{runId}/{events,raw,cancel,confirm}` 支持可选请求头 `X-Chat-Session-Id: <sessionId>` 或可选查询参数 `?sessionId=<sessionId>`（未传时保持向后兼容）；一旦传入非空值但格式非法或与 `runId` 实际所属会话不一致，服务端统一返回 `404 RUN_NOT_FOUND`。
+跨会话请求防越权与防串线：
+- 所有 `/api/v1/chat/sessions/{sid}` 与 `/api/v1/chat/sessions/{sid}/*` 接口支持可选请求头 `X-Chat-Session-Id: <sessionId>`；一旦携带非空值且与路径 `sid` 不一致，立即返回 `404 SESSION_NOT_FOUND`。
+- `/api/v1/chat/runs/{runId}/{events,raw,polish,cancel,confirm}` 支持可选请求头 `X-Chat-Session-Id: <sessionId>` 或可选查询参数 `?sessionId=<sessionId>`（未传时保持向后兼容）；一旦传入非空值但格式非法或与 `runId` 实际所属会话不一致，服务端统一返回 `404 RUN_NOT_FOUND`。
 
 ## 3. 数据结构
 
@@ -36,6 +38,7 @@ interface ChatSession {
   createdAt: string; updatedAt: string
   inputs: Record<string, string>
   inputSources: Record<string, '上层' | '用户补充'>
+  items?: Array<{ label: string; params: Record<string, string>; document?: string; templateId?: number }>
   inputsVersion: number            // 上层入参指纹每变化一次 +1
   documentChars: number
   activeRunId: string | null
@@ -67,16 +70,26 @@ interface RecommendItem { templateId: number; templateName: string; reason: stri
 interface ParamSpec { key: string; required: boolean; description: string; sample: string;
   pattern: string | null; value: string; error: string | null }
 
+interface CompositeSubItem {
+  index: number; label: string; runId?: string
+  templateId: number; templateName: string; status: RunStatus
+  foundCount: number; totalCount: number; missingShown: string[]
+  error: string | null
+}
+
 interface RunCard {
   runId: string; templateId: number; templateName: string; status: RunStatus
+  isComposite?: boolean            // 多商品 × 多模板复合工单汇总运行卡片（此时 templateId 为 0）
+  compositeItems?: CompositeSubItem[]
+  sharedGatewayHits?: number       // 复合运行内共享幂等网关缓存命中次数
   rev: string; inputsVersion: number
   stale: boolean                   // 入参已更新，属于旧入参
   templateOffline: boolean         // 模板已下线：可以确认，禁止重跑
   steps: RunStep[]                 // 结束后保存全部步骤；运行中可能只有部分步骤，需配合 events 接口
   durationMs: number; error: string | null
   missingShown: string[]; foundCount: number; totalCount: number
-  versions: ReportVersion[]        // 第一条为 original；改写时追加 rewrite
-  confirmed: boolean               // 当前版本栈已确认；触发 AI 改写生成未确认新版本时自动复位为 false
+  versions: ReportVersion[]        // 第一条为 original；改写/二次润色时追加 rewrite
+  confirmed: boolean               // 当前版本栈已确认；触发 AI 改写/润色生成未确认新版本时自动复位为 false
 }
 
 interface ReportVersion { no: number; kind: 'original' | 'rewrite'; markdown: string;
@@ -108,17 +121,19 @@ interface TemplatePreview {
 
 | 接口 | 请求 | 响应 |
 |------|------|------|
-| `POST /sessions` | `{userId, orderId, inputs, document, target?}` | `ChatSession`（同一 userId+orderId 恢复原会话；入参指纹变化时 `inputsChanged=true`，并追加 divider 消息，旧 run 卡片 `stale=true`） |
+| `POST /sessions` | `{userId, orderId, inputs, items?, document, target?}` | `ChatSession`（同一 userId+orderId 恢复原会话；入参或 items 指纹变化时 `inputsChanged=true`，并追加 divider 消息，旧 run 卡片 `stale=true`） |
 | `GET /sessions/{sid}` | — | `ChatSession` |
 | `POST /sessions/{sid}/messages` | `{text, auto?}` | **SSE**：`status` `{text}`；`message` `ChatMessage`（**按 id upsert**：同 id 表示更新，例如改写后的 run 卡片；动作为 `rewrite` 时还会追加携带 `rewriteRunId` 与 `rewriteVersionNo` 的助手 `text` 消息）；`error` `{code, message}`；最后 `done` `{session}`。`auto=true` 表示打开时的自动推荐（不产生用户消息）；`auto=false` 且未归档历史消息数达到阈值（默认 24 条，支持运行期热更新）时，SSE 会先下发 `status` 事件 `正在压缩早期对话上下文…` 执行增量滚动摘要后再进入智能体推理（压缩失败时自动无感回退滑窗，不阻断对话）。动作为运行时会返回一条 `RUNNING` 的 run 消息，前端随后订阅其 events |
 | `POST /sessions/{sid}/compact` | `{}`（空请求体） | `{compacted: boolean, summarizedCount: number, summarizedUpTo: number, memorySummary: string, session: ChatSession}`：手动将当前未归档早期对话压缩合并为记忆摘要（保留最近原文条数默认 6 条）；未归档不足触发下限（默认 8 条，即 `manualCompactMinMessages`）时幂等返回 `compacted: false` 且不调用模型。模型超时返回 `504 CHAT_COMPACT_TIMEOUT`，失败返回 `502 CHAT_COMPACT_ERROR` |
 | `GET /sessions/{sid}/templates?q=` | — | `[{templateId, templateName, description, offline, recommendLevel, lastStatus}]`（换模板弹窗用：本次推荐结果排在前面，`lastStatus` 为本会话最近一次运行状态） |
 | `GET /sessions/{sid}/templates/{templateId}` | — | `TemplatePreview`（模板结构详情、入参当前值、可见字段说明与样例填充预览；已下线模板仍允许预览并标记 `offline=true`；不存在返回 `404 TEMPLATE_UNAVAILABLE`） |
-| `POST /sessions/{sid}/runs` | `{templateId, inputs?}` | `{message: ChatMessage, session: ChatSession}`：缺少必填参数或格式不对时返回 `ask_params` 消息，否则返回 `RUNNING` 的 run 消息。`inputs` 合并到会话并标记来源为「用户补充」。错误：`409 RUN_IN_PROGRESS`、`404 TEMPLATE_UNAVAILABLE` |
+| `POST /sessions/{sid}/runs` | `{templateId, inputs?}` | `{message: ChatMessage, session: ChatSession}`：缺少必填参数或格式不对时返回 `ask_params` 消息，否则返回 `RUNNING` 的 run 消息。`inputs` 合并到会话并标记来源为「用户补充」（实际下发至填报引擎时仅透传目标模板声明的入参键）。错误：`409 RUN_IN_PROGRESS`、`404 TEMPLATE_UNAVAILABLE` |
+| `POST /sessions/{sid}/composite-runs` | `{items: [{templateId, label?, params?, document?}], polish?, polishInstruction?}` | `{message: ChatMessage, session: ChatSession}`：发起单号码多业务复合核查，并发执行各子模板、按汇总大模板确定性拼装（`v1 original`），可选追加大模型二次润色版本（`v2 rewrite`）。错误：`400 EMPTY_ITEMS / TOO_MANY_ITEMS / INVALID_TEMPLATE_ID`、`404 TEMPLATE_UNAVAILABLE`、`409 RUN_IN_PROGRESS` |
 | `GET /runs/{runId}/events?after=N&includeRaw=0&rawAfter=M` | 也支持 `Last-Event-ID` 请求头 | **SSE**：`step`（`id: seq`，data 为 `RunStep`）；当 `includeRaw=1` 时一并推送 `raw`（无 `id`，data 为 `seq > rawAfter` 的 `RawProcessEvent`）；结束时发 `final`（data 为更新后的 run `ChatMessage`），然后断开；每 15s 发一次 `: keep-alive`。已结束的运行会先重放游标之后的 `raw`（若启用）与 `step`，再发 `final` |
 | `GET /runs/{runId}/raw` | — | `{runId, status, events: RawProcessEvent[]}`（按需拉取某次运行的原始过程事件：优先读内存通道，淘汰后从 `RunStore` 持久化记录读取；校验归属当前聊天会话与 `draft` 权限） |
-| `POST /runs/{runId}/cancel` | — | `{ok: true}` |
-| `POST /runs/{runId}/confirm` | `{markdown, acknowledgePartial?}` | `{payload, session}`，payload 即 report-confirmed 消息体。错误：`400 NOT_CONFIRMABLE`（FAILED/RUNNING/CANCELLED/INTERRUPTED）、`409 PARTIAL_NEEDS_ACK`（返回 `missingShown`）。重复确认是幂等的 |
+| `POST /runs/{runId}/polish` | `{instruction?}` | `{message: ChatMessage, version: ReportVersion, versionNo: number, session: ChatSession}`：基于 `v1` 确定性核验原版执行大模型二次润色，追加 `kind='rewrite'` 新版本并将 `confirmed` 复位为 `false`。错误：`400 NOT_POLISHABLE`、`504 POLISH_TIMEOUT`、`502 POLISH_FAILED` |
+| `POST /runs/{runId}/cancel` | — | `{ok: true}`（取消在途任务并等待会话活跃槽位释放，支持停止后立即重跑） |
+| `POST /runs/{runId}/confirm` | `{markdown, acknowledgePartial?}` | `{payload, session}`，payload 即 report-confirmed 消息体。审计身份固定取服务端已认证身份（管理端用户名或 `chat:{userId}`）。错误：`400 NOT_CONFIRMABLE`（FAILED/RUNNING/CANCELLED/INTERRUPTED）、`409 PARTIAL_NEEDS_ACK`（返回 `missingShown`）。重复确认是幂等的 |
 
 `edited` = 提交的 markdown 与最新版本不同；`rewritten` = 最新版本是 rewrite。
 

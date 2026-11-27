@@ -11,6 +11,7 @@ import {
   Minimize2,
 } from 'lucide-vue-next'
 import { usePlatformStore } from '@/stores/platform'
+import { matchTemplateInputPattern } from '@/utils/fieldFormat'
 import type { ProcessEvent, RunRecord, TemplateField, TemplateInput } from '@/types/platform'
 import AgentTimeline from '@/components/AgentTimeline.vue'
 import FieldEvidenceTable from '@/components/FieldEvidenceTable.vue'
@@ -89,19 +90,18 @@ function fillInputSample(inp: TemplateInput) {
   setInputValue(inp.key, inp.sample)
 }
 
-/** 校验单个入参：返回错误提示文本，合法返回 null（锚定整串匹配，对齐后端 fullmatch + strip） */
+/** 校验单个入参：返回错误提示文本，合法返回 null（锚定整串匹配，兼容 Python 内联修饰符） */
 function getInputError(inp: TemplateInput): string | null {
   const val = getInputValue(inp.key).trim()
   if (!val) {
     return validationTriggered.value && inp.required ? '此项为必填入参' : null
   }
   if (inp.pattern) {
-    try {
-      const re = new RegExp(`^(?:${inp.pattern})$`)
-      if (!re.test(val)) {
-        return `格式不匹配（${inp.preset || inp.pattern}）`
-      }
-    } catch {
+    const res = matchTemplateInputPattern(val, inp.pattern)
+    if (res === 'mismatch') {
+      return `格式不匹配（${inp.preset || inp.pattern}）`
+    }
+    if (res === 'invalid_syntax') {
       return `入参正则语法有误：${inp.pattern}`
     }
   }
@@ -198,9 +198,12 @@ function toggleCollapse() {
 /** 校验必填与正则后启动真实试运行调试 */
 async function handleRunDebug() {
   if (store.isDryRunning) return
+  if (!(await store.flushPendingInspectorEdits('dryrun'))) return
   validationTriggered.value = true
 
-  const missingKeys = store.templateInputs
+  const declaredInputs = store.templateInputs.filter(inp => Boolean(inp.key.trim()))
+
+  const missingKeys = declaredInputs
     .filter(inp => inp.required && !getInputValue(inp.key).trim())
     .map(inp => inp.key)
 
@@ -212,15 +215,13 @@ async function handleRunDebug() {
   }
 
   const invalidKeys: string[] = []
-  for (const inp of store.templateInputs) {
+  for (const inp of declaredInputs) {
     const val = getInputValue(inp.key).trim()
     if (!val || !inp.pattern) continue
-    try {
-      const re = new RegExp(`^(?:${inp.pattern})$`)
-      if (!re.test(val)) {
-        invalidKeys.push(inp.key)
-      }
-    } catch {
+    const res = matchTemplateInputPattern(val, inp.pattern)
+    if (res === 'mismatch') {
+      invalidKeys.push(inp.key)
+    } else if (res === 'invalid_syntax') {
       invalidKeys.push(`${inp.key}（正则有误）`)
     }
   }
@@ -232,9 +233,11 @@ async function handleRunDebug() {
     return
   }
 
-  const inputsPayload: Record<string, string> = { ...(store.dryRunPreset.inputs || {}) }
-  for (const inp of store.templateInputs) {
-    inputsPayload[inp.key] = getInputValue(inp.key).trim()
+  // 仅提交当前模板有效声明的入参键，避免历史改名残留脏键污染请求体
+  const inputsPayload: Record<string, string> = {}
+  for (const inp of declaredInputs) {
+    const k = inp.key.trim()
+    inputsPayload[k] = getInputValue(inp.key).trim()
   }
 
   await store.executeDryRun({

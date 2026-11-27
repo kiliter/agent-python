@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
 from functools import lru_cache, wraps
+import re
 from typing import Any
 
 from jinja2 import Environment, StrictUndefined, Template as JinjaTemplate, TemplateSyntaxError, Undefined, meta, nodes
@@ -17,18 +18,28 @@ from jinja2.compiler import CodeGenerator, Frame
 from jinja2.exceptions import SecurityError
 from jinja2.ext import Extension
 from jinja2.lexer import TOKEN_DATA, TOKEN_VARIABLE_END, Token, TokenStream
+from jinja2.nodes import EvalContext
+from jinja2.runtime import Context
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 from jinja2.utils import missing as _jinja_missing
 
 _ACTIVE_USED: ContextVar[set[str] | None] = ContextVar("_ACTIVE_USED", default=None)
 
+# #Created By AiCoding(codex) Jinja2 保留关键字（禁止作为模板字段名/列名，供领域层与 API 层统一复用）
+RESERVED_FIELD_NAMES: set[str] = {
+    "true", "false", "none", "True", "False", "None",
+    "if", "elif", "else", "endif", "for", "endfor", "in", "and", "or", "not", "is",
+    "set", "block", "endblock", "macro", "endmacro", "call", "filter", "import", "from", "include", "extends",
+}
+_RESERVED_FIELD_NAMES = RESERVED_FIELD_NAMES
+
 
 class TrackedList(list):
-    """带字段名与缺失标记的列表值，仅在实际迭代（{% for %}）或直接输出时将字段名记入 used。
+    """带字段名与缺失标记的列表值，仅在实际迭代（{% for %}）、下标/切片访问或直接输出时将字段名记入 used。
 
     #Created By AiCoding(codex)
     {% if 列表字段 %} 调用 bool(TrackedList)（走 __len__），不会触发 __iter__，因此不会误记为已展示；
-    只有进入生效分支执行 {% for item in 列表字段 %}（或 {{ 列表字段 }} 输出）时才记录字段名。
+    只有进入生效分支执行 {% for item in 列表字段 %}、切片/下标取值（或 {{ 列表字段 }} 输出）时才记录字段名。
     """
 
     field_name: str
@@ -47,18 +58,34 @@ class TrackedList(list):
         self.missing = missing
         self._on_iter = on_iter
 
-    def __iter__(self) -> Iterator[Any]:
+    def _mark_used(self) -> None:
         if self.field_name:
             if self._on_iter is not None:
                 self._on_iter(self.field_name)
             active_used = _ACTIVE_USED.get()
             if active_used is not None:
                 active_used.add(self.field_name)
+
+    def __iter__(self) -> Iterator[Any]:
+        self._mark_used()
         return super().__iter__()
+
+    def __getitem__(self, key: Any) -> Any:
+        if isinstance(key, slice):
+            self._mark_used()
+            return TrackedList(
+                super().__getitem__(key),
+                field_name=self.field_name,
+                missing=self.missing,
+                on_iter=self._on_iter,
+            )
+        item = super().__getitem__(key)
+        self._mark_used()
+        return item
 
 
 class TrackedValue(str):
-    """带字段名的字符串值，比较、拼接（~ 与 +）及常见字符串过滤后仍保留全部关联字段名追踪。"""
+    """带字段名的字符串值，比较、拼接（~、+、% 格式化）及常见字符串过滤后仍保留全部关联字段名追踪。"""
 
     field_name: str
     field_names: tuple[str, ...]
@@ -100,7 +127,9 @@ class TrackedValue(str):
         return self._wrap(super().rstrip(chars))
 
     def replace(self, old: str, new: str, count: int = -1) -> "TrackedValue":  # type: ignore[override]
-        return self._wrap(super().replace(old, new, count))
+        extra_names = new.field_names if isinstance(new, TrackedValue) else ()
+        extra_missing = new.missing if isinstance(new, TrackedValue) else False
+        return self._wrap(super().replace(old, new, count), extra_names=extra_names, extra_missing=extra_missing)
 
     def lower(self) -> "TrackedValue":
         return self._wrap(super().lower())
@@ -111,11 +140,49 @@ class TrackedValue(str):
     def title(self) -> "TrackedValue":
         return self._wrap(super().title())
 
+    def capitalize(self) -> "TrackedValue":
+        return self._wrap(super().capitalize())
+
+    def casefold(self) -> "TrackedValue":
+        return self._wrap(super().casefold())
+
+    def swapcase(self) -> "TrackedValue":
+        return self._wrap(super().swapcase())
+
+    def center(self, width: int, fillchar: str = " ") -> "TrackedValue":  # type: ignore[override]
+        extra_names = fillchar.field_names if isinstance(fillchar, TrackedValue) else ()
+        extra_missing = fillchar.missing if isinstance(fillchar, TrackedValue) else False
+        return self._wrap(super().center(width, fillchar), extra_names=extra_names, extra_missing=extra_missing)
+
+    def ljust(self, width: int, fillchar: str = " ") -> "TrackedValue":  # type: ignore[override]
+        extra_names = fillchar.field_names if isinstance(fillchar, TrackedValue) else ()
+        extra_missing = fillchar.missing if isinstance(fillchar, TrackedValue) else False
+        return self._wrap(super().ljust(width, fillchar), extra_names=extra_names, extra_missing=extra_missing)
+
+    def rjust(self, width: int, fillchar: str = " ") -> "TrackedValue":  # type: ignore[override]
+        extra_names = fillchar.field_names if isinstance(fillchar, TrackedValue) else ()
+        extra_missing = fillchar.missing if isinstance(fillchar, TrackedValue) else False
+        return self._wrap(super().rjust(width, fillchar), extra_names=extra_names, extra_missing=extra_missing)
+
+    def zfill(self, width: int) -> "TrackedValue":  # type: ignore[override]
+        return self._wrap(super().zfill(width))
+
+    def expandtabs(self, tabsize: int = 8) -> "TrackedValue":  # type: ignore[override]
+        return self._wrap(super().expandtabs(tabsize))
+
     def removeprefix(self, prefix: str) -> "TrackedValue":  # type: ignore[override]
         return self._wrap(super().removeprefix(prefix))
 
     def removesuffix(self, suffix: str) -> "TrackedValue":  # type: ignore[override]
         return self._wrap(super().removesuffix(suffix))
+
+    def partition(self, sep: str) -> tuple["TrackedValue", "TrackedValue", "TrackedValue"]:  # type: ignore[override]
+        head, mid, tail = super().partition(sep)
+        return (self._wrap(head), self._wrap(mid), self._wrap(tail))
+
+    def rpartition(self, sep: str) -> tuple["TrackedValue", "TrackedValue", "TrackedValue"]:  # type: ignore[override]
+        head, mid, tail = super().rpartition(sep)
+        return (self._wrap(head), self._wrap(mid), self._wrap(tail))
 
     def split(self, sep: str | None = None, maxsplit: int = -1) -> list["TrackedValue"]:  # type: ignore[override]
         return [self._wrap(p) for p in super().split(sep, maxsplit)]
@@ -125,6 +192,34 @@ class TrackedValue(str):
 
     def splitlines(self, keepends: bool = False) -> list["TrackedValue"]:  # type: ignore[override]
         return [self._wrap(p) for p in super().splitlines(keepends)]
+
+    def join(self, iterable: Iterable[Any]) -> "TrackedValue":
+        items = list(iterable)
+        names, any_missing = _collect_tracked_sources(items)
+        return self._wrap(super().join(items), extra_names=names, extra_missing=any_missing)
+
+    def format(self, *args: Any, **kwargs: Any) -> "TrackedValue":
+        raw = super().format(*args, **kwargs)
+        names, any_missing = _collect_tracked_sources((*args, *kwargs.values()))
+        return self._wrap(raw, extra_names=names, extra_missing=any_missing)
+
+    def format_map(self, mapping: Any) -> "TrackedValue":
+        raw = super().format_map(mapping)
+        names, any_missing = _collect_tracked_sources((mapping,))
+        return self._wrap(raw, extra_names=names, extra_missing=any_missing)
+
+    def __mod__(self, args: Any) -> "TrackedValue":
+        raw = super().__mod__(args)
+        names, any_missing = _collect_tracked_sources((args,))
+        return self._wrap(raw, extra_names=names, extra_missing=any_missing)
+
+    def __mul__(self, count: Any) -> "TrackedValue":
+        res = super().__mul__(count)
+        return self._wrap(res) if isinstance(res, str) else res  # type: ignore[return-value]
+
+    def __rmul__(self, count: Any) -> "TrackedValue":
+        res = super().__rmul__(count)
+        return self._wrap(res) if isinstance(res, str) else res  # type: ignore[return-value]
 
     def __getitem__(self, key: Any) -> "TrackedValue":
         return self._wrap(super().__getitem__(key))
@@ -184,7 +279,7 @@ class _PlaceholderUndefined(Undefined):
 
 
 class _TrackedCodeGenerator(CodeGenerator):
-    """重写 ~ 拼接与 + 运算，避免 CPython str_join / str.__add__ 剥离 TrackedValue 追踪信息。"""
+    """重写 ~ 拼接、+ 与 % 运算，避免 CPython 字符串运算剥离 TrackedValue 追踪信息。"""
 
     def visit_Concat(self, node: nodes.Concat, frame: Frame) -> None:
         self.write("environment._tracked_concat((")
@@ -200,14 +295,24 @@ class _TrackedCodeGenerator(CodeGenerator):
         self.visit(node.right, frame)
         self.write(")")
 
+    def visit_Mod(self, node: nodes.Mod, frame: Frame) -> None:
+        self.write("environment._tracked_mod(")
+        self.visit(node.left, frame)
+        self.write(", ")
+        self.visit(node.right, frame)
+        self.write(")")
+
 
 def _collect_tracked_sources(items: Iterable[Any]) -> tuple[list[str], bool]:
-    """收集过滤器入参（含 list/tuple 容器元素）中携带的 TrackedValue 字段名与缺失标记。#Created By AiCoding(codex)"""
+    """收集过滤器/格式化入参中携带的 TrackedValue 字段名与缺失标记（跳过 Jinja 运行时上下文对象）。#Created By AiCoding(codex)"""
     names: list[str] = []
     any_missing = False
 
     def _visit(obj: Any) -> None:
         nonlocal any_missing
+        # 显式跳过 Jinja2 Context / Environment / EvalContext，防止 @pass_context 过滤器误扫全量上下文变量污染 used
+        if isinstance(obj, (Context, Environment, EvalContext)):
+            return
         if isinstance(obj, TrackedValue):
             for fn in obj.field_names:
                 if fn not in names:
@@ -250,12 +355,14 @@ def _wrap_tracked_result(res: Any, sources: Iterable[Any]) -> Any:
 
 def _wrap_filter_func(fn: Callable[..., Any]) -> Callable[..., Any]:
     """包装 Jinja2 内置过滤器以保留 TrackedValue 字段追踪（同时通过 @wraps 保留 jinja_pass_arg）。#Created By AiCoding(codex)"""
+    pass_arg = getattr(fn, "jinja_pass_arg", None)
 
     @wraps(fn)
     def _wrapped(*args: Any, **kwargs: Any) -> Any:
         res = fn(*args, **kwargs)
         if isinstance(res, str):
-            return _wrap_tracked_result(res, (*args, *kwargs.values()))
+            tracked_args = args[1:] if pass_arg is not None and args else args
+            return _wrap_tracked_result(res, (*tracked_args, *kwargs.values()))
         return res
 
     return _wrapped
@@ -353,6 +460,29 @@ class _TrackedSandboxEnvironment(ImmutableSandboxedEnvironment):
             if res is not NotImplemented:
                 return res
         return left + right
+
+    def _materialize_mod_arg(self, obj: Any) -> Any:
+        if isinstance(obj, Undefined) and obj._undefined_obj is _jinja_missing and obj._undefined_name:
+            uname = str(obj._undefined_name)
+            return TrackedValue("{{" + uname + "}}", uname, missing=True)
+        if isinstance(obj, tuple):
+            return tuple(self._materialize_mod_arg(x) for x in obj)
+        if isinstance(obj, dict):
+            return {k: self._materialize_mod_arg(v) for k, v in obj.items()}
+        return obj
+
+    def _tracked_mod(self, left: Any, right: Any) -> Any:
+        if not self._strict_undefined:
+            if isinstance(left, Undefined) and left._undefined_obj is _jinja_missing and left._undefined_name:
+                uname = str(left._undefined_name)
+                left = TrackedValue("{{" + uname + "}}", uname, missing=True)
+            if isinstance(left, str):
+                right = self._materialize_mod_arg(right)
+        if isinstance(left, TrackedValue):
+            return left.__mod__(right)
+        if isinstance(left, str):
+            return _wrap_tracked_result(left % right, (left, right))
+        return left % right
 
 
 def _test_has_digit(value: Any) -> bool:
@@ -462,6 +592,18 @@ def body_variables(body: str) -> set[str]:
         raise BodySyntaxError(f"第 {exc.lineno} 行语法错误：{exc.message}", exc.lineno) from exc
 
 
+def _unwrap_iter_name(expr: nodes.Node) -> nodes.Name | None:
+    cur = expr
+    while True:
+        if isinstance(cur, nodes.Filter) and cur.node is not None:
+            cur = cur.node
+        elif isinstance(cur, nodes.Getitem):
+            cur = cur.node
+        else:
+            break
+    return cur if isinstance(cur, nodes.Name) and cur.ctx == "load" else None
+
+
 def printed_variables(body: str) -> set[str]:
     """正文中直接输出（{{ 变量 }}）或在循环内输出单元格的变量。#Created By AiCoding(codex)"""
     tree = parse_body(body)
@@ -475,10 +617,100 @@ def printed_variables(body: str) -> set[str]:
             if node.ctx == "load" and node.name in undeclared:
                 names.add(node.name)
     for loop in tree.find_all(nodes.For):
-        if isinstance(loop.iter, nodes.Name) and loop.iter.ctx == "load" and loop.iter.name in undeclared:
+        iter_name = _unwrap_iter_name(loop.iter)
+        if iter_name is not None and iter_name.name in undeclared:
             if any(True for _ in loop.find_all(nodes.Output)):
-                names.add(loop.iter.name)
+                names.add(iter_name.name)
     return names
+
+
+_RENAME_TAG_TOKEN_RE = re.compile(
+    r"""('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")"""
+    r"""|(\|\s*[^\W\d]\w*)"""
+    r"""|(\.\s*[^\W\d]\w*)"""
+    r"""|([^\W\d]\w*)""",
+    re.UNICODE,
+)
+
+
+def rename_body_variable(body_text: str, old_name: str, new_name: str) -> str:
+    """在 Jinja2 输出块 {{ ... }} / {{- ... -}} 与控制块 {% ... %} / {%- ... -%} 中安全重命名顶层变量。
+
+    #Created By AiCoding(codex)
+    跳过注释 {# ... #}、单双引号字符串字面量、过滤器名（| filter）及属性后缀（.attr）。
+    """
+    if not body_text or not old_name or old_name == new_name:
+        return body_text
+    out: list[str] = []
+    n = len(body_text)
+    i = 0
+    while i < n:
+        brace = body_text.find("{", i)
+        if brace == -1 or brace + 1 >= n:
+            out.append(body_text[i:])
+            break
+        nxt = body_text[brace + 1]
+        if nxt not in ("#", "{", "%"):
+            out.append(body_text[i : brace + 1])
+            i = brace + 1
+            continue
+        out.append(body_text[i:brace])
+        if nxt == "#":
+            end_comment = body_text.find("#}", brace + 2)
+            if end_comment == -1:
+                out.append(body_text[brace:])
+                break
+            out.append(body_text[brace : end_comment + 2])
+            i = end_comment + 2
+            continue
+
+        is_block = nxt == "%"
+        close_tok = "%}" if is_block else "}}"
+        open_end = brace + 3 if (brace + 2 < n and body_text[brace + 2] in "+-") else brace + 2
+        quote_ch: str | None = None
+        close_pos = -1
+        j = open_end
+        while j < n:
+            ch = body_text[j]
+            if quote_ch is not None:
+                if ch == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                if ch == quote_ch:
+                    quote_ch = None
+                j += 1
+                continue
+            if ch in ("'", '"'):
+                quote_ch = ch
+                j += 1
+                continue
+            if body_text.startswith(close_tok, j):
+                close_pos = j
+                break
+            j += 1
+
+        if close_pos == -1:
+            out.append(body_text[brace:])
+            break
+
+        inner = body_text[open_end:close_pos]
+        first_ident = True
+
+        def _sub_tok(m: re.Match[str]) -> str:
+            nonlocal first_ident
+            ident = m.group(4)
+            if not ident:
+                return m.group(0)
+            if is_block and first_ident:
+                first_ident = False
+                return m.group(0)
+            return new_name if ident == old_name else m.group(0)
+
+        out.append(body_text[brace:open_end])
+        out.append(_RENAME_TAG_TOKEN_RE.sub(_sub_tok, inner))
+        out.append(close_tok)
+        i = close_pos + 2
+    return "".join(out)
 
 
 _COMPARE_OPS = {

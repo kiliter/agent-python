@@ -10,10 +10,12 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 import re
 import threading
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -22,107 +24,289 @@ from urllib.parse import urlsplit
 from pydantic import SecretStr
 
 from ..config import Settings
-from .fsutil import _chmod_safe, append_audit, append_jsonl, fmt_time, now_iso, read_json, read_jsonl, write_json
+from .fsutil import (
+    _chmod_safe,
+    append_audit,
+    append_jsonl,
+    atomic_write_bytes,
+    fmt_time,
+    now_iso,
+    read_json,
+    read_jsonl,
+    write_json,
+)
 from .layout import DataLayout, InvalidResource, ensure_within
 from .service import ResourceNotFound
 
 log = logging.getLogger(__name__)
 
-CONFIG_REV_RE = re.compile(r"^c[1-9]\d{0,9}$")
+CONFIG_REV_RE = re.compile(r"^c[1-9][0-9]{0,9}$")
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+_RAW_CTRL_NO_WS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _WHITESPACE_OR_CTRL_RE = re.compile(r"[\s\x00-\x1f\x7f]")
+_ASCII_INT_RE = re.compile(r"[+-]?[0-9]+")
 
 OutputMode = Literal["tool", "native", "json_object", "prompted"]
 GatewayMode = Literal["mock", "live"]
 XmlStyle = Literal["java", "clean"]
+FieldKind = Literal[
+    "url",
+    "str",
+    "secret",
+    "api_keys",
+    "enum",
+    "bool",
+    "optional_bool",
+    "int",
+    "optional_int",
+    "float",
+]
 
 _VALID_OUTPUT_MODES: tuple[OutputMode, ...] = ("tool", "native", "json_object", "prompted")
 _VALID_GATEWAY_MODES: tuple[GatewayMode, ...] = ("mock", "live")
 _VALID_XML_STYLES: tuple[XmlStyle, ...] = ("java", "clean")
-_DEFAULT_FALLBACK_SETTINGS = Settings(_env_file=None)
+_MAX_TIMEOUT_S: float = 86400.0
+_MAX_LLM_TOKENS: int = 2_000_000
 
-_ORDERED_FIELDS: tuple[str, ...] = (
-    "llmBaseUrl",
-    "llmApiKey",
-    "llmModel",
-    "llmTemperature",
-    "llmMaxTokens",
-    "llmTimeoutS",
-    "llmHttpRetries",
-    "llmParallelToolCalls",
-    "llmStrictTools",
-    "llmToolChoiceRequired",
-    "agentOutputMode",
-    "agentNativeStrict",
-    "agentOutputRetries",
-    "agentToolRetries",
-    "agentRequestLimit",
-    "agentToolCallsLimit",
-    "agentRunTimeoutS",
-    "agentMaxConcurrentRuns",
-    "agentPreviewRows",
-    "gatewayMode",
-    "gatewayUrl",
-    "gatewayAppId",
-    "gatewayAccessToken",
-    "gatewayXmlStyle",
-    "gatewayConnectTimeoutS",
-    "reportApiKeys",
-    "gatewayMaxConcurrency",
-    "releasesKeep",
-    "runsKeepDays",
-    "agentQueryDefaultLimit",
-    "agentQueryMaxLimit",
-    "agentMaxPeriodMonths",
-    "chatMaxDocChars",
-    "chatMaxHistoryMessages",
-    "chatMaxRunCards",
-    "chatMaxMarkdownPreviewChars",
-    "chatCompactTriggerMessages",
-    "chatCompactKeepRecent",
-    "chatManualCompactKeepRecent",
-    "chatManualCompactMinSlice",
-    "chatMaxMemorySummaryChars",
-    "chatMaxSummaryMsgChars",
-    "chatRequestLimit",
-    "chatToolCallsLimit",
-    "chatTimeoutS",
-    "chatSummaryRequestLimit",
-    "chatSummaryToolCallsLimit",
-    "chatSummaryTimeoutS",
+_default_fallback_settings_cache: Settings | None = None
+_default_fallback_lock = threading.Lock()
+
+
+def _get_default_fallback_settings() -> Settings:
+    """惰性获取不受当前进程环境变量污染的纯默认 Settings 实例，消除 import 期脏环境变量崩溃隐患。"""
+    global _default_fallback_settings_cache
+    if _default_fallback_settings_cache is None:
+        with _default_fallback_lock:
+            if _default_fallback_settings_cache is None:
+                pure_defaults: dict[str, Any] = {}
+                for field_name, field_info in Settings.model_fields.items():
+                    if field_info.default_factory is not None:
+                        pure_defaults[field_name] = field_info.default_factory()
+                    else:
+                        pure_defaults[field_name] = field_info.default
+                _default_fallback_settings_cache = Settings(_env_file=None, **pure_defaults)
+    return _default_fallback_settings_cache
+
+
+@dataclass(frozen=True)
+class ConfigFieldSpec:
+    """单项运行配置的声明式元数据规格，统一驱动读写转换、脱敏展示、热更新补丁与区间校验。"""
+
+    name: str
+    settings_attr: str
+    kind: FieldKind
+    default: Any
+    label: str = ""
+    nullable: bool = False
+    required: bool = False
+    forbid_ctrl: bool = False
+    min_val: int | float | None = None
+    max_val: int | float | None = None
+    gt_zero: bool = False
+    choices: tuple[str, ...] = ()
+    clear_kw: str = ""
+    public_has: str = ""
+    public_masked: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.label:
+            object.__setattr__(self, "label", self.name)
+
+
+_FIELD_SPECS: tuple[ConfigFieldSpec, ...] = (
+    # LLM
+    ConfigFieldSpec(
+        "llmBaseUrl", "llm_base_url", "url", "https://api.openai.com/v1",
+        label="大模型接口地址 llmBaseUrl", required=True,
+    ),
+    ConfigFieldSpec(
+        "llmApiKey", "llm_api_key", "secret", "",
+        clear_kw="clear_llm_api_key", public_has="hasLlmApiKey", public_masked="llmApiKeyMasked",
+    ),
+    ConfigFieldSpec(
+        "llmModel", "llm_model", "str", "deepseek-v4-flash",
+        label="模型名称 llmModel", required=True, forbid_ctrl=True,
+    ),
+    ConfigFieldSpec(
+        "llmTemperature", "llm_temperature", "float", 0.0,
+        label="采样温度 llmTemperature", min_val=0.0, max_val=2.0,
+    ),
+    ConfigFieldSpec(
+        "llmMaxTokens", "llm_max_tokens", "optional_int", None,
+        label="最大输出 Token 数 llmMaxTokens", nullable=True, min_val=1, max_val=_MAX_LLM_TOKENS,
+    ),
+    ConfigFieldSpec(
+        "llmTimeoutS", "llm_timeout_s", "float", 120.0,
+        label="模型请求超时 llmTimeoutS", gt_zero=True, max_val=_MAX_TIMEOUT_S,
+    ),
+    ConfigFieldSpec(
+        "llmHttpRetries", "llm_http_retries", "int", 2,
+        label="模型 HTTP 重试次数 llmHttpRetries", min_val=0, max_val=10,
+    ),
+    ConfigFieldSpec("llmParallelToolCalls", "llm_parallel_tool_calls", "optional_bool", True, nullable=True),
+    ConfigFieldSpec("llmStrictTools", "llm_strict_tools", "optional_bool", None, nullable=True),
+    ConfigFieldSpec("llmToolChoiceRequired", "llm_tool_choice_required", "optional_bool", None, nullable=True),
+    # Agent & Tools
+    ConfigFieldSpec(
+        "agentOutputMode", "agent_output_mode", "enum", "tool",
+        label="结构化交卷方式 agentOutputMode", choices=_VALID_OUTPUT_MODES,
+    ),
+    ConfigFieldSpec("agentNativeStrict", "agent_native_strict", "bool", True),
+    ConfigFieldSpec(
+        "agentOutputRetries", "agent_output_retries", "int", 3,
+        label="证据校验重试次数 agentOutputRetries", min_val=0, max_val=10,
+    ),
+    ConfigFieldSpec(
+        "agentToolRetries", "agent_tool_retries", "int", 2,
+        label="工具参数重试次数 agentToolRetries", min_val=0, max_val=10,
+    ),
+    ConfigFieldSpec(
+        "agentRequestLimit", "agent_request_limit", "int", 25,
+        label="单次最大轮数 agentRequestLimit", min_val=1, max_val=200,
+    ),
+    ConfigFieldSpec(
+        "agentToolCallsLimit", "agent_tool_calls_limit", "int", 120,
+        label="单次最大工具调用数 agentToolCallsLimit", min_val=1, max_val=500,
+    ),
+    ConfigFieldSpec(
+        "agentRunTimeoutS", "agent_run_timeout_s", "float", 600.0,
+        label="单次运行总超时 agentRunTimeoutS", gt_zero=True, max_val=_MAX_TIMEOUT_S,
+    ),
+    ConfigFieldSpec(
+        "agentMaxConcurrentRuns", "agent_max_concurrent_runs", "int", 8,
+        label="最大并发运行数 agentMaxConcurrentRuns", min_val=1, max_val=128,
+    ),
+    ConfigFieldSpec(
+        "agentPreviewRows", "agent_preview_rows", "int", 10,
+        label="接口预览行数 agentPreviewRows", min_val=1, max_val=200,
+    ),
+    # Gateway
+    ConfigFieldSpec(
+        "gatewayMode", "gateway_mode", "enum", "mock",
+        label="统一网关模式 gatewayMode", choices=_VALID_GATEWAY_MODES,
+    ),
+    ConfigFieldSpec("gatewayUrl", "gateway_url", "url", "", label="统一网关地址 gatewayUrl"),
+    ConfigFieldSpec(
+        "gatewayAppId", "gateway_app_id", "secret", "",
+        clear_kw="clear_gateway_app_id", public_has="hasGatewayAppId", public_masked="gatewayAppIdMasked",
+    ),
+    ConfigFieldSpec(
+        "gatewayAccessToken", "gateway_access_token", "secret", "",
+        clear_kw="clear_gateway_access_token",
+        public_has="hasGatewayAccessToken",
+        public_masked="gatewayAccessTokenMasked",
+    ),
+    ConfigFieldSpec(
+        "gatewayXmlStyle", "gateway_xml_style", "enum", "java",
+        label="网关 XML 风格 gatewayXmlStyle", choices=_VALID_XML_STYLES,
+    ),
+    ConfigFieldSpec(
+        "gatewayConnectTimeoutS", "gateway_connect_timeout_s", "float", 5.0,
+        label="网关连接超时 gatewayConnectTimeoutS", gt_zero=True, max_val=_MAX_TIMEOUT_S,
+    ),
+    # Upstream & Embed Auth
+    ConfigFieldSpec(
+        "reportApiKeys", "report_api_keys", "api_keys", "",
+        label="调用凭证 reportApiKeys", clear_kw="clear_report_api_keys",
+    ),
+    # Gateway concurrency & Retention
+    ConfigFieldSpec(
+        "gatewayMaxConcurrency", "gateway_max_concurrency", "int", 32,
+        label="网关最大并发数 gatewayMaxConcurrency", min_val=1, max_val=512,
+    ),
+    ConfigFieldSpec(
+        "releasesKeep", "releases_keep", "int", 50,
+        label="发布快照保留数 releasesKeep", min_val=1, max_val=500,
+    ),
+    ConfigFieldSpec(
+        "runsKeepDays", "runs_keep_days", "int", 90,
+        label="运行与会话留存天数 runsKeepDays", min_val=0, max_val=3650,
+    ),
+    # Platform Tools Limits
+    ConfigFieldSpec(
+        "agentQueryDefaultLimit", "agent_query_default_limit", "int", 20,
+        label="结果筛选默认行数 agentQueryDefaultLimit", min_val=1, max_val=500,
+    ),
+    ConfigFieldSpec(
+        "agentQueryMaxLimit", "agent_query_max_limit", "int", 100,
+        label="结果筛选最大行数 agentQueryMaxLimit", min_val=1, max_val=1000,
+    ),
+    ConfigFieldSpec(
+        "agentMaxPeriodMonths", "agent_max_period_months", "int", 36,
+        label="多账期展开跨度上限 agentMaxPeriodMonths", min_val=1, max_val=120,
+    ),
+    # Chat & Compaction
+    ConfigFieldSpec(
+        "chatMaxDocChars", "chat_max_doc_chars", "int", 12000,
+        label="聊天单据最大字符数 chatMaxDocChars", min_val=500, max_val=200000,
+    ),
+    ConfigFieldSpec(
+        "chatMaxHistoryMessages", "chat_max_history_messages", "int", 20,
+        label="聊天最近原文消息数 chatMaxHistoryMessages", min_val=1, max_val=200,
+    ),
+    ConfigFieldSpec(
+        "chatMaxRunCards", "chat_max_run_cards", "int", 8,
+        label="聊天运行卡片注入上限 chatMaxRunCards", min_val=1, max_val=50,
+    ),
+    ConfigFieldSpec(
+        "chatMaxMarkdownPreviewChars", "chat_max_markdown_preview_chars", "int", 1500,
+        label="聊天报告预览截断字数 chatMaxMarkdownPreviewChars", min_val=100, max_val=20000,
+    ),
+    ConfigFieldSpec(
+        "chatCompactTriggerMessages", "chat_compact_trigger_messages", "int", 24,
+        label="自动压缩触发消息数 chatCompactTriggerMessages", min_val=2, max_val=500,
+    ),
+    ConfigFieldSpec(
+        "chatCompactKeepRecent", "chat_compact_keep_recent", "int", 12,
+        label="自动压缩保留消息数 chatCompactKeepRecent", min_val=1, max_val=200,
+    ),
+    ConfigFieldSpec(
+        "chatManualCompactKeepRecent", "chat_manual_compact_keep_recent", "int", 6,
+        label="手动压缩保留消息数 chatManualCompactKeepRecent", min_val=1, max_val=200,
+    ),
+    ConfigFieldSpec(
+        "chatManualCompactMinSlice", "chat_manual_compact_min_slice", "int", 2,
+        label="手动压缩最小归档条数 chatManualCompactMinSlice", min_val=1, max_val=100,
+    ),
+    ConfigFieldSpec(
+        "chatMaxMemorySummaryChars", "chat_max_memory_summary_chars", "int", 1200,
+        label="滚动记忆摘要上限 chatMaxMemorySummaryChars", min_val=200, max_val=10000,
+    ),
+    ConfigFieldSpec(
+        "chatMaxSummaryMsgChars", "chat_max_summary_msg_chars", "int", 800,
+        label="待压缩消息单条截取上限 chatMaxSummaryMsgChars", min_val=100, max_val=10000,
+    ),
+    ConfigFieldSpec(
+        "chatRequestLimit", "chat_request_limit", "int", 8,
+        label="聊天单轮最大请求轮数 chatRequestLimit", min_val=1, max_val=50,
+    ),
+    ConfigFieldSpec(
+        "chatToolCallsLimit", "chat_tool_calls_limit", "int", 16,
+        label="聊天单轮最大工具调用数 chatToolCallsLimit", min_val=1, max_val=100,
+    ),
+    ConfigFieldSpec(
+        "chatTimeoutS", "chat_timeout_s", "float", 120.0,
+        label="聊天单轮超时 chatTimeoutS", gt_zero=True, max_val=_MAX_TIMEOUT_S,
+    ),
+    ConfigFieldSpec(
+        "chatSummaryRequestLimit", "chat_summary_request_limit", "int", 3,
+        label="压缩摘要最大请求轮数 chatSummaryRequestLimit", min_val=1, max_val=20,
+    ),
+    ConfigFieldSpec(
+        "chatSummaryToolCallsLimit", "chat_summary_tool_calls_limit", "int", 4,
+        label="压缩摘要最大工具调用数 chatSummaryToolCallsLimit", min_val=1, max_val=30,
+    ),
+    ConfigFieldSpec(
+        "chatSummaryTimeoutS", "chat_summary_timeout_s", "float", 60.0,
+        label="压缩摘要超时 chatSummaryTimeoutS", gt_zero=True, max_val=_MAX_TIMEOUT_S,
+    ),
 )
 
-_NULLABLE_FIELDS: frozenset[str] = frozenset({
-    "llmMaxTokens",
-    "llmParallelToolCalls",
-    "llmStrictTools",
-    "llmToolChoiceRequired",
-})
-
-_STRING_FIELDS: frozenset[str] = frozenset({
-    "llmBaseUrl",
-    "llmApiKey",
-    "llmModel",
-    "gatewayUrl",
-    "gatewayAppId",
-    "gatewayAccessToken",
-    "reportApiKeys",
-})
-
-
-def _read_int(s: Any, attr: str, default: int) -> int:
-    val = getattr(s, attr, None)
-    return default if val is None else int(val)
-
-
-def _read_float(s: Any, attr: str, default: float) -> float:
-    val = getattr(s, attr, None)
-    return default if val is None else float(val)
-
-
-def _read_bool(s: Any, attr: str, default: bool) -> bool:
-    val = getattr(s, attr, None)
-    return default if val is None else bool(val)
+_ORDERED_FIELDS: tuple[str, ...] = tuple(sp.name for sp in _FIELD_SPECS)
+_NULLABLE_FIELDS: frozenset[str] = frozenset(sp.name for sp in _FIELD_SPECS if sp.nullable)
+_STRING_FIELDS: frozenset[str] = frozenset(
+    sp.name for sp in _FIELD_SPECS if sp.kind in ("url", "str", "secret", "api_keys")
+)
 
 
 class RuntimeConfigValidationError(InvalidResource):
@@ -160,13 +344,21 @@ def mask_api_keys(raw: str | None) -> str:
 
 
 def _check_http_url(url: str, label: str) -> str | None:
+    """校验 HTTP/HTTPS 地址合法性（含 IPv6 闭合语法与 1..65535 端口边界校验）。"""
+    prefix = f"{label} " if not label.endswith(" ") else label
     if _WHITESPACE_OR_CTRL_RE.search(url):
-        return f"{label}不能包含空白或控制字符"
+        return f"{prefix}不能包含空白或控制字符"
     if not url.startswith(("http://", "https://")):
-        return f"{label}必须以 http:// 或 https:// 开头"
-    parsed = urlsplit(url)
-    if not parsed.netloc or not parsed.hostname:
-        return f"{label}缺少有效的主机地址"
+        return f"{prefix}必须以 http:// 或 https:// 开头"
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return f"{prefix}格式不合法（请检查 IPv6 地址格式及端口号范围 1~65535）"
+    if not parsed.netloc or not parsed.hostname or parsed.netloc.endswith(":"):
+        return f"{prefix}缺少有效的主机地址或端口"
+    if port is not None and not (1 <= port <= 65535):
+        return f"{prefix}端口号必须在 1~65535 之间"
     return None
 
 
@@ -200,21 +392,14 @@ def _coerce_optional_bool(val: Any, label: str, errors: list[str]) -> bool | Non
     return None
 
 
-def _coerce_int(val: Any, label: str, errors: list[str], *, min_val: int | None = None,
-                max_val: int | None = None) -> int:
-    if isinstance(val, bool):
-        errors.append(f"{label}必须是整数")
-        return min_val or 0
-    parsed: int | None = None
-    if isinstance(val, int):
-        parsed = val
-    elif isinstance(val, str) and val.strip():
-        s = val.strip()
-        if re.fullmatch(r"[+-]?\d+", s):
-            parsed = int(s)
-    if parsed is None:
-        errors.append(f"{label}必须是整数")
-        return min_val or 0
+def _check_int_bounds(
+    parsed: int,
+    label: str,
+    errors: list[str],
+    *,
+    min_val: int | None = None,
+    max_val: int | None = None,
+) -> None:
     if min_val is not None and parsed < min_val:
         if max_val is not None:
             errors.append(f"{label}必须在 {min_val}~{max_val} 之间")
@@ -225,17 +410,82 @@ def _coerce_int(val: Any, label: str, errors: list[str], *, min_val: int | None 
             errors.append(f"{label}必须在 {min_val}~{max_val} 之间")
         else:
             errors.append(f"{label}必须小于等于 {max_val}")
+
+
+def _coerce_int(
+    val: Any,
+    label: str,
+    errors: list[str],
+    *,
+    min_val: int | None = None,
+    max_val: int | None = None,
+) -> int:
+    if isinstance(val, bool):
+        errors.append(f"{label}必须是整数")
+        return min_val or 0
+    parsed: int | None = None
+    if isinstance(val, int):
+        parsed = val
+    elif isinstance(val, str) and val.strip():
+        s = val.strip()
+        if _ASCII_INT_RE.fullmatch(s):
+            parsed = int(s)
+    if parsed is None:
+        errors.append(f"{label}必须是整数")
+        return min_val or 0
+    _check_int_bounds(parsed, label, errors, min_val=min_val, max_val=max_val)
     return parsed
 
 
-def _coerce_optional_int(val: Any, label: str, errors: list[str], *, min_val: int = 1) -> int | None:
-    if val is None or (isinstance(val, str) and val.strip() == ""):
+def _coerce_optional_int(
+    val: Any,
+    label: str,
+    errors: list[str],
+    *,
+    min_val: int = 1,
+    max_val: int | None = None,
+) -> int | None:
+    if val is None or (isinstance(val, str) and val.strip().lower() in ("", "null", "none")):
         return None
-    return _coerce_int(val, label, errors, min_val=min_val)
+    return _coerce_int(val, label, errors, min_val=min_val, max_val=max_val)
 
 
-def _coerce_float(val: Any, label: str, errors: list[str], *, min_val: float | None = None,
-                  max_val: float | None = None, gt_zero: bool = False) -> float:
+def _check_float_bounds(
+    parsed: float,
+    label: str,
+    errors: list[str],
+    *,
+    min_val: float | None = None,
+    max_val: float | None = None,
+    gt_zero: bool = False,
+) -> None:
+    if math.isnan(parsed) or math.isinf(parsed):
+        errors.append(f"{label}必须是有效数字")
+        return
+    if gt_zero and parsed <= 0:
+        errors.append(f"{label}必须大于 0")
+        return
+    if min_val is not None and parsed < min_val:
+        if max_val is not None:
+            errors.append(f"{label}必须在 {min_val:g}~{max_val:g} 之间")
+        else:
+            errors.append(f"{label}必须大于等于 {min_val:g}")
+    elif max_val is not None and parsed > max_val:
+        if min_val is not None:
+            errors.append(f"{label}必须在 {min_val:g}~{max_val:g} 之间")
+        else:
+            errors.append(f"{label}必须小于等于 {max_val:g}")
+
+
+def _coerce_float(
+    val: Any,
+    label: str,
+    errors: list[str],
+    *,
+    min_val: float | None = None,
+    max_val: float | None = None,
+    gt_zero: bool = False,
+) -> float:
     if isinstance(val, bool):
         errors.append(f"{label}必须是数字")
         return 1.0
@@ -250,23 +500,12 @@ def _coerce_float(val: Any, label: str, errors: list[str], *, min_val: float | N
     if parsed is None or math.isnan(parsed) or math.isinf(parsed):
         errors.append(f"{label}必须是有效数字")
         return 1.0
-    if gt_zero and parsed <= 0:
-        errors.append(f"{label}必须大于 0")
-    else:
-        if min_val is not None and parsed < min_val:
-            if max_val is not None:
-                errors.append(f"{label}必须在 {min_val:g}~{max_val:g} 之间")
-            else:
-                errors.append(f"{label}必须大于等于 {min_val:g}")
-        elif max_val is not None and parsed > max_val:
-            if min_val is not None:
-                errors.append(f"{label}必须在 {min_val:g}~{max_val:g} 之间")
-            else:
-                errors.append(f"{label}必须小于等于 {max_val:g}")
+    _check_float_bounds(parsed, label, errors, min_val=min_val, max_val=max_val, gt_zero=gt_zero)
     return parsed
 
 
 def _resolve_secret(raw: Any, current_secret: str, clear_flag: bool, label: str, errors: list[str]) -> str:
+    """解析单项密钥更新：支持空串/匹配掩码保留原值，严禁将未匹配的脱敏掩码串当作明文密钥写入。"""
     if clear_flag:
         return ""
     if raw is None:
@@ -275,7 +514,12 @@ def _resolve_secret(raw: Any, current_secret: str, clear_flag: bool, label: str,
         errors.append(f"{label}必须是字符串")
         return current_secret
     cleaned = raw.strip()
-    if not cleaned or cleaned == "***" or cleaned == mask_secret(current_secret):
+    if not cleaned or cleaned == current_secret:
+        return current_secret
+    if current_secret and (cleaned == "***" or cleaned == mask_secret(current_secret)):
+        return current_secret
+    if "***" in cleaned:
+        errors.append(f"{label}不能直接提交脱敏掩码，请输入完整新密钥或使用清空选项")
         return current_secret
     if _CONTROL_CHAR_RE.search(cleaned):
         errors.append(f"{label}包含非法控制字符")
@@ -284,6 +528,7 @@ def _resolve_secret(raw: Any, current_secret: str, clear_flag: bool, label: str,
 
 
 def _resolve_api_keys(raw: Any, current_keys: str, clear_flag: bool, errors: list[str]) -> str:
+    """解析多把逗号分隔 API Key：逐项还原唯一匹配的脱敏掩码，拒绝无法唯一匹配的掩码串误存为明文。"""
     if clear_flag:
         return ""
     if raw is None:
@@ -291,21 +536,146 @@ def _resolve_api_keys(raw: Any, current_keys: str, clear_flag: bool, errors: lis
     if not isinstance(raw, str):
         errors.append("调用凭证 reportApiKeys 必须是字符串")
         return current_keys
-    if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", raw):
+    if _RAW_CTRL_NO_WS_RE.search(raw):
         errors.append("调用凭证 reportApiKeys 包含非法控制字符")
         return current_keys
     cleaned = raw.strip()
+    existing_list = split_api_keys(current_keys)
     masked_current = mask_api_keys(current_keys)
-    if not cleaned or cleaned == "***" or cleaned == masked_current:
+    if not cleaned:
         return current_keys
-    keys = split_api_keys(cleaned)
-    if not keys or ", ".join(keys) == masked_current:
+    if existing_list and (cleaned == "***" or cleaned == masked_current):
         return current_keys
-    for k in keys:
+    raw_tokens = [part.strip() for part in cleaned.split(",") if part.strip()]
+    if not raw_tokens:
+        return current_keys
+    if existing_list and raw_tokens == [mask_secret(k) for k in existing_list]:
+        return current_keys
+
+    existing_set = set(existing_list)
+    resolved: list[str] = []
+    for k in dict.fromkeys(raw_tokens):
         if _WHITESPACE_OR_CTRL_RE.search(k):
             errors.append("调用凭证 reportApiKeys 单把密钥不能包含空白或控制字符")
             return current_keys
-    return ",".join(keys)
+        if k in existing_set:
+            resolved.append(k)
+            continue
+        if "***" in k:
+            matches = [old_k for old_k in existing_list if mask_secret(old_k) == k]
+            if len(matches) == 1:
+                resolved.append(matches[0])
+                continue
+            errors.append(f"调用凭证 reportApiKeys 中的脱敏项「{k}」无法唯一匹配现有密钥，请输入完整新密钥或使用清空选项")
+            return current_keys
+        resolved.append(k)
+    return ",".join(dict.fromkeys(resolved))
+
+
+def _parse_storage_bool(val: Any, label: str) -> bool:
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        low = val.strip().lower()
+        if low == "true":
+            return True
+        if low == "false":
+            return False
+        raise ValueError(f"{label}必须是布尔值: {val!r}")
+    raise TypeError(f"{label}必须是布尔值: {val!r}")
+
+
+def _parse_storage_int(val: Any, label: str) -> int:
+    if isinstance(val, bool):
+        raise ValueError(f"{label}不能为布尔值")
+    if isinstance(val, int):
+        return val
+    if isinstance(val, str) and _ASCII_INT_RE.fullmatch(val.strip()):
+        return int(val.strip())
+    raise ValueError(f"{label}必须是整数: {val!r}")
+
+
+def _parse_storage_float(val: Any, label: str) -> float:
+    if isinstance(val, bool):
+        raise ValueError(f"{label}不能为布尔值")
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str) and val.strip():
+        return float(val.strip())
+    raise ValueError(f"{label}必须是有效数字: {val!r}")
+
+
+def _read_spec_from_settings(sp: ConfigFieldSpec, s: Settings) -> Any:
+    if sp.kind == "secret":
+        obj = getattr(s, sp.settings_attr, None)
+        return obj.get_secret_value() if hasattr(obj, "get_secret_value") else str(obj or "")
+    if sp.kind == "api_keys":
+        return ",".join(split_api_keys(getattr(s, sp.settings_attr, "") or ""))
+    if sp.kind in ("url", "str"):
+        return str(getattr(s, sp.settings_attr, None) or "").strip()
+    if sp.kind == "enum":
+        raw = getattr(s, sp.settings_attr, None)
+        return raw if raw in sp.choices else sp.default
+    if sp.kind == "bool":
+        raw = getattr(s, sp.settings_attr, None)
+        return bool(sp.default) if raw is None else bool(raw)
+    if sp.kind == "optional_bool":
+        if not hasattr(s, sp.settings_attr):
+            return sp.default
+        raw = getattr(s, sp.settings_attr)
+        return raw if isinstance(raw, bool) else None
+    if sp.kind == "int":
+        raw = getattr(s, sp.settings_attr, None)
+        return int(sp.default) if raw is None else int(raw)
+    if sp.kind == "optional_int":
+        raw = getattr(s, sp.settings_attr, None)
+        return int(raw) if raw is not None else None
+    raw = getattr(s, sp.settings_attr, None)
+    return float(sp.default) if raw is None else float(raw)
+
+
+def _read_spec_from_storage(sp: ConfigFieldSpec, data: dict[str, Any], base: RuntimeConfig) -> Any:
+    fallback_val = getattr(base, sp.name)
+    if sp.name not in data:
+        return fallback_val
+    val = data[sp.name]
+
+    if sp.kind == "optional_int":
+        if val is None or (isinstance(val, str) and val.strip().lower() in ("", "null", "none")):
+            return None
+        return _parse_storage_int(val, sp.label)
+
+    if sp.kind == "optional_bool":
+        if val is None or (isinstance(val, str) and val.strip().lower() in ("", "null", "none", "default", "auto")):
+            return None
+        return _parse_storage_bool(val, sp.label)
+
+    if val is None:
+        return fallback_val
+
+    if sp.kind in ("url", "str"):
+        if not isinstance(val, str):
+            raise TypeError(f"{sp.label}必须是字符串")
+        return val.strip()
+    if sp.kind == "secret":
+        if not isinstance(val, str):
+            raise TypeError(f"{sp.label}必须是字符串")
+        return val
+    if sp.kind == "api_keys":
+        if not isinstance(val, str):
+            raise TypeError(f"{sp.label}必须是字符串")
+        return ",".join(split_api_keys(val))
+
+    if isinstance(val, str) and val.strip() == "":
+        return fallback_val
+
+    if sp.kind == "enum":
+        return val if val in sp.choices else fallback_val
+    if sp.kind == "bool":
+        return _parse_storage_bool(val, sp.label)
+    if sp.kind == "int":
+        return _parse_storage_int(val, sp.label)
+    return _parse_storage_float(val, sp.label)
 
 
 @dataclass(frozen=True)
@@ -371,365 +741,120 @@ class RuntimeConfig:
     @classmethod
     def from_settings(cls, s: Settings) -> RuntimeConfig:
         """从 Settings（环境变量 / .env）提取初始运行配置。"""
-        llm_api_key_obj = getattr(s, "llm_api_key", None)
-        gw_app_id_obj = getattr(s, "gateway_app_id", None)
-        gw_token_obj = getattr(s, "gateway_access_token", None)
-        raw_out_mode = getattr(s, "agent_output_mode", None)
-        raw_gw_mode = getattr(s, "gateway_mode", None)
-        raw_xml_style = getattr(s, "gateway_xml_style", None)
-        raw_max_tokens = getattr(s, "llm_max_tokens", None)
-        return cls(
-            llmBaseUrl=str(getattr(s, "llm_base_url", None) or "").strip(),
-            llmApiKey=llm_api_key_obj.get_secret_value() if llm_api_key_obj else "",
-            llmModel=str(getattr(s, "llm_model", None) or "").strip(),
-            llmTemperature=_read_float(s, "llm_temperature", 0.0),
-            llmMaxTokens=int(raw_max_tokens) if raw_max_tokens is not None else None,
-            llmTimeoutS=_read_float(s, "llm_timeout_s", 120.0),
-            llmHttpRetries=_read_int(s, "llm_http_retries", 2),
-            llmParallelToolCalls=getattr(s, "llm_parallel_tool_calls", True),
-            llmStrictTools=getattr(s, "llm_strict_tools", None),
-            llmToolChoiceRequired=getattr(s, "llm_tool_choice_required", None),
-            agentOutputMode=raw_out_mode if raw_out_mode in _VALID_OUTPUT_MODES else "tool",
-            agentNativeStrict=_read_bool(s, "agent_native_strict", True),
-            agentOutputRetries=_read_int(s, "agent_output_retries", 3),
-            agentToolRetries=_read_int(s, "agent_tool_retries", 2),
-            agentRequestLimit=_read_int(s, "agent_request_limit", 25),
-            agentToolCallsLimit=_read_int(s, "agent_tool_calls_limit", 120),
-            agentRunTimeoutS=_read_float(s, "agent_run_timeout_s", 600.0),
-            agentMaxConcurrentRuns=_read_int(s, "agent_max_concurrent_runs", 8),
-            agentPreviewRows=_read_int(s, "agent_preview_rows", 10),
-            gatewayMode=raw_gw_mode if raw_gw_mode in _VALID_GATEWAY_MODES else "mock",
-            gatewayUrl=str(getattr(s, "gateway_url", None) or "").strip(),
-            gatewayAppId=gw_app_id_obj.get_secret_value() if gw_app_id_obj else "",
-            gatewayAccessToken=gw_token_obj.get_secret_value() if gw_token_obj else "",
-            gatewayXmlStyle=raw_xml_style if raw_xml_style in _VALID_XML_STYLES else "java",
-            gatewayConnectTimeoutS=_read_float(s, "gateway_connect_timeout_s", 5.0),
-            reportApiKeys=",".join(split_api_keys(getattr(s, "report_api_keys", "") or "")),
-            gatewayMaxConcurrency=_read_int(s, "gateway_max_concurrency", 32),
-            releasesKeep=_read_int(s, "releases_keep", 50),
-            runsKeepDays=_read_int(s, "runs_keep_days", 90),
-            agentQueryDefaultLimit=_read_int(s, "agent_query_default_limit", 20),
-            agentQueryMaxLimit=_read_int(s, "agent_query_max_limit", 100),
-            agentMaxPeriodMonths=_read_int(s, "agent_max_period_months", 36),
-            chatMaxDocChars=_read_int(s, "chat_max_doc_chars", 12000),
-            chatMaxHistoryMessages=_read_int(s, "chat_max_history_messages", 20),
-            chatMaxRunCards=_read_int(s, "chat_max_run_cards", 8),
-            chatMaxMarkdownPreviewChars=_read_int(s, "chat_max_markdown_preview_chars", 1500),
-            chatCompactTriggerMessages=_read_int(s, "chat_compact_trigger_messages", 24),
-            chatCompactKeepRecent=_read_int(s, "chat_compact_keep_recent", 12),
-            chatManualCompactKeepRecent=_read_int(s, "chat_manual_compact_keep_recent", 6),
-            chatManualCompactMinSlice=_read_int(s, "chat_manual_compact_min_slice", 2),
-            chatMaxMemorySummaryChars=_read_int(s, "chat_max_memory_summary_chars", 1200),
-            chatMaxSummaryMsgChars=_read_int(s, "chat_max_summary_msg_chars", 800),
-            chatRequestLimit=_read_int(s, "chat_request_limit", 8),
-            chatToolCallsLimit=_read_int(s, "chat_tool_calls_limit", 16),
-            chatTimeoutS=_read_float(s, "chat_timeout_s", 120.0),
-            chatSummaryRequestLimit=_read_int(s, "chat_summary_request_limit", 3),
-            chatSummaryToolCallsLimit=_read_int(s, "chat_summary_tool_calls_limit", 4),
-            chatSummaryTimeoutS=_read_float(s, "chat_summary_timeout_s", 60.0),
-        )
+        return cls(**{sp.name: _read_spec_from_settings(sp, s) for sp in _FIELD_SPECS})
 
     @classmethod
     def from_storage_dict(cls, data: dict[str, Any], fallback_settings: Settings | None = None) -> RuntimeConfig:
         """从磁盘字典恢复，缺失或非可空字段为空时自动回退到 fallback_settings。"""
-        base = cls.from_settings(fallback_settings or _DEFAULT_FALLBACK_SETTINGS)
-        merged = base.to_storage_dict()
-        if isinstance(data, dict):
-            for k in _ORDERED_FIELDS:
-                if k not in data:
-                    continue
-                val = data[k]
-                if k not in _NULLABLE_FIELDS and val is None:
-                    continue
-                if k not in _NULLABLE_FIELDS and k not in _STRING_FIELDS and isinstance(val, str) and val.strip() == "":
-                    continue
-                merged[k] = val
-        return cls(
-            llmBaseUrl=str(merged["llmBaseUrl"] or "").strip(),
-            llmApiKey=str(merged["llmApiKey"] or ""),
-            llmModel=str(merged["llmModel"] or "").strip(),
-            llmTemperature=float(merged["llmTemperature"]),
-            llmMaxTokens=int(merged["llmMaxTokens"]) if merged["llmMaxTokens"] is not None else None,
-            llmTimeoutS=float(merged["llmTimeoutS"]),
-            llmHttpRetries=int(merged["llmHttpRetries"]),
-            llmParallelToolCalls=merged["llmParallelToolCalls"] if isinstance(merged["llmParallelToolCalls"], bool) else None,
-            llmStrictTools=merged["llmStrictTools"] if isinstance(merged["llmStrictTools"], bool) else None,
-            llmToolChoiceRequired=merged["llmToolChoiceRequired"] if isinstance(merged["llmToolChoiceRequired"], bool) else None,
-            agentOutputMode=merged["agentOutputMode"] if merged["agentOutputMode"] in _VALID_OUTPUT_MODES else base.agentOutputMode,
-            agentNativeStrict=bool(merged["agentNativeStrict"]),
-            agentOutputRetries=int(merged["agentOutputRetries"]),
-            agentToolRetries=int(merged["agentToolRetries"]),
-            agentRequestLimit=int(merged["agentRequestLimit"]),
-            agentToolCallsLimit=int(merged["agentToolCallsLimit"]),
-            agentRunTimeoutS=float(merged["agentRunTimeoutS"]),
-            agentMaxConcurrentRuns=int(merged["agentMaxConcurrentRuns"]),
-            agentPreviewRows=int(merged["agentPreviewRows"]),
-            gatewayMode=merged["gatewayMode"] if merged["gatewayMode"] in _VALID_GATEWAY_MODES else base.gatewayMode,
-            gatewayUrl=str(merged["gatewayUrl"] or "").strip(),
-            gatewayAppId=str(merged["gatewayAppId"] or ""),
-            gatewayAccessToken=str(merged["gatewayAccessToken"] or ""),
-            gatewayXmlStyle=merged["gatewayXmlStyle"] if merged["gatewayXmlStyle"] in _VALID_XML_STYLES else base.gatewayXmlStyle,
-            gatewayConnectTimeoutS=float(merged["gatewayConnectTimeoutS"]),
-            reportApiKeys=",".join(split_api_keys(str(merged["reportApiKeys"] or ""))),
-            gatewayMaxConcurrency=int(merged["gatewayMaxConcurrency"]),
-            releasesKeep=int(merged["releasesKeep"]),
-            runsKeepDays=int(merged["runsKeepDays"]),
-            agentQueryDefaultLimit=int(merged["agentQueryDefaultLimit"]),
-            agentQueryMaxLimit=int(merged["agentQueryMaxLimit"]),
-            agentMaxPeriodMonths=int(merged["agentMaxPeriodMonths"]),
-            chatMaxDocChars=int(merged["chatMaxDocChars"]),
-            chatMaxHistoryMessages=int(merged["chatMaxHistoryMessages"]),
-            chatMaxRunCards=int(merged["chatMaxRunCards"]),
-            chatMaxMarkdownPreviewChars=int(merged["chatMaxMarkdownPreviewChars"]),
-            chatCompactTriggerMessages=int(merged["chatCompactTriggerMessages"]),
-            chatCompactKeepRecent=int(merged["chatCompactKeepRecent"]),
-            chatManualCompactKeepRecent=int(merged["chatManualCompactKeepRecent"]),
-            chatManualCompactMinSlice=int(merged["chatManualCompactMinSlice"]),
-            chatMaxMemorySummaryChars=int(merged["chatMaxMemorySummaryChars"]),
-            chatMaxSummaryMsgChars=int(merged["chatMaxSummaryMsgChars"]),
-            chatRequestLimit=int(merged["chatRequestLimit"]),
-            chatToolCallsLimit=int(merged["chatToolCallsLimit"]),
-            chatTimeoutS=float(merged["chatTimeoutS"]),
-            chatSummaryRequestLimit=int(merged["chatSummaryRequestLimit"]),
-            chatSummaryToolCallsLimit=int(merged["chatSummaryToolCallsLimit"]),
-            chatSummaryTimeoutS=float(merged["chatSummaryTimeoutS"]),
-        )
+        base = cls.from_settings(fallback_settings or _get_default_fallback_settings())
+        if not isinstance(data, dict):
+            return base
+        return cls(**{sp.name: _read_spec_from_storage(sp, data, base) for sp in _FIELD_SPECS})
 
     def to_storage_dict(self) -> dict[str, Any]:
         """转换为落盘快照字典（含密钥，仅用于 0600 磁盘存储）。"""
-        return {k: getattr(self, k) for k in _ORDERED_FIELDS}
+        return {sp.name: getattr(self, sp.name) for sp in _FIELD_SPECS}
 
     def to_public_dict(self) -> dict[str, Any]:
         """转换为管理端公开字典（绝不暴露任何明文密钥）。"""
-        keys = split_api_keys(self.reportApiKeys)
-        return {
-            "llmBaseUrl": self.llmBaseUrl,
-            "hasLlmApiKey": bool(self.llmApiKey),
-            "llmApiKeyMasked": mask_secret(self.llmApiKey),
-            "llmModel": self.llmModel,
-            "llmTemperature": self.llmTemperature,
-            "llmMaxTokens": self.llmMaxTokens,
-            "llmTimeoutS": self.llmTimeoutS,
-            "llmHttpRetries": self.llmHttpRetries,
-            "llmParallelToolCalls": self.llmParallelToolCalls,
-            "llmStrictTools": self.llmStrictTools,
-            "llmToolChoiceRequired": self.llmToolChoiceRequired,
-            "agentOutputMode": self.agentOutputMode,
-            "agentNativeStrict": self.agentNativeStrict,
-            "agentOutputRetries": self.agentOutputRetries,
-            "agentToolRetries": self.agentToolRetries,
-            "agentRequestLimit": self.agentRequestLimit,
-            "agentToolCallsLimit": self.agentToolCallsLimit,
-            "agentRunTimeoutS": self.agentRunTimeoutS,
-            "agentMaxConcurrentRuns": self.agentMaxConcurrentRuns,
-            "agentPreviewRows": self.agentPreviewRows,
-            "gatewayMode": self.gatewayMode,
-            "gatewayUrl": self.gatewayUrl,
-            "hasGatewayAppId": bool(self.gatewayAppId),
-            "gatewayAppIdMasked": mask_secret(self.gatewayAppId),
-            "hasGatewayAccessToken": bool(self.gatewayAccessToken),
-            "gatewayAccessTokenMasked": mask_secret(self.gatewayAccessToken),
-            "gatewayXmlStyle": self.gatewayXmlStyle,
-            "gatewayConnectTimeoutS": self.gatewayConnectTimeoutS,
-            "hasReportApiKeys": bool(keys),
-            "reportApiKeysMasked": mask_api_keys(self.reportApiKeys),
-            "reportApiKeyCount": len(keys),
-            "gatewayMaxConcurrency": self.gatewayMaxConcurrency,
-            "releasesKeep": self.releasesKeep,
-            "runsKeepDays": self.runsKeepDays,
-            "agentQueryDefaultLimit": self.agentQueryDefaultLimit,
-            "agentQueryMaxLimit": self.agentQueryMaxLimit,
-            "agentMaxPeriodMonths": self.agentMaxPeriodMonths,
-            "chatMaxDocChars": self.chatMaxDocChars,
-            "chatMaxHistoryMessages": self.chatMaxHistoryMessages,
-            "chatMaxRunCards": self.chatMaxRunCards,
-            "chatMaxMarkdownPreviewChars": self.chatMaxMarkdownPreviewChars,
-            "chatCompactTriggerMessages": self.chatCompactTriggerMessages,
-            "chatCompactKeepRecent": self.chatCompactKeepRecent,
-            "chatManualCompactKeepRecent": self.chatManualCompactKeepRecent,
-            "chatManualCompactMinSlice": self.chatManualCompactMinSlice,
-            "chatMaxMemorySummaryChars": self.chatMaxMemorySummaryChars,
-            "chatMaxSummaryMsgChars": self.chatMaxSummaryMsgChars,
-            "chatRequestLimit": self.chatRequestLimit,
-            "chatToolCallsLimit": self.chatToolCallsLimit,
-            "chatTimeoutS": self.chatTimeoutS,
-            "chatSummaryRequestLimit": self.chatSummaryRequestLimit,
-            "chatSummaryToolCallsLimit": self.chatSummaryToolCallsLimit,
-            "chatSummaryTimeoutS": self.chatSummaryTimeoutS,
-        }
+        out: dict[str, Any] = {}
+        for sp in _FIELD_SPECS:
+            val = getattr(self, sp.name)
+            if sp.kind == "secret":
+                out[sp.public_has] = bool(val)
+                out[sp.public_masked] = mask_secret(val)
+            elif sp.kind == "api_keys":
+                keys = split_api_keys(val)
+                out["hasReportApiKeys"] = bool(keys)
+                out["reportApiKeysMasked"] = mask_api_keys(val)
+                out["reportApiKeyCount"] = len(keys)
+            else:
+                out[sp.name] = val
+        return out
 
     def to_effective_settings(self, base_settings: Settings) -> Settings:
         """基于启动环境变量 Settings 生成叠加当前运行配置后的生效 Settings 副本。"""
-        return base_settings.model_copy(
-            update={
-                "llm_base_url": self.llmBaseUrl,
-                "llm_api_key": SecretStr(self.llmApiKey),
-                "llm_model": self.llmModel,
-                "llm_temperature": self.llmTemperature,
-                "llm_max_tokens": self.llmMaxTokens,
-                "llm_timeout_s": self.llmTimeoutS,
-                "llm_http_retries": self.llmHttpRetries,
-                "llm_parallel_tool_calls": self.llmParallelToolCalls,
-                "llm_strict_tools": self.llmStrictTools,
-                "llm_tool_choice_required": self.llmToolChoiceRequired,
-                "agent_output_mode": self.agentOutputMode,
-                "agent_native_strict": self.agentNativeStrict,
-                "agent_output_retries": self.agentOutputRetries,
-                "agent_tool_retries": self.agentToolRetries,
-                "agent_request_limit": self.agentRequestLimit,
-                "agent_tool_calls_limit": self.agentToolCallsLimit,
-                "agent_run_timeout_s": self.agentRunTimeoutS,
-                "agent_max_concurrent_runs": self.agentMaxConcurrentRuns,
-                "agent_preview_rows": self.agentPreviewRows,
-                "gateway_mode": self.gatewayMode,
-                "gateway_url": self.gatewayUrl,
-                "gateway_app_id": SecretStr(self.gatewayAppId),
-                "gateway_access_token": SecretStr(self.gatewayAccessToken),
-                "gateway_xml_style": self.gatewayXmlStyle,
-                "gateway_connect_timeout_s": self.gatewayConnectTimeoutS,
-                "report_api_keys": self.reportApiKeys,
-                "gateway_max_concurrency": self.gatewayMaxConcurrency,
-                "releases_keep": self.releasesKeep,
-                "runs_keep_days": self.runsKeepDays,
-                "agent_query_default_limit": self.agentQueryDefaultLimit,
-                "agent_query_max_limit": self.agentQueryMaxLimit,
-                "agent_max_period_months": self.agentMaxPeriodMonths,
-                "chat_max_doc_chars": self.chatMaxDocChars,
-                "chat_max_history_messages": self.chatMaxHistoryMessages,
-                "chat_max_run_cards": self.chatMaxRunCards,
-                "chat_max_markdown_preview_chars": self.chatMaxMarkdownPreviewChars,
-                "chat_compact_trigger_messages": self.chatCompactTriggerMessages,
-                "chat_compact_keep_recent": self.chatCompactKeepRecent,
-                "chat_manual_compact_keep_recent": self.chatManualCompactKeepRecent,
-                "chat_manual_compact_min_slice": self.chatManualCompactMinSlice,
-                "chat_max_memory_summary_chars": self.chatMaxMemorySummaryChars,
-                "chat_max_summary_msg_chars": self.chatMaxSummaryMsgChars,
-                "chat_request_limit": self.chatRequestLimit,
-                "chat_tool_calls_limit": self.chatToolCallsLimit,
-                "chat_timeout_s": self.chatTimeoutS,
-                "chat_summary_request_limit": self.chatSummaryRequestLimit,
-                "chat_summary_tool_calls_limit": self.chatSummaryToolCallsLimit,
-                "chat_summary_timeout_s": self.chatSummaryTimeoutS,
-            }
-        )
+        updates = {
+            sp.settings_attr: (SecretStr(getattr(self, sp.name)) if sp.kind == "secret" else getattr(self, sp.name))
+            for sp in _FIELD_SPECS
+        }
+        return base_settings.model_copy(update=updates)
 
     def diff_keys(self, other: RuntimeConfig) -> list[str]:
         """按标准顺序返回两个配置之间发生变化的字段名列表。"""
         return [k for k in _ORDERED_FIELDS if getattr(self, k) != getattr(other, k)]
 
     def validate(self) -> None:
-        """完整校验所有字段的合法性与区间约束，不通过则抛出 RuntimeConfigValidationError。"""
+        """完整校验所有字段的合法性、区间上限与跨字段联动约束，不通过则抛出 RuntimeConfigValidationError。"""
         errors: list[str] = []
-        if not self.llmBaseUrl:
-            errors.append("大模型接口地址 llmBaseUrl 不能为空")
-        else:
-            err = _check_http_url(self.llmBaseUrl, "大模型接口地址 llmBaseUrl ")
-            if err:
-                errors.append(err)
+        for sp in _FIELD_SPECS:
+            val = getattr(self, sp.name)
+            if sp.kind == "url":
+                if sp.required and not val:
+                    errors.append(f"{sp.label} 不能为空")
+                elif val:
+                    err = _check_http_url(val, sp.label)
+                    if err:
+                        errors.append(err)
+            elif sp.kind == "str":
+                if sp.required and not val:
+                    errors.append(f"{sp.label} 不能为空")
+                elif val and sp.forbid_ctrl and _CONTROL_CHAR_RE.search(val):
+                    errors.append(f"{sp.label} 包含非法控制字符")
+            elif sp.kind == "secret":
+                if val and _CONTROL_CHAR_RE.search(val):
+                    errors.append(f"{sp.label}包含非法控制字符")
+            elif sp.kind == "api_keys":
+                for k in split_api_keys(val):
+                    if _WHITESPACE_OR_CTRL_RE.search(k):
+                        errors.append("调用凭证 reportApiKeys 单把密钥不能包含空白或控制字符")
+                        break
+            elif sp.kind == "enum":
+                if val not in sp.choices:
+                    errors.append(f"{sp.label} 不合法：{val}")
+            elif sp.kind == "bool":
+                if not isinstance(val, bool):
+                    errors.append(f"{sp.label}必须是布尔值")
+            elif sp.kind == "optional_bool":
+                if val is not None and not isinstance(val, bool):
+                    errors.append(f"{sp.label}必须是布尔值或 null")
+            elif sp.kind == "int":
+                if isinstance(val, bool) or not isinstance(val, int):
+                    errors.append(f"{sp.label}必须是整数")
+                else:
+                    _check_int_bounds(
+                        val, sp.label, errors,
+                        min_val=int(sp.min_val) if sp.min_val is not None else None,
+                        max_val=int(sp.max_val) if sp.max_val is not None else None,
+                    )
+            elif sp.kind == "optional_int":
+                if val is not None:
+                    if isinstance(val, bool) or not isinstance(val, int):
+                        errors.append(f"{sp.label}必须是整数")
+                    else:
+                        _check_int_bounds(
+                            val, sp.label, errors,
+                            min_val=int(sp.min_val) if sp.min_val is not None else None,
+                            max_val=int(sp.max_val) if sp.max_val is not None else None,
+                        )
+            elif sp.kind == "float":
+                if isinstance(val, bool) or not isinstance(val, (int, float)):
+                    errors.append(f"{sp.label}必须是有效数字")
+                else:
+                    _check_float_bounds(
+                        float(val), sp.label, errors,
+                        min_val=float(sp.min_val) if sp.min_val is not None else None,
+                        max_val=float(sp.max_val) if sp.max_val is not None else None,
+                        gt_zero=sp.gt_zero,
+                    )
 
-        if not self.llmModel:
-            errors.append("模型名称 llmModel 不能为空")
-        elif _CONTROL_CHAR_RE.search(self.llmModel):
-            errors.append("模型名称 llmModel 包含非法控制字符")
-
-        if math.isnan(self.llmTemperature) or math.isinf(self.llmTemperature) or not (0.0 <= self.llmTemperature <= 2.0):
-            errors.append("采样温度 llmTemperature 必须在 0~2 之间")
-        if self.llmMaxTokens is not None and self.llmMaxTokens < 1:
-            errors.append("最大输出 Token 数 llmMaxTokens 必须大于等于 1")
-        if math.isnan(self.llmTimeoutS) or math.isinf(self.llmTimeoutS) or self.llmTimeoutS <= 0:
-            errors.append("模型请求超时 llmTimeoutS 必须大于 0")
-        if not (0 <= self.llmHttpRetries <= 10):
-            errors.append("模型 HTTP 重试次数 llmHttpRetries 必须在 0~10 之间")
-
-        if self.agentOutputMode not in _VALID_OUTPUT_MODES:
-            errors.append(f"结构化交卷方式 agentOutputMode 不合法：{self.agentOutputMode}")
-        if not (0 <= self.agentOutputRetries <= 10):
-            errors.append("证据校验重试次数 agentOutputRetries 必须在 0~10 之间")
-        if not (0 <= self.agentToolRetries <= 10):
-            errors.append("工具参数重试次数 agentToolRetries 必须在 0~10 之间")
-        if not (1 <= self.agentRequestLimit <= 200):
-            errors.append("单次最大轮数 agentRequestLimit 必须在 1~200 之间")
-        if not (1 <= self.agentToolCallsLimit <= 500):
-            errors.append("单次最大工具调用数 agentToolCallsLimit 必须在 1~500 之间")
-        if math.isnan(self.agentRunTimeoutS) or math.isinf(self.agentRunTimeoutS) or self.agentRunTimeoutS <= 0:
-            errors.append("单次运行总超时 agentRunTimeoutS 必须大于 0")
-        if not (1 <= self.agentMaxConcurrentRuns <= 128):
-            errors.append("最大并发运行数 agentMaxConcurrentRuns 必须在 1~128 之间")
-        if not (1 <= self.agentPreviewRows <= 200):
-            errors.append("接口预览行数 agentPreviewRows 必须在 1~200 之间")
-
-        if not (1 <= self.agentQueryDefaultLimit <= 500):
-            errors.append("结果筛选默认行数 agentQueryDefaultLimit 必须在 1~500 之间")
-        if not (1 <= self.agentQueryMaxLimit <= 1000):
-            errors.append("结果筛选最大行数 agentQueryMaxLimit 必须在 1~1000 之间")
+        # 跨字段联动约束
         if self.agentQueryDefaultLimit > self.agentQueryMaxLimit:
             errors.append("结果筛选默认行数 agentQueryDefaultLimit 不能大于最大行数 agentQueryMaxLimit")
-        if not (1 <= self.agentMaxPeriodMonths <= 120):
-            errors.append("多账期展开跨度上限 agentMaxPeriodMonths 必须在 1~120 之间")
-
-        if self.gatewayMode not in _VALID_GATEWAY_MODES:
-            errors.append(f"统一网关模式 gatewayMode 不合法：{self.gatewayMode}")
         if self.gatewayMode == "live" and not self.gatewayUrl:
             errors.append("网关模式为 live 时必须配置网关地址 gatewayUrl")
-        if self.gatewayUrl:
-            err = _check_http_url(self.gatewayUrl, "统一网关地址 gatewayUrl ")
-            if err:
-                errors.append(err)
-        if self.gatewayXmlStyle not in _VALID_XML_STYLES:
-            errors.append(f"网关 XML 风格 gatewayXmlStyle 不合法：{self.gatewayXmlStyle}")
-        if (
-            math.isnan(self.gatewayConnectTimeoutS)
-            or math.isinf(self.gatewayConnectTimeoutS)
-            or self.gatewayConnectTimeoutS <= 0
-        ):
-            errors.append("网关连接超时 gatewayConnectTimeoutS 必须大于 0")
-        if not (1 <= self.gatewayMaxConcurrency <= 512):
-            errors.append("网关最大并发数 gatewayMaxConcurrency 必须在 1~512 之间")
-
-        if not (1 <= self.releasesKeep <= 500):
-            errors.append("发布快照保留数 releasesKeep 必须在 1~500 之间")
-        if not (0 <= self.runsKeepDays <= 3650):
-            errors.append("运行与会话留存天数 runsKeepDays 必须在 0~3650 之间")
-
-        if not (500 <= self.chatMaxDocChars <= 200000):
-            errors.append("聊天单据最大字符数 chatMaxDocChars 必须在 500~200000 之间")
-        if not (1 <= self.chatMaxHistoryMessages <= 200):
-            errors.append("聊天最近原文消息数 chatMaxHistoryMessages 必须在 1~200 之间")
-        if not (1 <= self.chatMaxRunCards <= 50):
-            errors.append("聊天运行卡片注入上限 chatMaxRunCards 必须在 1~50 之间")
-        if not (100 <= self.chatMaxMarkdownPreviewChars <= 20000):
-            errors.append("聊天报告预览截断字数 chatMaxMarkdownPreviewChars 必须在 100~20000 之间")
-        if not (2 <= self.chatCompactTriggerMessages <= 500):
-            errors.append("自动压缩触发消息数 chatCompactTriggerMessages 必须在 2~500 之间")
-        if not (1 <= self.chatCompactKeepRecent <= 200):
-            errors.append("自动压缩保留消息数 chatCompactKeepRecent 必须在 1~200 之间")
         if self.chatCompactTriggerMessages <= self.chatCompactKeepRecent:
             errors.append("自动压缩触发消息数 chatCompactTriggerMessages 必须大于保留消息数 chatCompactKeepRecent")
-        if not (1 <= self.chatManualCompactKeepRecent <= 200):
-            errors.append("手动压缩保留消息数 chatManualCompactKeepRecent 必须在 1~200 之间")
-        if not (1 <= self.chatManualCompactMinSlice <= 100):
-            errors.append("手动压缩最小归档条数 chatManualCompactMinSlice 必须在 1~100 之间")
-        if not (200 <= self.chatMaxMemorySummaryChars <= 10000):
-            errors.append("滚动记忆摘要上限 chatMaxMemorySummaryChars 必须在 200~10000 之间")
-        if not (100 <= self.chatMaxSummaryMsgChars <= 10000):
-            errors.append("待压缩消息单条截取上限 chatMaxSummaryMsgChars 必须在 100~10000 之间")
-        if not (1 <= self.chatRequestLimit <= 50):
-            errors.append("聊天单轮最大请求轮数 chatRequestLimit 必须在 1~50 之间")
-        if not (1 <= self.chatToolCallsLimit <= 100):
-            errors.append("聊天单轮最大工具调用数 chatToolCallsLimit 必须在 1~100 之间")
-        if math.isnan(self.chatTimeoutS) or math.isinf(self.chatTimeoutS) or self.chatTimeoutS <= 0:
-            errors.append("聊天单轮超时 chatTimeoutS 必须大于 0")
-        if not (1 <= self.chatSummaryRequestLimit <= 20):
-            errors.append("压缩摘要最大请求轮数 chatSummaryRequestLimit 必须在 1~20 之间")
-        if not (1 <= self.chatSummaryToolCallsLimit <= 30):
-            errors.append("压缩摘要最大工具调用数 chatSummaryToolCallsLimit 必须在 1~30 之间")
-        if math.isnan(self.chatSummaryTimeoutS) or math.isinf(self.chatSummaryTimeoutS) or self.chatSummaryTimeoutS <= 0:
-            errors.append("压缩摘要超时 chatSummaryTimeoutS 必须大于 0")
-
-        for k in split_api_keys(self.reportApiKeys):
-            if _WHITESPACE_OR_CTRL_RE.search(k):
-                errors.append("调用凭证 reportApiKeys 单把密钥不能包含空白或控制字符")
-                break
 
         if errors:
             raise RuntimeConfigValidationError(errors)
@@ -745,199 +870,98 @@ class RuntimeConfig:
     ) -> RuntimeConfig:
         """在当前配置上应用局部或全量更新补丁，处理密钥保留/清空并做严格类型与边界校验。"""
         errors: list[str] = []
+        clear_flags = {
+            "clear_llm_api_key": clear_llm_api_key,
+            "clear_gateway_app_id": clear_gateway_app_id,
+            "clear_gateway_access_token": clear_gateway_access_token,
+            "clear_report_api_keys": clear_report_api_keys,
+        }
+        next_values: dict[str, Any] = {}
 
-        def _str_field(key: str, default: str, label: str) -> str:
-            if key not in patch or patch[key] is None:
-                return default
-            if not isinstance(patch[key], str):
-                errors.append(f"{label}必须是字符串")
-                return default
-            return patch[key].strip()
+        for sp in _FIELD_SPECS:
+            cur_val = getattr(self, sp.name)
+            in_patch = sp.name in patch
+            raw = patch.get(sp.name)
 
-        def _num_int(key: str, label: str, *, min_val: int, max_val: int) -> int:
-            raw = patch.get(key)
-            if key not in patch or raw is None or (isinstance(raw, str) and raw.strip() == ""):
-                return int(getattr(self, key))
-            return _coerce_int(raw, label, errors, min_val=min_val, max_val=max_val)
-
-        def _num_float(
-            key: str,
-            label: str,
-            *,
-            min_val: float | None = None,
-            max_val: float | None = None,
-            gt_zero: bool = False,
-        ) -> float:
-            raw = patch.get(key)
-            if key not in patch or raw is None or (isinstance(raw, str) and raw.strip() == ""):
-                return float(getattr(self, key))
-            return _coerce_float(raw, label, errors, min_val=min_val, max_val=max_val, gt_zero=gt_zero)
-
-        llm_base_url = _str_field("llmBaseUrl", self.llmBaseUrl, "llmBaseUrl")
-        llm_model = _str_field("llmModel", self.llmModel, "llmModel")
-        llm_temperature = _num_float("llmTemperature", "采样温度 llmTemperature", min_val=0.0, max_val=2.0)
-        llm_max_tokens = (
-            _coerce_optional_int(patch["llmMaxTokens"], "最大输出 Token 数 llmMaxTokens", errors, min_val=1)
-            if "llmMaxTokens" in patch
-            else self.llmMaxTokens
-        )
-        llm_timeout_s = _num_float("llmTimeoutS", "模型请求超时 llmTimeoutS", gt_zero=True)
-        llm_http_retries = _num_int("llmHttpRetries", "模型 HTTP 重试次数 llmHttpRetries", min_val=0, max_val=10)
-        llm_parallel = (
-            _coerce_optional_bool(patch["llmParallelToolCalls"], "llmParallelToolCalls", errors)
-            if "llmParallelToolCalls" in patch
-            else self.llmParallelToolCalls
-        )
-        llm_strict_tools = (
-            _coerce_optional_bool(patch["llmStrictTools"], "llmStrictTools", errors)
-            if "llmStrictTools" in patch
-            else self.llmStrictTools
-        )
-        llm_tool_choice = (
-            _coerce_optional_bool(patch["llmToolChoiceRequired"], "llmToolChoiceRequired", errors)
-            if "llmToolChoiceRequired" in patch
-            else self.llmToolChoiceRequired
-        )
-
-        output_mode: Any = self.agentOutputMode
-        if "agentOutputMode" in patch and patch["agentOutputMode"] is not None:
-            raw_mode = str(patch["agentOutputMode"]).strip() if isinstance(patch["agentOutputMode"], str) else None
-            if raw_mode not in _VALID_OUTPUT_MODES:
-                errors.append(f"结构化交卷方式 agentOutputMode 必须是 {' / '.join(_VALID_OUTPUT_MODES)} 之一")
-            else:
-                output_mode = raw_mode
-
-        native_strict = (
-            _coerce_bool(patch["agentNativeStrict"], "agentNativeStrict", errors)
-            if "agentNativeStrict" in patch and patch["agentNativeStrict"] is not None
-            else self.agentNativeStrict
-        )
-        output_retries = _num_int("agentOutputRetries", "证据校验重试次数 agentOutputRetries", min_val=0, max_val=10)
-        tool_retries = _num_int("agentToolRetries", "工具参数重试次数 agentToolRetries", min_val=0, max_val=10)
-        request_limit = _num_int("agentRequestLimit", "单次最大轮数 agentRequestLimit", min_val=1, max_val=200)
-        tool_calls_limit = _num_int("agentToolCallsLimit", "单次最大工具调用数 agentToolCallsLimit", min_val=1, max_val=500)
-        run_timeout_s = _num_float("agentRunTimeoutS", "单次运行总超时 agentRunTimeoutS", gt_zero=True)
-        max_concurrent = _num_int("agentMaxConcurrentRuns", "最大并发运行数 agentMaxConcurrentRuns", min_val=1, max_val=128)
-        preview_rows = _num_int("agentPreviewRows", "接口预览行数 agentPreviewRows", min_val=1, max_val=200)
-        query_default_limit = _num_int("agentQueryDefaultLimit", "结果筛选默认行数 agentQueryDefaultLimit", min_val=1, max_val=500)
-        query_max_limit = _num_int("agentQueryMaxLimit", "结果筛选最大行数 agentQueryMaxLimit", min_val=1, max_val=1000)
-        max_period_months = _num_int("agentMaxPeriodMonths", "多账期展开跨度上限 agentMaxPeriodMonths", min_val=1, max_val=120)
-
-        gateway_mode: Any = self.gatewayMode
-        if "gatewayMode" in patch and patch["gatewayMode"] is not None:
-            raw_gw_mode = str(patch["gatewayMode"]).strip() if isinstance(patch["gatewayMode"], str) else None
-            if raw_gw_mode not in _VALID_GATEWAY_MODES:
-                errors.append(f"统一网关模式 gatewayMode 必须是 {' / '.join(_VALID_GATEWAY_MODES)} 之一")
-            else:
-                gateway_mode = raw_gw_mode
-
-        gateway_url = _str_field("gatewayUrl", self.gatewayUrl, "gatewayUrl")
-
-        xml_style: Any = self.gatewayXmlStyle
-        if "gatewayXmlStyle" in patch and patch["gatewayXmlStyle"] is not None:
-            raw_style = str(patch["gatewayXmlStyle"]).strip() if isinstance(patch["gatewayXmlStyle"], str) else None
-            if raw_style not in _VALID_XML_STYLES:
-                errors.append(f"网关 XML 风格 gatewayXmlStyle 必须是 {' / '.join(_VALID_XML_STYLES)} 之一")
-            else:
-                xml_style = raw_style
-
-        connect_timeout_s = _num_float("gatewayConnectTimeoutS", "网关连接超时 gatewayConnectTimeoutS", gt_zero=True)
-        gateway_max_concurrency = _num_int("gatewayMaxConcurrency", "网关最大并发数 gatewayMaxConcurrency", min_val=1, max_val=512)
-        releases_keep = _num_int("releasesKeep", "发布快照保留数 releasesKeep", min_val=1, max_val=500)
-        runs_keep_days = _num_int("runsKeepDays", "运行与会话留存天数 runsKeepDays", min_val=0, max_val=3650)
-
-        chat_max_doc_chars = _num_int("chatMaxDocChars", "聊天单据最大字符数 chatMaxDocChars", min_val=500, max_val=200000)
-        chat_max_history = _num_int("chatMaxHistoryMessages", "聊天最近原文消息数 chatMaxHistoryMessages", min_val=1, max_val=200)
-        chat_max_run_cards = _num_int("chatMaxRunCards", "聊天运行卡片注入上限 chatMaxRunCards", min_val=1, max_val=50)
-        chat_max_md_preview = _num_int("chatMaxMarkdownPreviewChars", "聊天报告预览截断字数 chatMaxMarkdownPreviewChars", min_val=100, max_val=20000)
-        chat_compact_trigger = _num_int("chatCompactTriggerMessages", "自动压缩触发消息数 chatCompactTriggerMessages", min_val=2, max_val=500)
-        chat_compact_keep = _num_int("chatCompactKeepRecent", "自动压缩保留消息数 chatCompactKeepRecent", min_val=1, max_val=200)
-        chat_manual_keep = _num_int("chatManualCompactKeepRecent", "手动压缩保留消息数 chatManualCompactKeepRecent", min_val=1, max_val=200)
-        chat_manual_min_slice = _num_int("chatManualCompactMinSlice", "手动压缩最小归档条数 chatManualCompactMinSlice", min_val=1, max_val=100)
-        chat_max_summary_chars = _num_int("chatMaxMemorySummaryChars", "滚动记忆摘要上限 chatMaxMemorySummaryChars", min_val=200, max_val=10000)
-        chat_max_summary_msg = _num_int("chatMaxSummaryMsgChars", "待压缩消息单条截取上限 chatMaxSummaryMsgChars", min_val=100, max_val=10000)
-        chat_req_limit = _num_int("chatRequestLimit", "聊天单轮最大请求轮数 chatRequestLimit", min_val=1, max_val=50)
-        chat_tool_limit = _num_int("chatToolCallsLimit", "聊天单轮最大工具调用数 chatToolCallsLimit", min_val=1, max_val=100)
-        chat_timeout_s = _num_float("chatTimeoutS", "聊天单轮超时 chatTimeoutS", gt_zero=True)
-        chat_sum_req_limit = _num_int("chatSummaryRequestLimit", "压缩摘要最大请求轮数 chatSummaryRequestLimit", min_val=1, max_val=20)
-        chat_sum_tool_limit = _num_int("chatSummaryToolCallsLimit", "压缩摘要最大工具调用数 chatSummaryToolCallsLimit", min_val=1, max_val=30)
-        chat_sum_timeout_s = _num_float("chatSummaryTimeoutS", "压缩摘要超时 chatSummaryTimeoutS", gt_zero=True)
-
-        llm_api_key = _resolve_secret(
-            patch.get("llmApiKey"), self.llmApiKey, clear_llm_api_key, "llmApiKey", errors
-        )
-        gateway_app_id = _resolve_secret(
-            patch.get("gatewayAppId"), self.gatewayAppId, clear_gateway_app_id, "gatewayAppId", errors
-        )
-        gateway_access_token = _resolve_secret(
-            patch.get("gatewayAccessToken"),
-            self.gatewayAccessToken,
-            clear_gateway_access_token,
-            "gatewayAccessToken",
-            errors,
-        )
-        report_api_keys = _resolve_api_keys(
-            patch.get("reportApiKeys"),
-            self.reportApiKeys,
-            clear_report_api_keys,
-            errors,
-        )
+            if sp.kind == "secret":
+                next_values[sp.name] = _resolve_secret(
+                    raw, cur_val, clear_flags[sp.clear_kw], sp.name, errors
+                )
+            elif sp.kind == "api_keys":
+                next_values[sp.name] = _resolve_api_keys(
+                    raw, cur_val, clear_flags[sp.clear_kw], errors
+                )
+            elif sp.kind in ("url", "str"):
+                if not in_patch or raw is None:
+                    next_values[sp.name] = cur_val
+                elif not isinstance(raw, str):
+                    errors.append(f"{sp.name}必须是字符串")
+                    next_values[sp.name] = cur_val
+                else:
+                    next_values[sp.name] = raw.strip()
+            elif sp.kind == "enum":
+                if not in_patch or raw is None:
+                    next_values[sp.name] = cur_val
+                else:
+                    raw_mode = raw.strip() if isinstance(raw, str) else None
+                    if raw_mode not in sp.choices:
+                        errors.append(f"{sp.label} 必须是 {' / '.join(sp.choices)} 之一")
+                        next_values[sp.name] = cur_val
+                    else:
+                        next_values[sp.name] = raw_mode
+            elif sp.kind == "bool":
+                if not in_patch or raw is None or (isinstance(raw, str) and raw.strip() == ""):
+                    next_values[sp.name] = cur_val
+                else:
+                    next_values[sp.name] = _coerce_bool(raw, sp.label, errors)
+            elif sp.kind == "optional_bool":
+                next_values[sp.name] = _coerce_optional_bool(raw, sp.label, errors) if in_patch else cur_val
+            elif sp.kind == "optional_int":
+                next_values[sp.name] = (
+                    _coerce_optional_int(
+                        raw,
+                        sp.label,
+                        errors,
+                        min_val=int(sp.min_val) if sp.min_val is not None else 1,
+                        max_val=int(sp.max_val) if sp.max_val is not None else None,
+                    )
+                    if in_patch
+                    else cur_val
+                )
+            elif sp.kind == "int":
+                if not in_patch or raw is None or (isinstance(raw, str) and raw.strip() == ""):
+                    next_values[sp.name] = int(cur_val)
+                else:
+                    next_values[sp.name] = _coerce_int(
+                        raw,
+                        sp.label,
+                        errors,
+                        min_val=int(sp.min_val) if sp.min_val is not None else None,
+                        max_val=int(sp.max_val) if sp.max_val is not None else None,
+                    )
+            elif sp.kind == "float":
+                if not in_patch or raw is None or (isinstance(raw, str) and raw.strip() == ""):
+                    next_values[sp.name] = float(cur_val)
+                else:
+                    next_values[sp.name] = _coerce_float(
+                        raw,
+                        sp.label,
+                        errors,
+                        min_val=float(sp.min_val) if sp.min_val is not None else None,
+                        max_val=float(sp.max_val) if sp.max_val is not None else None,
+                        gt_zero=sp.gt_zero,
+                    )
 
         if errors:
             raise RuntimeConfigValidationError(errors)
 
-        candidate = RuntimeConfig(
-            llmBaseUrl=llm_base_url,
-            llmApiKey=llm_api_key,
-            llmModel=llm_model,
-            llmTemperature=llm_temperature,
-            llmMaxTokens=llm_max_tokens,
-            llmTimeoutS=llm_timeout_s,
-            llmHttpRetries=llm_http_retries,
-            llmParallelToolCalls=llm_parallel,
-            llmStrictTools=llm_strict_tools,
-            llmToolChoiceRequired=llm_tool_choice,
-            agentOutputMode=output_mode,
-            agentNativeStrict=native_strict,
-            agentOutputRetries=output_retries,
-            agentToolRetries=tool_retries,
-            agentRequestLimit=request_limit,
-            agentToolCallsLimit=tool_calls_limit,
-            agentRunTimeoutS=run_timeout_s,
-            agentMaxConcurrentRuns=max_concurrent,
-            agentPreviewRows=preview_rows,
-            gatewayMode=gateway_mode,
-            gatewayUrl=gateway_url,
-            gatewayAppId=gateway_app_id,
-            gatewayAccessToken=gateway_access_token,
-            gatewayXmlStyle=xml_style,
-            gatewayConnectTimeoutS=connect_timeout_s,
-            reportApiKeys=report_api_keys,
-            gatewayMaxConcurrency=gateway_max_concurrency,
-            releasesKeep=releases_keep,
-            runsKeepDays=runs_keep_days,
-            agentQueryDefaultLimit=query_default_limit,
-            agentQueryMaxLimit=query_max_limit,
-            agentMaxPeriodMonths=max_period_months,
-            chatMaxDocChars=chat_max_doc_chars,
-            chatMaxHistoryMessages=chat_max_history,
-            chatMaxRunCards=chat_max_run_cards,
-            chatMaxMarkdownPreviewChars=chat_max_md_preview,
-            chatCompactTriggerMessages=chat_compact_trigger,
-            chatCompactKeepRecent=chat_compact_keep,
-            chatManualCompactKeepRecent=chat_manual_keep,
-            chatManualCompactMinSlice=chat_manual_min_slice,
-            chatMaxMemorySummaryChars=chat_max_summary_chars,
-            chatMaxSummaryMsgChars=chat_max_summary_msg,
-            chatRequestLimit=chat_req_limit,
-            chatToolCallsLimit=chat_tool_limit,
-            chatTimeoutS=chat_timeout_s,
-            chatSummaryRequestLimit=chat_sum_req_limit,
-            chatSummaryToolCallsLimit=chat_sum_tool_limit,
-            chatSummaryTimeoutS=chat_sum_timeout_s,
-        )
+        candidate = RuntimeConfig(**next_values)
         candidate.validate()
         return candidate
+
+
+if tuple(f.name for f in dataclasses.fields(RuntimeConfig)) != _ORDERED_FIELDS:  # pragma: no cover
+    raise RuntimeError("RuntimeConfig 字段声明顺序与 _FIELD_SPECS 元数据表不一致")
 
 
 @dataclass(frozen=True)
@@ -983,9 +1007,12 @@ class RuntimeConfigStore:
         self.current_path = self.root / "current.json"
         self.index_path = self.root / "index.jsonl"
         self._active: RuntimeSnapshot | None = None
-        self._fallback_settings: Settings = _DEFAULT_FALLBACK_SETTINGS
+        self._fallback_settings: Settings | None = None
         self._index_cache: tuple[tuple[int, int], list[dict[str, Any]]] | None = None
         self._public_cfg_cache: dict[str, dict[str, Any]] = {}
+
+    def _effective_fallback(self) -> Settings:
+        return self._fallback_settings or _get_default_fallback_settings()
 
     def _ensure_dirs(self) -> None:
         self.revisions_dir.mkdir(parents=True, exist_ok=True)
@@ -1074,10 +1101,23 @@ class RuntimeConfigStore:
             "note": note,
             "changedKeys": list(changed_keys),
         }
-        write_json(self._revision_path(rev), {"rev": rev, **meta_fields, "config": storage_dict}, mode=0o600)
-        append_jsonl(self.index_path, {"rev": rev, **meta_fields}, mode=0o600)
-        self._index_cache = None
-        write_json(self.current_path, {"activeRev": rev, **meta_fields, "config": storage_dict}, mode=0o600)
+        rev_path = self._revision_path(rev)
+        prev_index = self.index_path.read_bytes() if self.index_path.is_file() else None
+        write_json(rev_path, {"rev": rev, **meta_fields, "config": storage_dict}, mode=0o600)
+        try:
+            append_jsonl(self.index_path, {"rev": rev, **meta_fields}, mode=0o600)
+            self._index_cache = None
+            write_json(self.current_path, {"activeRev": rev, **meta_fields, "config": storage_dict}, mode=0o600)
+        except BaseException:
+            self._index_cache = None
+            with suppress(OSError):
+                rev_path.unlink(missing_ok=True)
+            with suppress(OSError):
+                if prev_index is None:
+                    self.index_path.unlink(missing_ok=True)
+                else:
+                    atomic_write_bytes(self.index_path, prev_index, mode=0o600)
+            raise
         self._public_cfg_cache[rev] = cfg.to_public_dict()
         snap = RuntimeSnapshot(
             rev=rev,
@@ -1105,10 +1145,14 @@ class RuntimeConfigStore:
             cur = read_json(self.current_path)
             if isinstance(cur, dict) and isinstance(cur.get("config"), dict):
                 try:
-                    rev = str(cur.get("activeRev") or "c1")
-                    if not CONFIG_REV_RE.match(rev):
-                        rev = "c1"
-                    n = int(cur.get("n") or rev[1:])
+                    raw_rev = cur.get("activeRev")
+                    if not isinstance(raw_rev, str) or not CONFIG_REV_RE.match(raw_rev):
+                        raise ValueError(f"非法的 activeRev：{raw_rev!r}")
+                    rev = raw_rev
+                    raw_n = cur.get("n")
+                    if isinstance(raw_n, bool):
+                        raise ValueError("非法的修订序号 n")
+                    n = int(raw_n) if raw_n is not None else int(rev[1:])
                     cfg = RuntimeConfig.from_storage_dict(cur["config"], fallback_settings=settings)
                     cfg.validate()
                 except (TypeError, ValueError, RuntimeConfigValidationError) as exc:
@@ -1249,7 +1293,7 @@ class RuntimeConfigStore:
     def active(self) -> RuntimeSnapshot:
         with self.lock:
             if self._active is None:
-                return self.bootstrap_or_load(self._fallback_settings)
+                return self.bootstrap_or_load(self._effective_fallback())
             return self._active
 
     def active_rev(self) -> str:
@@ -1265,6 +1309,7 @@ class RuntimeConfigStore:
         """按版本号倒序返回全部配置历史（脱敏展示，命中内存缓存时免重复读取快照文件）。"""
         with self.lock:
             active = self.active()
+            fallback = self._effective_fallback()
             entries = self._read_index_entries()
             out: list[dict[str, Any]] = []
             for e in reversed(entries):
@@ -1275,7 +1320,7 @@ class RuntimeConfigStore:
                     if isinstance(rev_doc, dict) and isinstance(rev_doc.get("config"), dict):
                         try:
                             snap_cfg = RuntimeConfig.from_storage_dict(
-                                rev_doc["config"], fallback_settings=self._fallback_settings
+                                rev_doc["config"], fallback_settings=fallback
                             )
                             masked_cfg = snap_cfg.to_public_dict()
                             self._public_cfg_cache[rev] = masked_cfg
@@ -1354,7 +1399,7 @@ class RuntimeConfigStore:
                 raise ResourceNotFound(f"运行配置版本 {clean_target} 不存在")
             try:
                 target_cfg = RuntimeConfig.from_storage_dict(
-                    rev_doc["config"], fallback_settings=self._fallback_settings
+                    rev_doc["config"], fallback_settings=self._effective_fallback()
                 )
             except (TypeError, ValueError) as exc:
                 raise RuntimeConfigValidationError([f"运行配置版本 {clean_target} 数据已损坏：{exc}"]) from exc
@@ -1376,8 +1421,13 @@ class RuntimeConfigStore:
                 self.layout.audit,
                 "runtime-config-rollback",
                 operator,
-                {"rev": snap.rev, "base": current.rev, "targetRev": clean_target, "reason": clean_reason,
-                 "changedKeys": changed_keys},
+                {
+                    "rev": snap.rev,
+                    "base": current.rev,
+                    "targetRev": clean_target,
+                    "reason": clean_reason,
+                    "changedKeys": changed_keys,
+                },
             )
             return snap
 

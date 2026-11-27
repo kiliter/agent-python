@@ -4,7 +4,7 @@
 // 以及聊天模拟联调页与动态聊天页签共享的 postMessage 通信日志、确认回传报告列表与内存态 API Key。
 
 import { defineStore } from 'pinia'
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, markRaw, reactive, ref, watch } from 'vue'
 import { usePlatformStore } from '@/stores/platform'
 import type { NavKey } from '@/types/platform'
 import { NAV_LABELS } from '@/constants/terms'
@@ -112,7 +112,7 @@ function createRouteTab(navKey: RouteTabNav): RouteWorkspaceTab {
 }
 
 export function buildChatTabKey(userId: string, orderId: string): string {
-  return `chat:${userId.trim()}:${orderId.trim()}`
+  return `chat:${encodeURIComponent(userId.trim())}:${encodeURIComponent(orderId.trim())}`
 }
 
 function nowTimeStr(): string {
@@ -203,7 +203,7 @@ export const useWorkspaceTabsStore = defineStore('workspace-tabs', () => {
   // ==================== 未保存草稿检测与放弃恢复 ====================
   function getRouteDirtyLabel(navKey: RouteTabNav): string | null {
     const platform = usePlatformStore()
-    if (navKey === 'workbench' && platform.hasUnsavedChanges) {
+    if (navKey === 'workbench' && (platform.hasUnsavedChanges || platform.inspectorFieldDirty)) {
       return '当前模板草稿有未保存的修改'
     }
     if (navKey === 'skills' && platform.skillsSubView === 'detail' && platform.skillDirty) {
@@ -236,32 +236,22 @@ export const useWorkspaceTabsStore = defineStore('workspace-tabs', () => {
     return getRouteDirtyLabel(navKey) !== null
   }
 
-  /** 放弃指定路由页签的未保存修改并恢复干净版本 */
+  /** 放弃指定路由页签的未保存修改并立即同步恢复内存快照 */
   function discardRouteDirtyState(navKey: RouteTabNav) {
     const platform = usePlatformStore()
+    platform.discardUnsavedMemoryChanges(navKey)
     if (navKey === 'workbench') {
-      platform.hasUnsavedChanges = false
       if (platform.currentTemplateId) {
         void platform.loadTemplate(platform.currentTemplateId)
       }
     } else if (navKey === 'skills') {
-      platform.skillDirty = false
       if (platform.selectedSkillId) {
         void platform.loadSkill(platform.selectedSkillId)
       }
     } else if (navKey === 'apis') {
-      platform.apiDirty = false
       if (platform.selectedApiName) {
         void platform.loadApi(platform.selectedApiName)
       }
-    } else if (navKey === 'settings') {
-      if (platform.sysPromptState) {
-        platform.sysPromptText = platform.sysPromptState.sysPromptText
-      }
-      if (platform.compositeTemplateState) {
-        platform.compositeTemplateText = platform.compositeTemplateState.templateText
-      }
-      platform.runtimeFormDirty = false
     }
   }
 
@@ -636,15 +626,17 @@ export const useWorkspaceTabsStore = defineStore('workspace-tabs', () => {
 
   function pushSimLog(dir: SimLogDir, tabKey: string, orderId: string, data: unknown) {
     const msgType = (data as { type?: string } | null)?.type || '(unknown)'
-    simLogs.value.unshift({
-      id: ++logSeq,
-      time: nowTimeStr(),
-      dir,
-      type: msgType,
-      tabKey,
-      orderId,
-      data: toPlainClone(data),
-    })
+    simLogs.value.unshift(
+      markRaw({
+        id: ++logSeq,
+        time: nowTimeStr(),
+        dir,
+        type: msgType,
+        tabKey,
+        orderId,
+        data: toPlainClone(data),
+      }),
+    )
     if (simLogs.value.length > 300) {
       simLogs.value.length = 300
     }
@@ -653,10 +645,8 @@ export const useWorkspaceTabsStore = defineStore('workspace-tabs', () => {
   function recordChatReady(tabKey: string, rawData: Record<string, unknown>) {
     const chatTab = tabs.value.find((t): t is ChatWorkspaceTab => t.kind === 'chat' && t.key === tabKey)
     if (!chatTab) return
-    if (!chatTab.readyReceived) {
-      chatTab.readyReceived = true
-      pushSimLog('in', tabKey, chatTab.orderId, rawData)
-    }
+    chatTab.readyReceived = true
+    pushSimLog('in', tabKey, chatTab.orderId, rawData)
   }
 
   function markChatTabInitSent(tabKey: string, rawMsg: Record<string, unknown>) {

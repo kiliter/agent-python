@@ -1,22 +1,29 @@
 <!-- #Created By AiCoding(codex) 全局右侧滑出抽屉组件（回归差异详情），数据全部来自 Store 与后端 -->
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { usePlatformStore } from '@/stores/platform'
+import { formatRegressionDiffFieldValue } from '@/utils/fieldFormat'
 
 const store = usePlatformStore()
+const adopting = ref(false)
 
 const currentRegDiff = computed(() => store.regressionDiffs[store.editingRegDiffIndex] ?? null)
 
 async function handleAdoptDiffField() {
   const d = currentRegDiff.value
-  if (!d || !d.scope || !d.runIdA) return
+  if (!d || !d.scope || !d.runIdA || adopting.value) return
   const isRoute = d.kind === 'route_mismatch' || d.kind === 'route_diff'
-  await store.adoptRegressionBaseline(d.scope, d.caseId, {
-    runId: d.runIdA,
-    adoptFields: !isRoute,
-    adoptTemplate: isRoute,
-    ...(isRoute ? {} : { onlyField: d.field }),
-  })
+  adopting.value = true
+  try {
+    await store.adoptRegressionBaseline(d.scope, d.caseId, {
+      runId: d.runIdA,
+      adoptFields: !isRoute,
+      adoptTemplate: isRoute,
+      ...(isRoute ? {} : { onlyField: d.field }),
+    })
+  } finally {
+    adopting.value = false
+  }
 }
 
 function handleOpenRun(runId?: string | null) {
@@ -25,15 +32,10 @@ function handleOpenRun(runId?: string | null) {
   void store.openRunDetail(runId)
 }
 
-/** 格式化回归差异抽屉中的字段输出值（区分合法空列表 [] 与缺失空值） */
-function formatDiffFieldVal(fieldName: string, rawVal?: string): string {
-  const isList = store.templateFields.find(f => f.name === fieldName)?.type === '列表'
-  const trimmed = (rawVal ?? '').trim()
-  if (isList) {
-    if (trimmed === '[]') return '无记录（0 行） []'
-    if (!trimmed || trimmed === '（置空）') return '缺失（未取到结果·置空）'
-  }
-  return trimmed || '—'
+/** 格式化回归差异抽屉中的字段输出值（基于对比值自身数组特征识别列表字段，不耦合单模板工作台状态） */
+function formatDiffFieldVal(_fieldName: string, rawVal?: string): string {
+  const d = currentRegDiff.value
+  return formatRegressionDiffFieldValue(rawVal, d ? [d.valA, d.valB, d.expected] : [])
 }
 </script>
 
@@ -42,7 +44,7 @@ function formatDiffFieldVal(fieldName: string, rawVal?: string): string {
   <div
     v-if="store.activeDrawer === 'reg-diff-detail'"
     class="drawer-backdrop g-drawer-mask"
-    @click="store.closeDrawer()"
+    @mousedown.self="!adopting && store.closeDrawer()"
   >
     <div class="drawer-panel drawer-lg g-drawer-panel" @click.stop>
       <div class="drawer-header g-drawer-head">
@@ -109,6 +111,7 @@ function formatDiffFieldVal(fieldName: string, rawVal?: string): string {
         <button
           v-if="currentRegDiff?.scope && currentRegDiff?.runIdA"
           class="btn btn-sm btn-primary"
+          :disabled="adopting"
           @click="handleAdoptDiffField"
         >
           {{

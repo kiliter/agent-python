@@ -1,7 +1,7 @@
 ---
 name: renewal-reminder-sms
 title: 续约提醒短信
-description: 合约延续类模板需要“续约提醒类型”“到期续约提醒时间”“到期续约提醒短信内容”“是否续约成功”“续约成功提醒时间”“续约成功提醒短信内容”任一字段时加载。按订购短信中的最大合法日期查询前后 31 天短信，一次识别到期续约/到期结束提醒和续约成功提醒。依赖 business-sms。
+description: 合约延续类模板需要“续约提醒类型”“到期续约提醒时间”“到期续约提醒短信内容”“是否续约成功”“续约成功提醒时间”“续约成功提醒短信内容”任一字段时加载。优先按截止日期入参或订购短信中的最大合法日期查询前后 31 天短信，一次识别到期续约/到期结束提醒和续约成功提醒。依赖 business-sms。
 apis:
   - querySMSSendInfo
 ---
@@ -27,17 +27,20 @@ apis:
 
 | 来源 | 要求 |
 |---|---|
-| 字段 `订购短信` | 必须先有结论（没有时先 `load_skill("business-sms")`）；为 `not_found` 时**跳过**，6 个字段全部 `not_found` |
+| 字段 `订购短信` | 未传非空 `deadlineDate`（或 `业务名称` 为空需提取活动编号）时必须先有结论（没有时先 `load_skill("business-sms")`）；仅当既无有效 `deadlineDate` 且 `订购短信` 为 `not_found` 时才跳过查询，6 个字段全部 `not_found` |
 | 入参 手机号码 | 必须是 11 位数字，否则不调用接口，6 个字段 `not_found` |
 | 入参 业务名称 | 用于匹配短信（可为空，为空时只用活动编号匹配） |
-| 入参 创建时间 | 给“M月d日”这类不带年份的日期补年份 |
-| 入参 deadlineDate（或模板定义的截止日期入参，可选） | 模板提供且非空时一并提取日期参与取最大值 |
+| 入参 创建时间 | 仅用于给“M月d日”这类不带年份的日期补年份（**绝不用作续约提醒查询基准日**） |
+| 入参 deadlineDate（或模板定义的截止日期入参，可选） | 若传入非空值，优先解析该日期作为到期基准日（此时即使 `订购短信` 为 `not_found` 也可基于 `deadlineDate` 查询） |
 
 ## 第 1 步：用 `extract_dates` 确定到期基准日
 
-1. 调用 `extract_dates(text=订购短信, defaultYear=创建时间)` 提取订购短信中全部经日历校验的合法日期（若入参还传入了非空 `deadlineDate`，一并调用 `extract_dates(text=deadlineDate, defaultYear=创建时间)` 后取两者的最大 `yyyyMMdd`）。
-2. 若没有任何合法日期（`count == 0`）→ 跳过查询，6 个字段提交 `not_found`，`reasoning` 写“订购短信中未找到合法日期”。
-3. 取最大合法日期 `max` 作为到期基准日 `max_date`（8 位 `yyyyMMdd`）。
+1. 若入参中传入了非空的 `deadlineDate`（或模板定义的截止日期入参），优先调用 `extract_dates(text=deadlineDate, defaultYear=创建时间)`，当返回 `count > 0` 时直接取返回的 `max`（8 位 `yyyyMMdd`）作为到期基准日 `max_date`。
+2. 若未传入 `deadlineDate`（或其中未提取出合法日期）：
+   - 若字段 `订购短信` 为 `not_found` → 直接跳过查询，6 个字段全部提交 `not_found`；
+   - 否则调用 `extract_dates(text=订购短信, defaultYear=创建时间)` 提取订购短信中全部经日历校验的合法日期：
+     - 若返回 `count > 0`：取最大合法日期 `max` 作为到期基准日 `max_date`（8 位 `yyyyMMdd`）；
+     - 若返回 `count == 0`（无任何合法日期）→ 跳过查询，6 个字段全部提交 `not_found`，`reasoning` 写明“未传入有效 deadlineDate 且订购短信中未找到合法日期”。
 
 示例：`测试活动（编号：25JS204106），2026年8月1日到2028年8月1日。` → `extract_dates` 返回 `["20260801", "20280801"]`，`max = "20280801"`。
 
@@ -50,7 +53,7 @@ apis:
 
 ## 第 3 步：用 `regex_extract` 提取活动编号并用 `query_result(anyOf=...)` 一步筛选
 
-1. 调用 `regex_extract(pattern=r"[（(]编号[:：]\s*([A-Za-z0-9_-]+)[）)]", text=订购短信)` 提取全部活动编号（`matches` 列表；若订购短信中的“编号”未带括号，可用 `r"编号\s*[:：]?\s*([A-Za-z0-9_-]+)"` 提取）。
+1. 若字段 `订购短信` 为 `found` 且非空，调用 `regex_extract(pattern=r"[（(]编号[:：]\s*([A-Za-z0-9_-]+)[）)]", text=订购短信)` 提取全部活动编号（`matches` 列表；若订购短信中的“编号”未带括号，可用 `r"编号\s*[:：]?\s*([A-Za-z0-9_-]+)"` 提取）；若 `订购短信` 为 `not_found`，则活动编号列表为空。
 2. 构造 `anyOf` 或条件列表（满足任一即属于本次业务）：
    - 若入参 `业务名称` 非空：`{"column": "smsContent", "op": "normalizedContains", "value": "<业务名称>"}`；
    - 对提取到的每个活动编号：`{"column": "smsContent", "op": "normalizedContains", "value": "<活动编号>"}`。
@@ -100,5 +103,5 @@ apis:
 - 既没有 A 也没有 B：6 个字段全部 `not_found`。
 - 证据要求：
   - 原文引用字段（`到期续约提醒短信内容`、`续约成功提醒短信内容`）：`evidence` 仅填对应记录 `[{"type":"api","resultId":...,"row":...,"column":"smsContent"}]`；
-  - 时间推导字段（`到期续约提醒时间`、`续约成功提醒时间`）：`evidence` 引用对应 `format_date` 的 `{"type":"tool","callId":...}`、对应记录 `smsSendTime` 列及 `{"type":"field","name":"订购短信"}`；
-  - 枚举推导字段（`续约提醒类型`、`是否续约成功`）：`evidence` 引用对应记录 `smsContent` 列、相关工具 `callId`（`extract_dates`、`date_shift`、`regex_extract`、`query_result`）及 `{"type":"field","name":"订购短信"}`，在 `reasoning` 中写明命中的关键词。
+  - 时间推导字段（`到期续约提醒时间`、`续约成功提醒时间`）：`evidence` 引用对应 `format_date` 的 `{"type":"tool","callId":...}`、对应记录 `smsSendTime` 列，以及确定到期基准日的来源（通过截止日期入参提取时引用 `{"type":"input","key":"deadlineDate"}`，通过订购短信提取时引用 `{"type":"field","name":"订购短信"}`）；
+  - 枚举推导字段（`续约提醒类型`、`是否续约成功`）：`evidence` 引用对应记录 `smsContent` 列、相关工具 `callId`（`extract_dates`、`date_shift`、实际调用过的 `regex_extract`、`query_result`），以及确定基准日/筛选依据的来源（通过截止日期入参提取基准日时引用 `{"type":"input","key":"deadlineDate"}`，通过订购短信提取基准日或活动编号时引用 `{"type":"field","name":"订购短信"}`；严禁引用状态为 `not_found` 的 `订购短信` 字段），在 `reasoning` 中写明命中的关键词。

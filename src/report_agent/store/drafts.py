@@ -18,15 +18,17 @@ from pathlib import Path
 from typing import Any
 
 from ..domain.skill import SKILL_FILE, SkillParseError, normalize_skill_doc_path
-from .fsutil import _fsync_dir, atomic_write_text, now_iso, read_json, read_text, write_json
+from .fsutil import _fsync_dir, atomic_write_text, now_iso, read_json, read_text, unlink_or_rmtree, write_json
 from .layout import (
     META_FILE,
     DataLayout,
     InvalidResource,
     ResourceRef,
+    copy_dir_no_symlinks,
     ensure_entry_within,
     ensure_within,
     is_valid_resource_key,
+    read_tree_text_files,
 )
 
 
@@ -57,61 +59,83 @@ class DraftStore:
         return self.meta(ref) is not None
 
     def meta(self, ref: ResourceRef) -> dict[str, Any] | None:
-        data = read_json(self._dir(ref) / META_FILE)
-        return data if isinstance(data, dict) else None
+        meta_path = self._dir(ref) / META_FILE
+        data = read_json(meta_path)
+        if isinstance(data, dict):
+            return data
+        # 两段式 os.replace 瞬态窗口下二次持锁确认，消除无锁读瞬态 404
+        with self.lock:
+            data = read_json(meta_path)
+            return data if isinstance(data, dict) else None
 
     def list_keys(self, kind: str) -> list[str]:
-        """某类资源的全部草稿标识。"""
+        """某类资源的全部草稿标识（遇到正在原子替换的临时目录时加锁重扫，防瞬态漏项）。"""
         base = self.layout.drafts / kind
         if not base.exists():
             return []
-        out: list[str] = []
-        for p in base.iterdir():
-            if p.name.startswith(".") or p.is_symlink() or not p.is_dir() or not is_valid_resource_key(kind, p.name):
-                continue
-            if isinstance(read_json(p / META_FILE), dict):
-                out.append(p.name)
-        return sorted(out)
+
+        def _scan() -> tuple[list[str], bool]:
+            out: list[str] = []
+            saw_transient = False
+            try:
+                entries = list(base.iterdir())
+            except OSError:
+                return [], False
+            for p in entries:
+                if p.name.startswith("."):
+                    if p.name.endswith((".tmp", ".bak")):
+                        saw_transient = True
+                    continue
+                if p.is_symlink() or not p.is_dir() or not is_valid_resource_key(kind, p.name):
+                    continue
+                if isinstance(read_json(p / META_FILE), dict):
+                    out.append(p.name)
+            return sorted(out), saw_transient
+
+        keys, transient = _scan()
+        if transient:
+            with self.lock:
+                keys, _ = _scan()
+        return keys
 
     def read_file(self, ref: ResourceRef, name: str) -> str | None:
         d = self._dir(ref)
         path = ensure_within(d, d / name)
-        try:
-            return read_text(path)
-        except (UnicodeDecodeError, OSError):
-            return None
+
+        def _read_once() -> str | None:
+            if path.is_symlink():
+                raise InvalidResource(f"草稿目录包含非法软链接「{name}」")
+            try:
+                return read_text(path)
+            except UnicodeDecodeError as exc:
+                raise InvalidResource(f"草稿文件「{name}」不是有效的 UTF-8 文本") from exc
+            except OSError:
+                return None
+
+        val = _read_once()
+        if val is not None:
+            return val
+        with self.lock:
+            return _read_once()
 
     def read_dir_files(self, ref: ResourceRef) -> dict[str, str] | None:
         """递归读取目录型草稿下的全部文本文件（返回规范化 POSIX 相对路径 -> 内容，不含 .meta.json）。#Created By AiCoding(codex)"""
-        if not self.exists(ref):
-            return None
-        d = self._dir(ref)
-        out: dict[str, str] = {}
-        stack: list[tuple[Path, str]] = [(d, "")]
-        while stack:
-            cur_dir, rel_prefix = stack.pop()
-            try:
-                with os.scandir(cur_dir) as it:
-                    entries = sorted(it, key=lambda e: e.name)
-            except OSError:
-                continue
-            for entry in entries:
-                if entry.name in (META_FILE, ".DS_Store"):
-                    continue
-                if entry.is_symlink():
-                    raise InvalidResource(f"草稿目录包含非法软链接「{entry.name}」")
-                rel_posix = f"{rel_prefix}/{entry.name}" if rel_prefix else entry.name
-                entry_path = ensure_within(d, Path(entry.path))
-                if entry.is_dir(follow_symlinks=False):
-                    stack.append((entry_path, rel_posix))
-                elif entry.is_file(follow_symlinks=False):
-                    text = read_text(entry_path)
-                    if text is not None:
-                        out[rel_posix] = text
-        return dict(sorted(out.items()))
+        with self.lock:
+            if not self.exists(ref):
+                return None
+            return read_tree_text_files(self._dir(ref))
 
-    def write(self, ref: ResourceRef, files: dict[str, str], operator: str, base_rev: str | None,
-              expected_revision: int | None = None, action: str = "edit") -> dict[str, Any]:
+    def write(
+        self,
+        ref: ResourceRef,
+        files: dict[str, str],
+        operator: str,
+        base_rev: str | None,
+        expected_revision: int | None = None,
+        action: str = "edit",
+        *,
+        overwrite_base: bool = False,
+    ) -> dict[str, Any]:
         """原子写入草稿目录。expected_revision 不为空且与当前版本号不同时抛 DraftConflict。"""
         with self.lock:
             d = self._dir(ref)
@@ -122,13 +146,13 @@ class DraftStore:
             meta = {
                 "kind": ref.kind,
                 "key": ref.key,
-                "baseRev": current.get("baseRev") if current else base_rev,
+                "baseRev": base_rev if (overwrite_base or not current) else current.get("baseRev"),
                 "revision": int(current.get("revision", 0)) + 1 if current else 1,
                 "createdAt": current.get("createdAt") if current else now,
                 "createdBy": current.get("createdBy") if current else operator,
                 "updatedAt": now,
                 "updatedBy": operator,
-                "action": current.get("action", action) if current else action,
+                "action": action if (overwrite_base or not current) else current.get("action", action),
             }
             d.parent.mkdir(parents=True, exist_ok=True)
             token = f"{os.getpid()}.{secrets.token_hex(4)}"
@@ -180,28 +204,18 @@ class DraftStore:
         """删除草稿（兼容指向外部或悬空的末端软链接安全摘除）。"""
         with self.lock:
             d = ensure_entry_within(self.layout.drafts, self.layout.drafts / ref.kind / ref.key)
-            if d.is_symlink() or d.is_file():
-                d.unlink(missing_ok=True)
-                return True
-            if not d.exists():
-                return False
-            shutil.rmtree(d)
-            return True
+            return unlink_or_rmtree(d)
 
     def apply_to_tree(self, ref: ResourceRef, tree_root: Path) -> None:
-        """把草稿内容写入一棵发布树（替换该资源的旧内容，先安全摘除可能存在的末端软链接）。"""
+        """把草稿内容写入一棵发布树（替换该资源的旧内容，先安全摘除末端软链接并防软链复制）。"""
         src = self._dir(ref)
         dst = ensure_entry_within(tree_root, tree_root / ref.tree_path())
+        unlink_or_rmtree(dst)
         if ref.is_dir():
-            if dst.is_symlink() or dst.is_file():
-                dst.unlink(missing_ok=True)
-            elif dst.is_dir():
-                shutil.rmtree(dst)
-            shutil.copytree(src, dst, ignore=shutil.ignore_patterns(META_FILE, ".DS_Store"))
+            copy_dir_no_symlinks(src, dst)
         else:
-            if dst.is_symlink() or dst.is_file():
-                dst.unlink(missing_ok=True)
-            elif dst.is_dir():
-                shutil.rmtree(dst)
+            src_file = ensure_within(src, src / self.single_file_name(ref))
+            if src_file.is_symlink():
+                raise InvalidResource(f"草稿文件包含非法软链接「{src_file.name}」")
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src / self.single_file_name(ref), dst)
+            shutil.copy2(src_file, dst)

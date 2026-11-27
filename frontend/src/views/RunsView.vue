@@ -4,11 +4,12 @@
   #Created By AiCoding(codex)
 -->
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { FileText, Table2, Activity, FileInput, Maximize2, Minimize2, Compass, Download, AlertTriangle } from 'lucide-vue-next'
 import { usePlatformStore } from '@/stores/platform'
 import { platformApi } from '@/api/platformApi'
+import { parseDurationToMs } from '@/utils/duration'
 import { resolveEvidenceInspectorTab } from '@/utils/reportSegments'
 import { formatRouteDuration, routeConfidenceLevel } from '@/utils/timelineFormat'
 import type { MissingFieldsSummary, TemplateField } from '@/types/platform'
@@ -41,11 +42,50 @@ const dateTo = computed({
 })
 const querying = ref(false)
 
+// ==================== 翻页（客户端分页 + 满 500 条服务端批次翻页） ====================
+const SERVER_BATCH_SIZE = 500
+const pageSize = 50
+const currentPage = ref(1)
+const serverBatchPage = ref(1)
+const hasMoreServerBatch = ref(false)
+
+const totalPages = computed(() => Math.max(1, Math.ceil(store.filteredRuns.length / pageSize)))
+
+const pagedRuns = computed(() => {
+  const start = (currentPage.value - 1) * pageSize
+  return store.filteredRuns.slice(start, start + pageSize)
+})
+
+const canLoadNextBatch = computed(
+  () => hasMoreServerBatch.value || (serverBatchPage.value === 1 && store.runs.length >= SERVER_BATCH_SIZE),
+)
+
+watch(totalPages, maxPage => {
+  if (currentPage.value > maxPage) {
+    currentPage.value = Math.max(1, maxPage)
+  }
+})
+
+watch(
+  () => [
+    store.runStatusFilter,
+    store.runTemplateFilter,
+    store.runBatchSearch,
+    store.runMobileSearch,
+    store.runDateFrom,
+    store.runDateTo,
+  ],
+  () => {
+    currentPage.value = 1
+  },
+)
+
 // ==================== 多选与单页 HTML 模拟回放导出 ====================
 const selectedRunIds = ref<string[]>([])
 const exportingHtml = ref(false)
 
-const visibleRunIds = computed(() => store.filteredRuns.map(r => r.runId))
+const visibleRunIds = computed(() => pagedRuns.value.map(r => r.runId))
+const filteredRunIdSet = computed(() => new Set(store.filteredRuns.map(r => r.runId)))
 const selectedRunIdSet = computed(() => new Set(selectedRunIds.value))
 const allVisibleSelected = computed(
   () => visibleRunIds.value.length > 0 && visibleRunIds.value.every(id => selectedRunIdSet.value.has(id)),
@@ -54,8 +94,7 @@ const someVisibleSelected = computed(
   () => visibleRunIds.value.some(id => selectedRunIdSet.value.has(id)) && !allVisibleSelected.value,
 )
 
-watch(visibleRunIds, ids => {
-  const valid = new Set(ids)
+watch(filteredRunIdSet, valid => {
   const kept = selectedRunIds.value.filter(id => valid.has(id))
   if (kept.length !== selectedRunIds.value.length) {
     selectedRunIds.value = kept
@@ -64,9 +103,14 @@ watch(visibleRunIds, ids => {
 
 function toggleSelectAllVisible() {
   if (allVisibleSelected.value) {
-    selectedRunIds.value = []
+    const pageSet = new Set(visibleRunIds.value)
+    selectedRunIds.value = selectedRunIds.value.filter(id => !pageSet.has(id))
   } else {
-    selectedRunIds.value = [...visibleRunIds.value]
+    const merged = new Set(selectedRunIds.value)
+    for (const id of visibleRunIds.value) {
+      merged.add(id)
+    }
+    selectedRunIds.value = [...merged]
   }
 }
 
@@ -141,11 +185,14 @@ const passRateDisplay = computed(() =>
   totalRunsCount.value > 0 ? `${passRateNum.value.toFixed(1)}%` : '—',
 )
 
-/** 解析耗时字符串（如 "14.2s" -> 14.2） */
+/** 解析耗时字符串为秒数（统一复用 parseDurationToMs，兼容 "850ms" / "14.2s" / 数值） */
 function parseDurationNum(raw: string | number | undefined): number | null {
   if (raw === undefined || raw === null) return null
-  const num = Number.parseFloat(String(raw).replace(/[^\d.]/g, ''))
-  return Number.isFinite(num) && num >= 0 ? num : null
+  const s = String(raw).trim()
+  if (!s || s === '—' || s === '-') return null
+  const ms = parseDurationToMs(raw)
+  if (ms > 0) return ms / 1000
+  return /^0(?:\.0+)?\s*(?:ms|s)?$/i.test(s) ? 0 : null
 }
 
 /** 解析找到字段比例（如 "7/8" -> 87.5） */
@@ -320,17 +367,20 @@ watch(
   },
 )
 
-/** AI 缺失摘要生成完成后同步更新当前运行详情，避免切页签丢失 */
-function onMissingSummaryUpdated(nextSummary: MissingFieldsSummary) {
-  if (store.runDetail) {
-    store.runDetail = {
-      ...store.runDetail,
-      missingSummary: nextSummary,
-    }
+/** AI 缺失摘要生成完成后同步更新当前运行详情，校验 runId 一致防止异步回调串台 */
+function onMissingSummaryUpdated(targetRunId: string, nextSummary: MissingFieldsSummary) {
+  const cur = store.runDetail
+  if (!cur) return
+  const curId = cur.record?.runId || cur.runId
+  if (curId !== targetRunId) return
+  store.runDetail = {
+    ...cur,
+    missingSummary: nextSummary,
   }
 }
 
 let filterDebounceTimer: ReturnType<typeof setTimeout> | null = null
+let queryReqSeq = 0
 
 function clearFilterDebounceTimer() {
   if (filterDebounceTimer !== null) {
@@ -353,19 +403,87 @@ function scheduleDebouncedQuery() {
 
 function onDateFilterChange() {
   if (dateFrom.value && dateTo.value && dateFrom.value > dateTo.value) {
+    store.showToast('起始日期不能晚于结束日期', 'warning')
     return
   }
   void queryRuns()
 }
 
-/** 按全部筛选条件向后端查询运行记录（复用 store.refreshRuns 共享请求序号，彻底消除导航切换竞态） */
+/** 按全部筛选条件向后端查询运行记录（复用 store.refreshRuns，并用局部递增序号消除加载态闪烁） */
 async function queryRuns() {
   clearFilterDebounceTimer()
+  if (dateFrom.value && dateTo.value && dateFrom.value > dateTo.value) {
+    store.showToast('起始日期不能晚于结束日期', 'warning')
+    return
+  }
+  const seq = ++queryReqSeq
   querying.value = true
   try {
     await store.refreshRuns()
+    if (seq === queryReqSeq) {
+      serverBatchPage.value = 1
+      hasMoreServerBatch.value = store.runs.length >= SERVER_BATCH_SIZE
+      currentPage.value = 1
+    }
   } finally {
-    querying.value = false
+    if (seq === queryReqSeq) {
+      querying.value = false
+    }
+  }
+}
+
+/** 当服务端返回满页 500 条时支持按 offset 翻阅更早批次，返回第 1 批时走 store.refreshRuns */
+async function loadServerBatchPage(nextBatchPage: number) {
+  if (nextBatchPage <= 1) {
+    await queryRuns()
+    return
+  }
+  clearFilterDebounceTimer()
+  if (dateFrom.value && dateTo.value && dateFrom.value > dateTo.value) {
+    store.showToast('起始日期不能晚于结束日期', 'warning')
+    return
+  }
+  const seq = ++queryReqSeq
+  querying.value = true
+  try {
+    const tplFilter = store.runTemplateFilter
+    const parsedTplId =
+      tplFilter && tplFilter !== 'ALL' && /^\d+$/.test(String(tplFilter))
+        ? Number(tplFilter)
+        : undefined
+    const statusFilter =
+      store.runStatusFilter && store.runStatusFilter !== 'ALL'
+        ? store.runStatusFilter
+        : undefined
+    const params = {
+      dateFrom: dateFrom.value || undefined,
+      dateTo: dateTo.value || undefined,
+      mobile: store.runMobileSearch.trim() || undefined,
+      templateId: parsedTplId,
+      status: statusFilter,
+      q: store.runBatchSearch.trim() || undefined,
+      limit: SERVER_BATCH_SIZE,
+      offset: (nextBatchPage - 1) * SERVER_BATCH_SIZE,
+    } as Parameters<typeof platformApi.fetchRuns>[0]
+    const list = await platformApi.fetchRuns(params)
+    if (seq !== queryReqSeq) return
+    if (!list.length) {
+      hasMoreServerBatch.value = false
+      store.showToast('已到达最后一页，没有更早的运行记录', 'info')
+      return
+    }
+    store.runs = list
+    serverBatchPage.value = nextBatchPage
+    hasMoreServerBatch.value = list.length >= SERVER_BATCH_SIZE
+    currentPage.value = 1
+  } catch (err) {
+    if (seq === queryReqSeq) {
+      store.showError(err, '翻页加载运行记录失败')
+    }
+  } finally {
+    if (seq === queryReqSeq) {
+      querying.value = false
+    }
   }
 }
 
@@ -380,19 +498,6 @@ function resetRunFilters() {
   dateTo.value = ''
   void queryRuns()
 }
-
-onMounted(() => {
-  if (
-    store.runMobileSearch.trim() ||
-    store.runTemplateFilter !== 'ALL' ||
-    store.runStatusFilter !== 'ALL' ||
-    store.runBatchSearch.trim() ||
-    dateFrom.value ||
-    dateTo.value
-  ) {
-    void queryRuns()
-  }
-})
 
 /** 将当前运行转为回归用例 */
 async function convertToCase() {
@@ -666,9 +771,9 @@ async function convertToCase() {
                   class="ops-check"
                   :checked="allVisibleSelected"
                   :indeterminate="someVisibleSelected"
-                  :disabled="store.filteredRuns.length === 0"
-                  title="全选 / 取消全选当前列表"
-                  aria-label="全选当前运行记录"
+                  :disabled="pagedRuns.length === 0"
+                  title="全选 / 取消全选当前页列表"
+                  aria-label="全选当前页运行记录"
                   @change="toggleSelectAllVisible"
                 />
               </th>
@@ -695,7 +800,7 @@ async function convertToCase() {
               </td>
             </tr>
             <tr
-              v-for="r in store.filteredRuns"
+              v-for="r in pagedRuns"
               :key="r.runId"
               class="ops-table-row"
               :class="{ 'is-selected': selectedRunIdSet.has(r.runId) }"
@@ -741,6 +846,48 @@ async function convertToCase() {
             </tr>
           </tbody>
         </table>
+      </div>
+
+      <div class="card-footer-bar ops-runs-footer">
+        <div class="ops-runs-footer-left">
+          <span>
+            当前批次共 <strong class="mono">{{ store.filteredRuns.length }}</strong> 笔
+            <template v-if="store.filteredRuns.length !== store.runs.length">
+              （已加载 {{ store.runs.length }} 笔）
+            </template>
+          </span>
+          <template v-if="serverBatchPage > 1 || canLoadNextBatch">
+            <span class="chip-tag mono">第 {{ serverBatchPage }} 批（每批 {{ SERVER_BATCH_SIZE }} 笔）</span>
+            <span v-if="canLoadNextBatch" class="ops-batch-hint">
+              已达单批 {{ SERVER_BATCH_SIZE }} 条上限，可翻阅更早记录
+            </span>
+            <button
+              type="button"
+              class="btn btn-sm"
+              :disabled="querying || serverBatchPage <= 1"
+              @click="loadServerBatchPage(serverBatchPage - 1)"
+            >
+              ← 上一批
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm"
+              :disabled="querying || !canLoadNextBatch"
+              @click="loadServerBatchPage(serverBatchPage + 1)"
+            >
+              下一批 →
+            </button>
+          </template>
+        </div>
+
+        <el-pagination
+          v-model:current-page="currentPage"
+          size="small"
+          background
+          layout="prev, pager, next"
+          :total="store.filteredRuns.length"
+          :page-size="pageSize"
+        />
       </div>
     </div>
   </div>
@@ -1017,7 +1164,7 @@ async function convertToCase() {
             :summary="detail.missingSummary"
             :default-expanded="false"
             @select-field="onSelectRunReportField"
-            @updated="onMissingSummaryUpdated"
+            @updated="next => onMissingSummaryUpdated(detail?.record.runId || detail?.runId || '', next)"
           />
         </div>
 
@@ -1138,7 +1285,7 @@ async function convertToCase() {
             :summary="detail.missingSummary"
             always-expanded
             @select-field="onSelectRunReportField"
-            @updated="onMissingSummaryUpdated"
+            @updated="next => onMissingSummaryUpdated(detail?.record.runId || detail?.runId || '', next)"
           />
           <div v-else style="text-align: center; color: var(--text-secondary); padding: 48px 0">
             本次运行所有字段均已找到，无缺失项。
@@ -1698,5 +1845,25 @@ async function convertToCase() {
 
 .ops-table-row.is-selected {
   background: var(--primary-bg);
+}
+
+.ops-runs-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.ops-runs-footer-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ops-batch-hint {
+  font-size: 11.5px;
+  color: var(--warning);
 }
 </style>

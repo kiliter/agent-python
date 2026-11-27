@@ -5,7 +5,7 @@
   - 同名 Key 在报告中出现多处时同步柔和描边提示，点击可联动定位右侧证据或打开字段编辑抽屉
 -->
 <script setup lang="ts">
-import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated } from 'vue'
 import type { TemplateField } from '@/types/platform'
 import {
   buildReportSegments,
@@ -268,15 +268,38 @@ watch(
   },
 )
 
-onMounted(() => {
+let globalListenersBound = false
+
+function bindGlobalListeners() {
+  if (globalListenersBound) return
   window.addEventListener('scroll', handleGlobalScrollOrResize, { capture: true, passive: true })
   window.addEventListener('resize', handleGlobalScrollOrResize, { passive: true })
+  globalListenersBound = true
+}
+
+function unbindGlobalListeners() {
+  if (!globalListenersBound) return
+  window.removeEventListener('scroll', handleGlobalScrollOrResize, { capture: true })
+  window.removeEventListener('resize', handleGlobalScrollOrResize)
+  globalListenersBound = false
+}
+
+onMounted(() => {
+  bindGlobalListeners()
+})
+
+onActivated(() => {
+  bindGlobalListeners()
+})
+
+onDeactivated(() => {
+  hoverState.value = null
+  unbindGlobalListeners()
 })
 
 onBeforeUnmount(() => {
   hoverState.value = null
-  window.removeEventListener('scroll', handleGlobalScrollOrResize, { capture: true })
-  window.removeEventListener('resize', handleGlobalScrollOrResize)
+  unbindGlobalListeners()
 })
 </script>
 

@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import inspect
 import json
 from typing import Any
@@ -16,6 +15,7 @@ import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
+from conftest import parse_sse as _parse_sse
 from report_agent.api.auth import UserStore
 from report_agent.container import Container
 from report_agent.main import create_app
@@ -44,10 +44,8 @@ def _route_and_report_model(route_fn: Any, report_fn: Any = scripted) -> Functio
 
 
 def _swap_model(container: Container, model: FunctionModel) -> None:
-    """热替换测试容器内 AgentRunner 与 TemplateRouter 的桩模型并清空缓存。"""
-    container.runner._bundle = dataclasses.replace(container.runner._bundle, model=model)
-    container.runner._agent_cache.clear()
-    container.runner._router._cached_agent = None
+    """通过公开属性热替换测试容器内 AgentRunner 与 TemplateRouter 的桩模型。"""
+    container.runner.model = model
 
 
 def _fixed_route_to(tid: int, reason: str = "命中测试模板") -> Any:
@@ -70,25 +68,6 @@ def _fixed_route_to(tid: int, reason: str = "命中测试模板") -> Any:
         )
 
     return _router
-
-
-def _parse_sse(raw: str) -> list[dict[str, Any]]:
-    """解析标准 SSE 帧序列。"""
-    events: list[dict[str, Any]] = []
-    for block in raw.split("\n\n"):
-        lines = [ln for ln in block.splitlines() if ln.strip() and not ln.startswith(":")]
-        if not lines:
-            continue
-        evt_name = "message"
-        data_lines: list[str] = []
-        for ln in lines:
-            if ln.startswith("event:"):
-                evt_name = ln[6:].strip()
-            elif ln.startswith("data:"):
-                data_lines.append(ln[5:].lstrip())
-        if data_lines:
-            events.append({"event": evt_name, "data": json.loads("\n".join(data_lines))})
-    return events
 
 
 async def _flush_runs(container: Container) -> None:

@@ -105,9 +105,12 @@ def test_login_guard_anti_eviction_and_ip_limit():
     # 正常其它 IP 不受影响
     guard.check("brand_new_target", client_ip="203.0.113.100")
 
-    # 登录成功后清理账号与该 IP 的失败计数
-    guard.success("admin", client_ip=attacker_ip)
-    guard.check("admin", client_ip=attacker_ip)
+    # 登录成功后清理当前账号失败计数，但不洗白已触发喷洒封禁的攻击源 IP
+    guard.success("admin", client_ip="10.10.0.1")
+    guard.check("admin", client_ip="10.10.0.1")
+    with pytest.raises(HTTPException) as still_ip_locked:
+        guard.check("admin", client_ip=attacker_ip)
+    assert still_ip_locked.value.status_code == 429
 
 
 def test_token_service_revoked_capacity_and_expiry():

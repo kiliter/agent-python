@@ -31,6 +31,9 @@ class _SessionLock(asyncio.Lock):
     """支持弱引用的会话级协程互斥锁，保证在途持有或等待中的锁绝不被提前回收。"""
 
 
+_LoopLockBucket = tuple[weakref.WeakValueDictionary[str, _SessionLock], OrderedDict[str, _SessionLock]]
+
+
 def session_id_for(user_id: str, order_id: str) -> str:
     """按 (userId, orderId) 计算稳定的 32 位小写十六进制会话标识。"""
     u = ("" if user_id is None else str(user_id)).strip()
@@ -85,29 +88,50 @@ class ChatStore:
         self._stripe_locks = tuple(threading.Lock() for _ in range(_STRIPE_COUNT))
         self._cache_guard = threading.RLock()
         self._cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
-        self._locks_weak: weakref.WeakValueDictionary[str, _SessionLock] = weakref.WeakValueDictionary()
-        self._locks_recent: OrderedDict[str, _SessionLock] = OrderedDict()
+        # 按当前运行 event_loop 隔离 _SessionLock 缓存，杜绝跨 asyncio.run() 触发 bound to a different event loop
+        self._locks_by_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _LoopLockBucket] = (
+            weakref.WeakKeyDictionary()
+        )
+        self._fallback_locks: _LoopLockBucket = (weakref.WeakValueDictionary(), OrderedDict())
 
     def _stripe_lock(self, session_id: str) -> threading.Lock:
         return self._stripe_locks[hash(session_id) & (_STRIPE_COUNT - 1)]
 
+    def _bucket_for_current_loop_locked(self) -> _LoopLockBucket:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return self._fallback_locks
+        bucket = self._locks_by_loop.get(loop)
+        if bucket is None:
+            bucket = (weakref.WeakValueDictionary(), OrderedDict())
+            self._locks_by_loop[loop] = bucket
+        return bucket
+
+    def _all_lock_buckets_locked(self) -> list[_LoopLockBucket]:
+        return [self._fallback_locks, *list(self._locks_by_loop.values())]
+
     def _is_session_locked(self, session_id: str) -> bool:
         with self._cache_guard:
-            lock = self._locks_weak.get(session_id)
-            return bool(lock is not None and lock.locked())
+            for weak_map, _ in self._all_lock_buckets_locked():
+                lock = weak_map.get(session_id)
+                if lock is not None and lock.locked():
+                    return True
+            return False
 
     def lock_for(self, session_id: str) -> asyncio.Lock:
-        """获取指定 sessionId 对应的协程互斥锁（有界保留最近常用锁，弱引用兜底防止在途锁重复创建）。"""
+        """获取指定 sessionId 在当前事件循环下对应的协程互斥锁。#Created By AiCoding(codex)"""
         key = "" if session_id is None else str(session_id)
         with self._cache_guard:
-            lock = self._locks_weak.get(key)
+            weak_map, recent_map = self._bucket_for_current_loop_locked()
+            lock = weak_map.get(key)
             if lock is None:
                 lock = _SessionLock()
-                self._locks_weak[key] = lock
-            self._locks_recent[key] = lock
-            self._locks_recent.move_to_end(key)
-            while len(self._locks_recent) > self._max_recent_locks:
-                self._locks_recent.popitem(last=False)
+                weak_map[key] = lock
+            recent_map[key] = lock
+            recent_map.move_to_end(key)
+            while len(recent_map) > self._max_recent_locks:
+                recent_map.popitem(last=False)
             return lock
 
     def _resolve_path(self, session_id: str) -> Path | None:
@@ -274,9 +298,10 @@ class ChatStore:
                         continue
                     with self._cache_guard:
                         self._cache.pop(sid, None)
-                        lock = self._locks_weak.get(sid)
-                        if lock is None or not lock.locked():
-                            self._locks_recent.pop(sid, None)
+                        for weak_map, recent_map in self._all_lock_buckets_locked():
+                            lock = weak_map.get(sid)
+                            if lock is None or not lock.locked():
+                                recent_map.pop(sid, None)
                     removed += 1
             try:
                 if not any(shard.iterdir()):

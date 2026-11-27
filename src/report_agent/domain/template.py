@@ -30,7 +30,7 @@ def _subpattern_can_match_empty(subpattern: Any) -> bool:
             stack.append((cur, True))
             for op, av in cur.data:
                 name = str(op)
-                if name in ("MAX_REPEAT", "MIN_REPEAT"):
+                if name in ("MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"):
                     lo, _, body = av
                     if lo > 0 and id(body) not in memo:
                         stack.append((body, False))
@@ -38,6 +38,16 @@ def _subpattern_can_match_empty(subpattern: Any) -> bool:
                     _, _, _, body = av
                     if id(body) not in memo:
                         stack.append((body, False))
+                elif name == "ATOMIC_GROUP":
+                    body = av
+                    if id(body) not in memo:
+                        stack.append((body, False))
+                elif name == "GROUPREF_EXISTS":
+                    _, item_yes, item_no = av
+                    if id(item_yes) not in memo:
+                        stack.append((item_yes, False))
+                    if item_no is not None and id(item_no) not in memo:
+                        stack.append((item_no, False))
                 elif name == "BRANCH":
                     _, branches = av
                     for b in branches:
@@ -48,7 +58,7 @@ def _subpattern_can_match_empty(subpattern: Any) -> bool:
         can_empty = True
         for op, av in cur.data:
             name = str(op)
-            if name in ("MAX_REPEAT", "MIN_REPEAT"):
+            if name in ("MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"):
                 lo, _, body = av
                 if lo == 0 or memo.get(id(body), False):
                     continue
@@ -59,12 +69,23 @@ def _subpattern_can_match_empty(subpattern: Any) -> bool:
                 if not memo.get(id(body), False):
                     can_empty = False
                     break
+            elif name == "ATOMIC_GROUP":
+                body = av
+                if not memo.get(id(body), False):
+                    can_empty = False
+                    break
+            elif name == "GROUPREF_EXISTS":
+                _, item_yes, item_no = av
+                if item_no is None or memo.get(id(item_yes), False) or memo.get(id(item_no), False):
+                    continue
+                can_empty = False
+                break
             elif name == "BRANCH":
                 _, branches = av
                 if not any(memo.get(id(b), False) for b in branches):
                     can_empty = False
                     break
-            elif name in ("AT", "ASSERT", "ASSERT_NOT"):
+            elif name in ("AT", "ASSERT", "ASSERT_NOT", "GROUPREF"):
                 continue
             else:
                 can_empty = False
@@ -74,17 +95,17 @@ def _subpattern_can_match_empty(subpattern: Any) -> bool:
 
 
 def _has_nested_repeat(subpattern: Any) -> bool:
-    """使用标准库 re._parser 语法树检测重复量词内部嵌套重复量词的高危回溯模式。#Created By AiCoding(codex)"""
+    """使用标准库 re._parser 语法树检测重复量词内部嵌套可变重复量词的高危回溯模式。#Created By AiCoding(codex)"""
     stack: list[tuple[Any, bool]] = [(subpattern, False)]
     while stack:
         cur, in_repeat = stack.pop()
         for op, av in cur.data:
             name = str(op)
-            if name in ("MAX_REPEAT", "MIN_REPEAT"):
+            if name in ("MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"):
                 lo, hi, body = av
-                is_variable_multi = hi > 1 and lo != hi
                 is_multi = hi > 1
-                if in_repeat and (is_variable_multi or (lo == 0 and hi == 1 and _subpattern_can_match_empty(body))):
+                # 外层已处于重复循环内时，任何可变次数重复（含 0..1 即 ? 可选量词）均可能触发 (a?a)+$ 指数回溯
+                if in_repeat and lo != hi:
                     return True
                 if is_multi and _subpattern_can_match_empty(body):
                     return True
@@ -92,6 +113,14 @@ def _has_nested_repeat(subpattern: Any) -> bool:
             elif name == "SUBPATTERN":
                 _, _, _, body = av
                 stack.append((body, in_repeat))
+            elif name == "ATOMIC_GROUP":
+                body = av
+                stack.append((body, in_repeat))
+            elif name == "GROUPREF_EXISTS":
+                _, item_yes, item_no = av
+                stack.append((item_yes, in_repeat))
+                if item_no is not None:
+                    stack.append((item_no, in_repeat))
             elif name == "BRANCH":
                 _, branches = av
                 for b in branches:

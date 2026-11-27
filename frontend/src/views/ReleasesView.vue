@@ -15,11 +15,12 @@ const diffVerA = ref('')
 const diffVerB = ref('')
 
 /** 资源类型中文名 */
-const KIND_LABELS: Record<ReleaseDiffItem['kind'], string> = {
+const KIND_LABELS: Record<string, string> = {
   template: NAV_LABELS.templates,
   skill: NAV_LABELS.skills,
   api: NAV_LABELS.apis,
   'system-prompt': '系统提示词',
+  'composite-template': '汇总大模板',
 }
 
 /** 变更类型中文名 */
@@ -77,8 +78,12 @@ watch(() => store.globalReleases, () => ensureDefaultRevs(), { deep: true })
 watch(
   () => store.onlineBaselineSeq,
   () => {
+    const before = `${diffVerA.value}|${diffVerB.value}`
     ensureDefaultRevs()
-    reloadDiff()
+    // 仅当默认版本号未变时主动刷新，避免与 watch([diffVerA, diffVerB]) 重复触发两次 reloadDiff
+    if (before === `${diffVerA.value}|${diffVerB.value}`) {
+      reloadDiff()
+    }
   },
 )
 
@@ -91,21 +96,47 @@ onMounted(() => {
   if (before === `${diffVerA.value}|${diffVerB.value}`) reloadDiff()
 })
 
-/** 已删除的技能 / 接口无法再打开详情，模板下线后仍可查看 */
+/** 已删除的技能 / 接口无法再打开详情，模板与全局提示词/汇总大模板仍可查看版本历史 */
 function canOpen(row: ReleaseDiffItem) {
-  return row.change !== 'removed' || row.kind === 'template' || row.kind === 'system-prompt'
+  const kind = row.kind as string
+  return (
+    row.change !== 'removed' ||
+    kind === 'template' ||
+    kind === 'system-prompt' ||
+    kind === 'composite-template'
+  )
 }
 
 /** 跳转到某个资源的详情（发布变更 chip 与差异表共用） */
-function openResource(kind: ReleaseChange['kind'], key: string, rev = '') {
+function openResource(kind: string, key: string, rev = '') {
   if (kind === 'template') {
     void store.openTemplateWorkbench(Number(key), 'history')
   } else if (kind === 'skill') {
     void store.openSkillDetail(key)
   } else if (kind === 'api') {
     void store.openApiDetail(key, 'history')
+  } else if (kind === 'composite-template') {
+    store.settingsSubView = 'composite-template'
+    const extStore = store as unknown as {
+      settingsTargetCompositeRev?: string
+      openCompositeTemplateRollback?: (targetRev?: string) => unknown
+    }
+    if (typeof extStore.openCompositeTemplateRollback === 'function') {
+      void extStore.openCompositeTemplateRollback(rev)
+      return
+    }
+    if ('settingsTargetCompositeRev' in extStore) {
+      extStore.settingsTargetCompositeRev = rev
+    }
+    try {
+      if (rev) sessionStorage.setItem('agent-target-composite-rev', rev)
+      else sessionStorage.removeItem('agent-target-composite-rev')
+    } catch {
+      /* 忽略受限存储异常 */
+    }
+    store.navigate('settings')
   } else {
-    store.openSysPromptRollback(rev)
+    void store.openSysPromptRollback(rev)
   }
 }
 

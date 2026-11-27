@@ -1,9 +1,9 @@
 // #Created By AiCoding(codex)
 /**
  * 通用 SSE（text/event-stream）流式帧解析器：
- * - 兼容 \r\n 与 \n 换行、id:/event:/data: 多行拼接及流尾残余帧冲刷；
+ * - 遵循 WHATWG SSE 规范：兼容 \r\n 与 \n 换行、id:/event:/data: 多行拼接，仅派发包含完整空行分隔符（\n\n）的闭合帧，丢弃 EOF 未闭合断流残帧；
  * - 任何非自然流结束（onFrame 返回 true 提前终止、onFrame 抛错或 AbortSignal 取消）一律主动调用 reader.cancel() 释放底层连接；
- * - AbortSignal 触发时主动取消挂起的 reader.read() 并抛出标准 AbortError，避免调用方误判为异常断流重连；
+ * - AbortSignal 触发时主动取消挂起的 reader.read() 并统一抛出标准 AbortError，避免调用方误判为异常断流重连；
  * - 提供带异常默认的 JSON 解析辅助函数，避免单帧损坏导致整条流崩溃。
  */
 
@@ -110,7 +110,16 @@ export async function readSseStream(
       if (signal?.aborted) {
         throw createAbortError()
       }
-      const { value, done } = await reader.read()
+      let readResult: ReadableStreamReadResult<Uint8Array>
+      try {
+        readResult = await reader.read()
+      } catch (err) {
+        if (signal?.aborted) {
+          throw createAbortError()
+        }
+        throw err
+      }
+      const { value, done } = readResult
       if (signal?.aborted) {
         throw createAbortError()
       }
@@ -139,25 +148,24 @@ export async function readSseStream(
       throw createAbortError()
     }
 
+    // 遵循 WHATWG SSE 规范：流到达 EOF 后仅冲刷 UTF-8 解码器并处理已包含完整 \n\n 空行分隔符的闭合帧，
+    // 严禁将未闭合的断流半截残帧通过 flushFrame() 派发给业务层
     if (!stoppedEarly) {
       buffer += decoder.decode()
-      if (buffer.length > 0) {
-        for (const tailLine of buffer.split('\n')) {
-          if (await consumeLine(tailLine)) {
-            stoppedEarly = true
-            break
-          }
-          if (signal?.aborted) {
-            throw createAbortError()
-          }
+      let idx = buffer.indexOf('\n')
+      while (idx >= 0) {
+        const rawLine = buffer.slice(0, idx)
+        buffer = buffer.slice(idx + 1)
+        if (await consumeLine(rawLine)) {
+          stoppedEarly = true
+          break
         }
+        if (signal?.aborted) {
+          throw createAbortError()
+        }
+        idx = buffer.indexOf('\n')
       }
-      if (!stoppedEarly) {
-        await flushFrame()
-      }
-      if (signal?.aborted) {
-        throw createAbortError()
-      }
+      resetFrame()
     }
   } finally {
     signal?.removeEventListener('abort', onAbort)

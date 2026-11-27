@@ -8,15 +8,16 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { Check, Eye, Loader2, Maximize2, Minimize2, RefreshCw, Search, X } from 'lucide-vue-next'
-import type { TemplateOption } from '../types'
+import type { ChatTarget, TemplateOption } from '../types'
 import { STATUS_LABEL } from '../types'
 import { chatErrorText, listTemplates } from '../chatApi'
 import { stageToast } from '../stageToast'
-import { useStageFloatTip } from '../useStageFloatTip'
+import StageModalShell from './StageModalShell.vue'
 
 const props = defineProps<{
   visible: boolean
   sessionId: string
+  target?: ChatTarget
   currentTemplateId: number | null
   busy: boolean
   actionPending: boolean
@@ -29,10 +30,6 @@ const emit = defineEmits<{
   (e: 'preview', templateId: number): void
 }>()
 
-const cardRef = ref<HTMLElement | null>(null)
-const { tip, showTip, hideTip } = useStageFloatTip(cardRef)
-
-const isFullscreen = ref(false)
 const keyword = ref('')
 const filterMode = ref<'all' | 'online'>('all')
 const loading = ref(false)
@@ -59,14 +56,10 @@ async function loadList(silent = false) {
 }
 
 watch(
-  () => [props.visible, props.sessionId] as const,
-  ([vis, sid], prev) => {
-    if (!vis) {
-      isFullscreen.value = false
-      hideTip()
-      return
-    }
-    if (sid && (!prev || prev[1] !== sid || !allItems.value.length)) {
+  () => [props.visible, props.sessionId, props.target ?? 'online'] as const,
+  ([vis, sid, tgt], prev) => {
+    if (!vis) return
+    if (sid && (!prev || prev[1] !== sid || prev[2] !== tgt || !allItems.value.length)) {
       void loadList(false)
     } else if (sid) {
       void loadList(true)
@@ -129,20 +122,15 @@ function onUse(it: TemplateOption) {
 </script>
 
 <template>
-  <div
-    v-if="visible"
-    class="stage-modal-backdrop switch-tpl-layer"
-    :class="{ 'is-fullscreen': isFullscreen }"
-    role="dialog"
-    aria-modal="true"
+  <StageModalShell
+    :visible="visible"
     aria-label="选择核查报告模板"
-    @click.self="emit('close')"
+    layer="modal"
+    backdrop-class="switch-tpl-layer"
+    card-class="switch-tpl-card"
+    @close="emit('close')"
   >
-    <div
-      ref="cardRef"
-      class="stage-modal-card switch-tpl-card"
-      :class="{ 'is-fullscreen': isFullscreen }"
-    >
+    <template #default="{ isFullscreen, toggleFullscreen, showTip, hideTip }">
       <!-- 1. 单行 42px IDE 合并顶栏（标题 + 实时搜索 + 筛选 + 图标工具） -->
       <header class="st-header">
         <div class="st-left">
@@ -202,7 +190,7 @@ function onUse(it: TemplateOption) {
             class="eb-icon-btn is-bordered"
             :class="{ 'is-accent': isFullscreen }"
             :aria-label="isFullscreen ? '退出全屏' : '页内全屏'"
-            @click="isFullscreen = !isFullscreen"
+            @click="toggleFullscreen"
             @mouseenter="showTip($event, isFullscreen ? '退出全屏' : '页内全屏')"
             @mouseleave="hideTip"
           >
@@ -337,14 +325,8 @@ function onUse(it: TemplateOption) {
           </tbody>
         </table>
       </div>
-
-      <!-- 窗口弹窗内零依赖悬浮提示 -->
-      <div v-if="tip.visible" class="eb-float-tip" :style="tip.style">
-        <div v-if="tip.title" class="eb-float-tip-title">{{ tip.title }}</div>
-        <div>{{ tip.text }}</div>
-      </div>
-    </div>
-  </div>
+    </template>
+  </StageModalShell>
 </template>
 
 <style scoped>
@@ -360,11 +342,7 @@ function onUse(it: TemplateOption) {
   }
 }
 
-.switch-tpl-layer {
-  z-index: 1120;
-}
-
-.switch-tpl-card {
+:deep(.switch-tpl-card) {
   width: min(1020px, calc(var(--stage-w, 1280px) - 72px));
   height: calc(var(--stage-h, 720px) * 0.86);
 }

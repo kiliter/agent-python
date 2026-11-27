@@ -7,13 +7,14 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from ..runtime.evidence import scalar_to_str
+from ..domain.sanitize import sanitize_sensitive_text
 from ..runtime.regression import (
     RegressionCaseTarget,
     RegressionMode,
@@ -22,8 +23,10 @@ from ..runtime.regression import (
 )
 from ..store.cases import CaseDef, CaseStore, parse_case_scope, scope_key
 from .auth import require_user
-from .common import SSE_HEADERS, bad_request, container, not_found, operator, sse_frame
-from .dto import fmt_time
+from .common import SSE_HEADERS, bad_request, container, iter_sse_queue, not_found, operator
+from .dto import fmt_time, non_empty_expected_count, serialize_expected_value
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/regression", dependencies=[Depends(require_user)], tags=["回归测试"])
 
@@ -37,6 +40,7 @@ def _case_view(
     sc = scope_key(tid)
     exp_tid = c.expectedTemplateId
     matched_tid = c.lastMatchedTemplateId
+    non_empty = non_empty_expected_count(c.expectedValues)
     return {
         "scope": sc,
         "isAuto": tid is None,
@@ -45,7 +49,7 @@ def _case_view(
         "id": c.id,
         "name": c.name,
         "source": c.source,
-        "expectedCount": f"{len(c.expectedValues)} 项" if c.expectedValues else "—",
+        "expectedCount": f"{non_empty} 项" if non_empty else "—",
         "expectedTemplateId": exp_tid,
         "expectedTemplateName": tpl_names.get(exp_tid, f"模板 #{exp_tid}") if exp_tid else "",
         "lastMatchedTemplateId": matched_tid,
@@ -135,6 +139,7 @@ def create_global_case(request: Request, body: CreateGlobalCaseBody) -> dict[str
         raise bad_request(f"用例编号「{case_id}」已存在", "CASE_EXISTS")
     case = CaseStore.from_payload(data)
     saved = c.cases.save(tid, case)
+    c.publisher.audit("case-create", operator(request), {"scope": scope_key(tid), "caseId": saved.id})
     return _case_view(tid, saved, _template_names_map(request))
 
 
@@ -177,6 +182,11 @@ def update_global_case(
 
     dst_tid = parse_case_scope(body.targetTemplateId) if body.changeScope else src_tid
     saved = c.cases.move(src_tid, case_id, dst_tid, updated=updated)
+    c.publisher.audit(
+        "case-update",
+        operator(request),
+        {"scope": scope_key(dst_tid), "fromScope": scope_key(src_tid), "caseId": saved.id},
+    )
     return _case_view(dst_tid, saved, _template_names_map(request))
 
 
@@ -187,6 +197,7 @@ def delete_global_case(request: Request, scope: str, case_id: str) -> dict[str, 
     tid = parse_case_scope(scope)
     if not c.cases.delete(tid, case_id):
         raise not_found(f"用例 {case_id} 不存在")
+    c.publisher.audit("case-delete", operator(request), {"scope": scope_key(tid), "caseId": case_id})
     return {"deletedScope": scope_key(tid), "deletedId": case_id}
 
 
@@ -225,10 +236,8 @@ def adopt_case_baseline(
                 continue
             if body.onlyField and fname != body.onlyField:
                 continue
-            if str(f.get("status") or "") == "found":
-                raw = f.get("value")
-                val_str = ("[]" if raw == [] else f"[{len(raw)} 行]") if isinstance(raw, list) else scalar_to_str(raw).strip()
-                expected[fname] = val_str
+            if (f.get("status") or f.get("runStatus")) == "found":
+                expected[fname] = serialize_expected_value(f.get("value"))
             elif body.onlyField and fname == body.onlyField:
                 expected.pop(fname, None)
 
@@ -244,6 +253,11 @@ def adopt_case_baseline(
         "lastRunId": body.runId.strip(),
     })
     saved = c.cases.save(tid, updated)
+    c.publisher.audit(
+        "case-adopt-baseline",
+        operator(request),
+        {"scope": scope_key(tid), "caseId": saved.id, "runId": body.runId.strip(), "onlyField": body.onlyField},
+    )
     return _case_view(tid, saved, _template_names_map(request))
 
 
@@ -290,24 +304,24 @@ async def run_regression_stream(request: Request, body: RunRegressionBody):
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
-            queue.put_nowait(("error", {"code": "REGRESSION_ERROR", "message": str(exc)}))
+            log.exception("批量回归流式运行异常")
+            safe_msg = sanitize_sensitive_text(f"{type(exc).__name__}: {exc}", fallback=type(exc).__name__)
+            queue.put_nowait(("error", {"code": "REGRESSION_ERROR", "message": safe_msg}))
         finally:
             queue.put_nowait(None)
 
     async def _gen():
-        task = asyncio.create_task(_worker())
+        task: asyncio.Task[None] | None = None
         try:
-            while True:
-                item = await queue.get()
-                if item is None:
-                    break
-                ev_name, data = item
-                yield sse_frame(ev_name, data)
+            task = asyncio.create_task(_worker(), name="regression-sse-worker")
+            async for frame in iter_sse_queue(queue, terminal_kinds=()):
+                yield frame
         finally:
-            if not task.done():
-                task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+            if task is not None:
+                if not task.done():
+                    task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
 
     return StreamingResponse(_gen(), media_type="text/event-stream", headers=SSE_HEADERS)
 

@@ -15,7 +15,13 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from ..domain.api_contract import ApiContract
-from .base import ApiCallResult, decode_xml, extract_json_records, extract_records, parse_json_body, parse_xml
+from .base import (
+    ApiCallResult,
+    decode_xml,
+    merge_http_headers,
+    parse_gateway_json_response,
+    parse_gateway_response,
+)
 
 _SENSITIVE_KEY_KEYWORDS = (
     "authorization",
@@ -30,9 +36,23 @@ _SENSITIVE_KEY_KEYWORDS = (
     "credential",
     "sign",
     "signature",
+    "verify_code",
+    "verifycode",
+    "密钥",
+    "口令",
+    "密码",
+    "令牌",
+    "凭证",
+    "验证码",
 )
-_PHONE_KEY_KEYWORDS = ("mobile", "phone", "msisdn", "billid", "route_value")
+_PHONE_KEY_KEYWORDS = ("mobile", "phone", "msisdn", "billid", "bill_id", "route_value", "手机", "号码", "电话")
 _PHONE_11_RE = re.compile(r"^\d{11}$")
+_PATH_PHONE_11_RE = re.compile(r"(?<!\d)(1\d{2})\d{4}(\d{4})(?!\d)")
+_TEXT_BEARER_MASK_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._\-+/=]{6,}")
+_TEXT_SECRET_KV_RE = re.compile(
+    r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|authorization)"
+    r"(\s*[:=]\s*)(?!\$\{[^}]+\})([^\s,;'\"&]+)"
+)
 _WHOLE_PLACEHOLDER_RE = re.compile(r"^\$\{[^}]+\}$")
 
 
@@ -81,7 +101,7 @@ def mask_http_headers(headers: dict[str, str]) -> dict[str, str]:
 
 
 def mask_http_url(url: str, *, keep_unresolved: bool = False) -> str:
-    """脱敏 URL 中的认证口令与敏感 Query 参数（如 token/api_key/password/手机号）。"""
+    """脱敏 URL 中的认证口令、路径段手机号及敏感 Query 参数（如 token/api_key/password/手机号）。#Created By AiCoding(codex)"""
     if not url:
         return ""
     parsed = urlsplit(url)
@@ -93,6 +113,8 @@ def mask_http_url(url: str, *, keep_unresolved: bool = False) -> str:
             netloc = f"{user}:***@{hostport}"
         else:
             netloc = f"***@{hostport}"
+    masked_path = _PATH_PHONE_11_RE.sub(r"\1****\2", parsed.path)
+    masked_path = masked_path.replace("%2A%2A%2A%2A", "****").replace("%2A%2A%2A", "***")
     query = parsed.query
     if query:
         if keep_unresolved:
@@ -107,7 +129,8 @@ def mask_http_url(url: str, *, keep_unresolved: bool = False) -> str:
         else:
             masked_pairs = [(k, str(_mask_scalar_by_key(k, v))) for k, v in parse_qsl(query, keep_blank_values=True)]
             query = urlencode(masked_pairs, doseq=True)
-    return urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment))
+            query = query.replace("%2A%2A%2A%2A", "****").replace("%2A%2A%2A", "***")
+    return urlunsplit((parsed.scheme, netloc, masked_path, query, parsed.fragment))
 
 
 def _mask_body_tree(node: Any) -> Any:
@@ -126,17 +149,28 @@ def _mask_body_tree(node: Any) -> Any:
     return node
 
 
-def _merge_headers(defaults: dict[str, str], custom: dict[str, str]) -> dict[str, str]:
-    """合并默认请求头与契约自定义请求头（忽略大小写，以用户配置优先）。"""
-    merged = dict(defaults)
-    lower_map = {k.lower(): k for k in merged}
-    for k, v in (custom or {}).items():
-        existed = lower_map.get(k.lower())
-        if existed:
-            merged.pop(existed, None)
-        merged[k] = v
-        lower_map[k.lower()] = k
-    return merged
+def _mask_args(args: dict[str, Any]) -> dict[str, Any]:
+    """按参数键名生成脱敏后的参数副本，用于构建预览 URL Path/Query 与 text 请求体。#Created By AiCoding(codex)"""
+    masked: dict[str, Any] = {}
+    for k, v in (args or {}).items():
+        ks = str(k)
+        if isinstance(v, (dict, list)):
+            masked[ks] = _mask_body_tree(v)
+        else:
+            masked[ks] = _mask_scalar_by_key(ks, v)
+    return masked
+
+
+def _mask_plain_text_body(text: str) -> str:
+    """脱敏纯文本请求体中残留的内联凭证与 11 位手机号，保留多行格式。#Created By AiCoding(codex)"""
+    if not text:
+        return ""
+    masked = _TEXT_BEARER_MASK_RE.sub("Bearer ***", text)
+    masked = _TEXT_SECRET_KV_RE.sub(r"\1\2***", masked)
+    return _PATH_PHONE_11_RE.sub(r"\1****\2", masked)
+
+
+_merge_headers = merge_http_headers
 
 
 def _form_pairs(data: dict[str, Any]) -> list[tuple[str, str]]:
@@ -232,23 +266,28 @@ def _serialize_body(
         return (
             {"Content-Type": "text/plain; charset=utf-8", "Accept": "*/*"},
             raw_text.encode("utf-8"),
-            raw_text,
+            _mask_plain_text_body(raw_text),
         )
 
     raise ValueError(f"不支持的请求体类型：{btype}")
 
 
 def prepare_http_request(contract: ApiContract, args: dict[str, Any] | None = None) -> PreparedHttpRequest:
-    """组装真实常规 HTTP 请求（含最终 URL、完整请求头、请求体字节与脱敏预览）。"""
+    """组装真实常规 HTTP 请求（含最终 URL、完整请求头、请求体字节与脱敏预览）。#Created By AiCoding(codex)"""
     safe_args = args or {}
     final_url = contract.build_url(safe_args, keep_unresolved=False)
     custom_headers = contract.build_headers(safe_args, keep_unresolved=False)
     req_data = contract.build_request(safe_args)
     default_headers, payload_bytes, masked_body = _serialize_body(contract, req_data, keep_unresolved=False)
-    merged_headers = _merge_headers(default_headers, custom_headers)
+    merged_headers = merge_http_headers(default_headers, custom_headers)
+
+    masked_args = _mask_args(safe_args)
+    preview_raw_url = contract.build_url(masked_args, keep_unresolved=False)
+    if contract.bodyType == "text":
+        _, _, masked_body = _serialize_body(contract, contract.build_request(masked_args), keep_unresolved=False)
     preview = _format_http_preview(
         contract.method,
-        mask_http_url(final_url, keep_unresolved=False),
+        mask_http_url(preview_raw_url, keep_unresolved=False),
         mask_http_headers(merged_headers),
         masked_body,
     )
@@ -262,13 +301,14 @@ def prepare_http_request(contract: ApiContract, args: dict[str, Any] | None = No
 
 
 def build_http_request_preview(contract: ApiContract, args: dict[str, Any] | None = None) -> str:
-    """按常规 HTTP 契约生成脱敏预览报文；未传入参数保留 ${参数名} 占位符。"""
+    """按常规 HTTP 契约生成脱敏预览报文；未传入参数保留 ${参数名} 占位符。#Created By AiCoding(codex)"""
     safe_args = args or {}
-    preview_url = contract.build_url(safe_args, keep_unresolved=True)
+    masked_args = _mask_args(safe_args)
+    preview_url = contract.build_url(masked_args, keep_unresolved=True)
     custom_headers = contract.build_headers(safe_args, keep_unresolved=True)
-    req_data = contract.build_preview_request(safe_args)
+    req_data = contract.build_preview_request(masked_args if contract.bodyType == "text" else safe_args)
     default_headers, _, masked_body = _serialize_body(contract, req_data, keep_unresolved=True)
-    merged_headers = _merge_headers(default_headers, custom_headers)
+    merged_headers = merge_http_headers(default_headers, custom_headers)
     return _format_http_preview(
         contract.method,
         mask_http_url(preview_url, keep_unresolved=True),
@@ -391,13 +431,25 @@ def parse_http_response(
     charset: str | None = None,
     attempts: int = 1,
 ) -> ApiCallResult:
-    """解析常规 HTTP 响应体，按格式分发至 JSON / XML 契约抽取或纯文本响应处理。"""
+    """解析常规 HTTP 响应体，按格式分发至 JSON / XML 契约抽取或纯文本响应处理。#Created By AiCoding(codex)"""
     text = decode_xml(raw_body, charset) if isinstance(raw_body, (bytes, bytearray)) else str(raw_body)
     stripped = text.lstrip("\ufeff").strip()
 
-    # 空响应体（如 HTTP 204 No Content）处理
     if not stripped:
         resp = contract.response
+        # 显式配置了根路径 equals="" 的 noData 规则时，按无数据返回
+        for rule in resp.noData:
+            if not (rule.path or "").strip() and rule.equals == "":
+                return ApiCallResult(
+                    ok=True,
+                    records=[],
+                    http_status=status,
+                    cost_ms=cost,
+                    raw="",
+                    request_preview=preview,
+                    no_data=True,
+                    attempts=attempts,
+                )
         if resp.records.mode == "none":
             return ApiCallResult(
                 ok=True,
@@ -409,86 +461,34 @@ def parse_http_response(
                 no_data=False,
                 attempts=attempts,
             )
-        if resp.success is not None and resp.success.missingAs == "failure":
+        if status == 204:
             return ApiCallResult(
-                ok=False,
-                error=f"响应内容为空，缺少 {resp.success.path}",
+                ok=True,
+                records=[],
                 http_status=status,
                 cost_ms=cost,
                 raw="",
                 request_preview=preview,
+                no_data=True,
                 attempts=attempts,
             )
+        configured_fmt = (resp.format or "auto").lower()
+        if configured_fmt == "text":
+            return _parse_text_response(contract, text, status, cost, preview, attempts)
+        # 对声明为 json / xml（或默认 auto 结构化格式）的非 204 空响应体拒绝放行，防止下游异常空包伪造零行证据
         return ApiCallResult(
-            ok=True,
-            records=[],
+            ok=False,
+            error="响应内容为空",
             http_status=status,
             cost_ms=cost,
             raw="",
             request_preview=preview,
-            no_data=True,
             attempts=attempts,
         )
 
     fmt = detect_http_response_format(contract, text, content_type)
     if fmt == "json":
-        try:
-            data = parse_json_body(text)
-        except (Exception, RecursionError) as exc:  # noqa: BLE001
-            return ApiCallResult(
-                ok=False,
-                error=f"响应不是合法的 JSON：{exc}",
-                http_status=status,
-                cost_ms=cost,
-                raw=text[:20_000],
-                request_preview=preview,
-                attempts=attempts,
-            )
-        try:
-            result = extract_json_records(contract, data)
-        except (Exception, RecursionError) as exc:  # noqa: BLE001
-            return ApiCallResult(
-                ok=False,
-                error=f"JSON 响应解析失败：{exc}",
-                http_status=status,
-                cost_ms=cost,
-                raw=text[:20_000],
-                request_preview=preview,
-                attempts=attempts,
-            )
-        result.http_status = status
-        result.cost_ms = cost
-        if len(text) <= 200_000:
-            try:
-                pretty = json.dumps(data, ensure_ascii=False, indent=2)
-            except (Exception, RecursionError):  # noqa: BLE001
-                pretty = text
-            result.raw = pretty if len(pretty) <= 200_000 else pretty[:200_000]
-        else:
-            result.raw = text[:200_000]
-        result.request_preview = preview
-        result.attempts = attempts
-        return result
-
+        return parse_gateway_json_response(contract, text, status, cost, preview, attempts)
     if fmt == "xml":
-        try:
-            root = parse_xml(text)
-        except Exception as exc:  # noqa: BLE001
-            return ApiCallResult(
-                ok=False,
-                error=f"响应不是合法的 XML：{exc}",
-                http_status=status,
-                cost_ms=cost,
-                raw=text[:20_000],
-                request_preview=preview,
-                attempts=attempts,
-            )
-        result = extract_records(contract, root)
-        result.http_status = status
-        result.cost_ms = cost
-        result.raw = text if len(text) <= 200_000 else text[:200_000]
-        result.request_preview = preview
-        result.attempts = attempts
-        return result
-
+        return parse_gateway_response(contract, text, status, cost, preview, attempts)
     return _parse_text_response(contract, text, status, cost, preview, attempts)

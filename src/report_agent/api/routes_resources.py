@@ -28,8 +28,8 @@ from ..domain.resources import SYSTEM_PROMPT_FILE, validate_api
 from ..domain.skill import SkillScope, build_skill_markdown
 from ..gateway import unified_xml
 from ..gateway.http_client import detect_http_response_format
-from ..store.fsutil import fmt_time
-from ..store.layout import API_NAME_RE, REV_RE, SKILL_ID_RE
+from ..store.fsutil import atomic_write_text, fmt_time
+from ..store.layout import API_NAME_RE, REV_RE, SKILL_ID_RE, ResourceRef
 from ..store.runtime_config import (
     RuntimeConfigStore,
     RuntimeConfigValidationError,
@@ -183,6 +183,8 @@ def discard_skill_draft(request: Request, sid: str) -> dict[str, Any]:
     _check_skill_id(sid)
     c = container(request)
     had_draft = c.service.discard(skill_ref(sid))
+    if had_draft:
+        c.publisher.audit("discard-draft", operator(request), {"kind": "skill", "key": sid})
     online = c.service.skill_online(sid)
     if not had_draft and online is None:
         raise not_found(f"Skill {sid} 不存在")
@@ -415,6 +417,8 @@ def save_api_draft(request: Request, name: str, body: ApiDraftBody) -> dict[str,
         raise not_found(f"接口 {name} 不存在")
     text = body.yamlText
     if text is None:
+        if not body.api:
+            raise bad_request("yamlText 与 api 不能同时为空", "EMPTY_API_DRAFT")
         current = c.service.api_yaml(name)
         if current is None:
             raise not_found(f"接口 {name} 不存在")
@@ -485,6 +489,8 @@ def discard_api_draft(request: Request, name: str) -> dict[str, Any]:
     _check_api_name(name)
     c = container(request)
     had_draft = c.service.discard(api_ref(name))
+    if had_draft:
+        c.publisher.audit("discard-draft", operator(request), {"kind": "api", "key": name})
     online = c.service.api_online(name)
     if not had_draft and online is None:
         raise not_found(f"接口 {name} 不存在")
@@ -523,6 +529,7 @@ def publish_api(request: Request, name: str, body: PublishBody | None = None) ->
         "status": item["status"],
         "rev": result.entry["rev"],
         "publishedAt": fmt_time(result.entry["time"]),
+        "warnings": [w.to_dict() for w in result.warnings],
         "item": item,
     }
 
@@ -702,6 +709,92 @@ async def test_call(request: Request, name: str, body: TestCallBody) -> dict[str
     }
 
 
+# ============================================================================ 单文件设置类资源公共辅助（系统提示词 & 汇总大模板）
+def _read_single_setting_version(
+    request: Request,
+    *,
+    ref: ResourceRef,
+    file_name: str,
+    label: str,
+    version: str,
+    read_fn: Callable[[Any, str], str],
+    state_fn: Callable[[Request], dict[str, Any]],
+) -> dict[str, Any]:
+    """统一读取支持 working / online / draft / rN 的单文件平台设置资源。#Created By AiCoding(codex)"""
+    c = container(request)
+    ver = version if version != "" else "working"
+    if ver not in ("working", "online", "draft") and not REV_RE.match(ver):
+        raise bad_request(f"版本号「{version}」格式不合法", "INVALID_VERSION")
+    if ver == "draft" and not c.drafts.exists(ref):
+        raise not_found(f"{label}没有未发布的草稿版本")
+    if REV_RE.match(ver):
+        text = c.releases.read_file_at(ver, file_name)
+        if text is None:
+            raise not_found(f"{label}没有 {ver} 版本")
+    else:
+        text = read_fn(c, ver)
+    return {**state_fn(request), "version": ver, "versionText": text}
+
+
+def _publish_single_setting(
+    request: Request,
+    *,
+    ref: ResourceRef,
+    text: str | None,
+    note: str,
+    revision: Any,
+    save_fn: Callable[[Any, str, str, int | None], dict[str, Any]],
+    state_fn: Callable[[Request], dict[str, Any]],
+    include_status_alias: bool = False,
+) -> dict[str, Any]:
+    """统一处理单文件平台设置资源的可选先存草稿后发布流程。#Created By AiCoding(codex)"""
+    expected_rev = parse_expected_revision(revision)
+    c = container(request)
+    op = operator(request)
+    if text is not None:
+        save_fn(c, text, op, expected_rev)
+    if not c.drafts.exists(ref):
+        raise bad_request("没有需要发布的草稿", "NO_DRAFT")
+    result = c.service.publish_draft(ref, op, note)
+    st = state_fn(request)
+    extra = {"status": st["sysPromptStatus"]} if include_status_alias else {}
+    return {
+        **extra,
+        "rev": result.entry["rev"],
+        "publishedAt": fmt_time(result.entry["time"]),
+        "warnings": [w.to_dict() for w in result.warnings],
+        **st,
+    }
+
+
+def _discard_single_setting(
+    request: Request,
+    *,
+    ref: ResourceRef,
+    state_fn: Callable[[Request], dict[str, Any]],
+) -> dict[str, Any]:
+    c = container(request)
+    if c.service.discard(ref):
+        c.publisher.audit("discard-draft", operator(request), {"kind": ref.kind, "key": ref.key})
+    return state_fn(request)
+
+
+def _rollback_single_setting(
+    request: Request,
+    body: RollbackBody,
+    *,
+    ref: ResourceRef,
+    state_fn: Callable[[Request], dict[str, Any]],
+    include_status_alias: bool = False,
+) -> dict[str, Any]:
+    check_rollback_reason(body)
+    c = container(request)
+    result = c.service.rollback(ref, body.targetRev, body.mode, body.reason, operator(request))
+    st = state_fn(request)
+    extra = {"status": st["sysPromptStatus"]} if include_status_alias else {}
+    return {**result, **extra, **st}
+
+
 # ============================================================================ 系统提示词
 def _sp_state(request: Request) -> dict[str, Any]:
     c = container(request)
@@ -718,19 +811,15 @@ def _sp_state(request: Request) -> dict[str, Any]:
 
 @router.get("/settings/system-prompt")
 def get_system_prompt(request: Request, version: str = Query("working")) -> dict[str, Any]:
-    c = container(request)
-    ver = version if version != "" else "working"
-    if ver not in ("working", "online", "draft") and not REV_RE.match(ver):
-        raise bad_request(f"版本号「{version}」格式不合法", "INVALID_VERSION")
-    if ver == "draft" and not c.drafts.exists(SP_REF):
-        raise not_found("系统提示词没有未发布的草稿版本")
-    if REV_RE.match(ver):
-        text = c.releases.read_file_at(ver, SYSTEM_PROMPT_FILE)
-        if text is None:
-            raise not_found(f"系统提示词没有 {ver} 版本")
-    else:
-        text = c.service.system_prompt(ver)
-    return {**_sp_state(request), "version": ver, "versionText": text}
+    return _read_single_setting_version(
+        request,
+        ref=SP_REF,
+        file_name=SYSTEM_PROMPT_FILE,
+        label="系统提示词",
+        version=version,
+        read_fn=lambda c, ver: c.service.system_prompt(ver),
+        state_fn=_sp_state,
+    )
 
 
 class SysPromptBody(BaseModel):
@@ -753,35 +842,28 @@ def save_system_prompt(request: Request, body: SysPromptBody) -> dict[str, Any]:
 @router.post("/settings/system-prompt/publish")
 def publish_system_prompt(request: Request, body: SysPromptBody) -> dict[str, Any]:
     """发布系统提示词。传入 sysPromptText 时先保存为草稿再发布。"""
-    expected_rev = parse_expected_revision(body.revision)
-    c = container(request)
-    if body.sysPromptText is not None:
-        c.service.save_system_prompt(body.sysPromptText, operator(request), expected_rev)
-    if not c.drafts.exists(SP_REF):
-        raise bad_request("没有需要发布的草稿", "NO_DRAFT")
-    result = c.service.publish_draft(SP_REF, operator(request), body.note)
-    sp = _sp_state(request)
-    return {
-        "status": sp["sysPromptStatus"],
-        "rev": result.entry["rev"],
-        "publishedAt": fmt_time(result.entry["time"]),
-        **sp,
-    }
+    return _publish_single_setting(
+        request,
+        ref=SP_REF,
+        text=body.sysPromptText,
+        note=body.note,
+        revision=body.revision,
+        save_fn=lambda c, txt, op, rev: c.service.save_system_prompt(txt, op, rev),
+        state_fn=_sp_state,
+        include_status_alias=True,
+    )
 
 
 @router.post("/settings/system-prompt/discard-draft")
 def discard_system_prompt(request: Request) -> dict[str, Any]:
-    container(request).service.discard(SP_REF)
-    return _sp_state(request)
+    return _discard_single_setting(request, ref=SP_REF, state_fn=_sp_state)
 
 
 @router.post("/settings/system-prompt/rollback")
 def rollback_system_prompt(request: Request, body: RollbackBody) -> dict[str, Any]:
-    check_rollback_reason(body)
-    c = container(request)
-    result = c.service.rollback(SP_REF, body.targetRev, body.mode, body.reason, operator(request))
-    sp = _sp_state(request)
-    return {**result, "status": sp["sysPromptStatus"], **sp}
+    return _rollback_single_setting(
+        request, body, ref=SP_REF, state_fn=_sp_state, include_status_alias=True
+    )
 
 
 @router.get("/settings/system-prompt/revisions")
@@ -797,6 +879,7 @@ def _ct_state(request: Request) -> dict[str, Any]:
     working = c.service.composite_template("working", fallback_default=True)
     return {
         "templateText": working,
+        "defaultText": DEFAULT_COMPOSITE_TEMPLATE,
         "status": state.status if online_raw or state.draft else "PUBLISHED",
         "onlineText": online_raw or DEFAULT_COMPOSITE_TEMPLATE,
         "usingBuiltinDefault": not bool(online_raw) and not bool(state.draft),
@@ -809,19 +892,15 @@ def _ct_state(request: Request) -> dict[str, Any]:
 @router.get("/settings/composite-template")
 def get_composite_template(request: Request, version: str = Query("working")) -> dict[str, Any]:
     """读取复合工单汇总大模板（支持 working / online / draft / rN）。#Created By AiCoding(codex)"""
-    c = container(request)
-    ver = version if version != "" else "working"
-    if ver not in ("working", "online", "draft") and not REV_RE.match(ver):
-        raise bad_request(f"版本号「{version}」格式不合法", "INVALID_VERSION")
-    if ver == "draft" and not c.drafts.exists(CT_REF):
-        raise not_found("汇总大模板没有未发布的草稿版本")
-    if REV_RE.match(ver):
-        text = c.releases.read_file_at(ver, COMPOSITE_TEMPLATE_FILE)
-        if text is None:
-            raise not_found(f"汇总大模板没有 {ver} 版本")
-    else:
-        text = c.service.composite_template(ver, fallback_default=True)
-    return {**_ct_state(request), "version": ver, "versionText": text}
+    return _read_single_setting_version(
+        request,
+        ref=CT_REF,
+        file_name=COMPOSITE_TEMPLATE_FILE,
+        label="汇总大模板",
+        version=version,
+        read_fn=lambda c, ver: c.service.composite_template(ver, fallback_default=True),
+        state_fn=_ct_state,
+    )
 
 
 class CompositeTemplateBody(BaseModel):
@@ -843,34 +922,25 @@ def save_composite_template(request: Request, body: CompositeTemplateBody) -> di
 
 @router.post("/settings/composite-template/publish")
 def publish_composite_template(request: Request, body: CompositeTemplateBody) -> dict[str, Any]:
-    expected_rev = parse_expected_revision(body.revision)
-    c = container(request)
-    if body.templateText is not None:
-        c.service.save_composite_template(body.templateText, operator(request), expected_rev)
-    if not c.drafts.exists(CT_REF):
-        raise bad_request("没有需要发布的草稿", "NO_DRAFT")
-    result = c.service.publish_draft(CT_REF, operator(request), body.note)
-    ct = _ct_state(request)
-    return {
-        "rev": result.entry["rev"],
-        "publishedAt": fmt_time(result.entry["time"]),
-        **ct,
-    }
+    return _publish_single_setting(
+        request,
+        ref=CT_REF,
+        text=body.templateText,
+        note=body.note,
+        revision=body.revision,
+        save_fn=lambda c, txt, op, rev: c.service.save_composite_template(txt, op, rev),
+        state_fn=_ct_state,
+    )
 
 
 @router.post("/settings/composite-template/discard-draft")
 def discard_composite_template(request: Request) -> dict[str, Any]:
-    container(request).service.discard(CT_REF)
-    return _ct_state(request)
+    return _discard_single_setting(request, ref=CT_REF, state_fn=_ct_state)
 
 
 @router.post("/settings/composite-template/rollback")
 def rollback_composite_template(request: Request, body: RollbackBody) -> dict[str, Any]:
-    check_rollback_reason(body)
-    c = container(request)
-    result = c.service.rollback(CT_REF, body.targetRev, body.mode, body.reason, operator(request))
-    ct = _ct_state(request)
-    return {**result, **ct}
+    return _rollback_single_setting(request, body, ref=CT_REF, state_fn=_ct_state)
 
 
 @router.get("/settings/composite-template/revisions")
@@ -908,19 +978,55 @@ def _runtime_store(c) -> RuntimeConfigStore:
     return c.runtime_config
 
 
+def _restore_runtime_store_snapshot(
+    store: RuntimeConfigStore,
+    prev_snap: Any,
+    prev_current_text: str | None,
+    prev_index_text: str | None,
+) -> None:
+    """当 apply_runtime_config() 热生效失败时，回滚磁盘快照与内存缓存防止配置撕裂。#Created By AiCoding(codex)"""
+    with store.lock:
+        new_rev = store._active.rev if store._active is not None else None
+        store._active = prev_snap
+        store._index_cache = None
+        if new_rev and new_rev != prev_snap.rev:
+            store._public_cfg_cache.pop(new_rev, None)
+            try:
+                (store.revisions_dir / f"{new_rev}.json").unlink(missing_ok=True)
+            except OSError:
+                pass
+        if prev_current_text is not None:
+            atomic_write_text(store.current_path, prev_current_text, mode=0o600)
+        if prev_index_text is not None:
+            atomic_write_text(store.index_path, prev_index_text, mode=0o600)
+
+
 async def _apply_runtime_mutation(
     request: Request,
     mutate_fn: Callable[[Any, RuntimeConfigStore, str], tuple[dict[str, Any], bool]],
 ) -> dict[str, Any]:
-    """在工作线程执行运行配置持久化与进程内热重载，并在变更后异步释放退役网关客户端。"""
+    """在工作线程执行运行配置持久化与进程内热重载；热重载抛异常时自动回滚磁盘与内存配置。"""
     c = container(request)
     op = operator(request)
 
     def _work() -> tuple[dict[str, Any], bool]:
         store = _runtime_store(c)
+        with store.lock:
+            prev_snap = store.active()
+            prev_current_text = (
+                store.current_path.read_text(encoding="utf-8") if store.current_path.is_file() else None
+            )
+            prev_index_text = (
+                store.index_path.read_text(encoding="utf-8") if store.index_path.is_file() else None
+            )
         out, changed = mutate_fn(c, store, op)
         if changed:
-            c.apply_runtime_config()
+            try:
+                c.apply_runtime_config()
+            except BaseException:
+                _restore_runtime_store_snapshot(store, prev_snap, prev_current_text, prev_index_text)
+                request.app.state.report_keys = c.settings.report_api_key_set()
+                raise
             request.app.state.report_keys = c.settings.report_api_key_set()
         return out, changed
 

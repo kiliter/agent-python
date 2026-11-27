@@ -631,18 +631,52 @@ async function onRewriteCardConfirm(m: TextMessage) {
 }
 
 // ==================== 4. postMessage 双通道安全握手与竞态防护 ====================
-/** 锁定的上层宿主 origin：首个合法 chat-init 的 event.origin */
+/** 锁定的上层宿主 origin：首个合法 http/https chat-init 的 event.origin */
 let lockedOrigin: string | null = null
 let initReceived = false
 let readyTimer: ReturnType<typeof setInterval> | null = null
 let waitTimer: ReturnType<typeof setTimeout> | null = null
 /** 每次 chat-init 递增，丢弃过期的异步会话初始化结果 */
 let initGen = 0
+let disposed = false
 
-/** 优先取 iframe 父窗口 window.parent，独立新窗口打开时回退 window.opener */
-function getHostWindow(): Window | null {
-  if (window.parent && window.parent !== window) return window.parent
-  if (window.opener && !window.opener.closed) return window.opener as Window
+/** 严格校验 origin 必须是合法 http: 或 https: 源（拒绝 'null'、空串、file: 等非标准源） */
+function isValidHttpOrigin(origin: string | null | undefined): origin is string {
+  if (!origin || origin === 'null') return false
+  try {
+    const parsed = new URL(origin)
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && parsed.origin === origin
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 获取受信任宿主窗口与目标 Origin：
+ * 1. iframe 嵌入模式优先取 window.parent；
+ * 2. 顶层打开且存在 window.opener 时，仅在同源校验通过后才允许回退兼容同源模拟页，
+ *    严禁向未知跨源 window.opener 使用 '*' 通配符广播 userId / orderId。
+ */
+function getHostWindow(): { win: Window; readyTargetOrigin: string } | null {
+  if (window.parent && window.parent !== window) {
+    return {
+      win: window.parent,
+      readyTargetOrigin: lockedOrigin && isValidHttpOrigin(lockedOrigin) ? lockedOrigin : '*',
+    }
+  }
+  if (window.opener && !window.opener.closed) {
+    try {
+      const openerWin = window.opener as Window
+      if (
+        openerWin.location.origin === window.location.origin &&
+        isValidHttpOrigin(window.location.origin)
+      ) {
+        return { win: openerWin, readyTargetOrigin: window.location.origin }
+      }
+    } catch {
+      /* 跨源 window.opener 访问 location 抛异常时直接拒绝，防止跨源泄露 */
+    }
+  }
   return null
 }
 
@@ -650,7 +684,7 @@ function sendReady() {
   const host = getHostWindow()
   if (!host) return
   try {
-    host.postMessage({ type: 'chat-ready', userId, orderId }, '*')
+    host.win.postMessage({ type: 'chat-ready', userId, orderId }, host.readyTargetOrigin)
   } catch {
     /* 忽略跨域关闭异常 */
   }
@@ -663,19 +697,19 @@ function stopHandshake() {
   waitTimer = null
 }
 
-/** 回传给父窗口：严格限定发往已锁定的 origin（沙箱 'null' origin 退化为 '*'） */
+/** 回传给父窗口：严格限定发往已验证锁定的 http/https origin，绝不使用 '*' 通配符广播 */
 function postToParent(data: Record<string, unknown>) {
   const host = getHostWindow()
-  if (!host || !lockedOrigin) return
+  if (!host || !isValidHttpOrigin(lockedOrigin)) return
   try {
-    host.postMessage(data, lockedOrigin === 'null' ? '*' : lockedOrigin)
+    host.win.postMessage(data, lockedOrigin)
   } catch (err) {
     console.warn('postMessage 失败', err)
   }
 }
 
 function requestCloseWindow() {
-  if (getHostWindow() && lockedOrigin) {
+  if (getHostWindow() && isValidHttpOrigin(lockedOrigin)) {
     postToParent({ type: 'chat-close-request' })
   } else {
     stageToast.info('已发送关闭请求（当前为独立预览窗口，可直接关闭浏览器标签页）')
@@ -684,8 +718,9 @@ function requestCloseWindow() {
 
 function onWindowMessage(event: MessageEvent) {
   const host = getHostWindow()
-  // 严格校验消息来源为 window.parent（或独立弹窗宿主），拒绝任意无关窗口伪造消息
-  if (!host || event.source !== host) return
+  // 严格校验消息来源为受信任宿主窗口，且 event.origin 为合法 http:/https: 源
+  if (!host || event.source !== host.win) return
+  if (!isValidHttpOrigin(event.origin)) return
   const data = event.data as Partial<ChatInitMessage> | null
   if (!data || typeof data !== 'object' || data.type !== 'chat-init') return
   if (lockedOrigin && event.origin !== lockedOrigin) return
@@ -977,20 +1012,37 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
   })
 }
 
+/** 当运行事件流不可恢复中断时，将本地挂起的 RUNNING 卡片降级为 INTERRUPTED 并释放 activeRunId 防止 busy 永久死锁 */
+function degradeStuckRunToInterrupted(targetRunId: string, fallbackReason?: string) {
+  const r = findRun(targetRunId)
+  if (r && r.status === 'RUNNING') {
+    r.status = 'INTERRUPTED'
+    if (!r.error) {
+      r.error = fallbackReason || '运行事件流连接中断，未能获取最终核查结果'
+    }
+  }
+  if (session.value?.activeRunId === targetRunId) {
+    session.value.activeRunId = null
+  }
+}
+
 function subscribeRun(runId: string) {
   if (!runId || runStreams.has(runId)) return
+  const sid = session.value?.sessionId || ''
   const ctrl = new AbortController()
   runStreams.set(runId, ctrl)
   void (async () => {
     let failures = 0
+    let gotFinal = false
+    let exitErrorText = ''
     try {
-      while (!ctrl.signal.aborted) {
+      while (!ctrl.signal.aborted && !disposed) {
         const run = findRun(runId)
         const after = run ? run.steps.reduce((mx, s) => Math.max(mx, s.seq), 0) : 0
         const existingRaw = rawEventsMap[runId] || []
         const rawAfter = existingRaw.reduce((mx, e) => Math.max(mx, e.seq || 0), 0)
         try {
-          const gotFinal = await api.streamRunEvents(
+          gotFinal = await api.streamRunEvents(
             runId,
             after,
             {
@@ -1023,22 +1075,45 @@ function subscribeRun(runId: string) {
             ctrl.signal,
             { includeRaw: true, rawAfter },
           )
-          if (gotFinal || ctrl.signal.aborted) break
+          if (gotFinal || ctrl.signal.aborted || disposed) break
         } catch (err) {
-          if (isAbortError(err) || ctrl.signal.aborted) break
+          if (isAbortError(err) || ctrl.signal.aborted || disposed) break
           if (err instanceof ChatApiError && err.status >= 400 && err.status < 500) {
+            exitErrorText = err.message
             stageToast.error(`获取运行进度失败：${err.message}`)
             break
           }
+          exitErrorText = chatErrorText(err)
         }
         failures += 1
         reconnectingMap[runId] = true
         if (failures > 8) {
           reconnectingMap[runId] = false
-          stageToast.warning('运行进度连接多次中断，请稍后刷新查看最新结果')
+          stageToast.warning('运行进度连接多次中断，正在同步会话最新状态')
           break
         }
         await sleep(Math.min(1000 * failures, 5000), ctrl.signal)
+      }
+
+      // 退出重试循环且未正常收到 final（含 4xx 跳出、event: error 抛错或重连耗尽）时，
+      // 主动拉取一次服务端会话同步状态；若拉取失败或仍卡在 RUNNING，降级为 INTERRUPTED 并清空 activeRunId 防死锁
+      if (!disposed && !ctrl.signal.aborted && !gotFinal) {
+        if (sid && session.value?.sessionId === sid) {
+          try {
+            const latestSession = await api.getSession(sid)
+            if (!disposed && !ctrl.signal.aborted && session.value?.sessionId === sid) {
+              // 此时 runStreams 仍持有 runId 占位，applySession 内对同一 runId 的 subscribeRun 会自动短路避免死循环
+              applySession(latestSession)
+              degradeStuckRunToInterrupted(runId, exitErrorText)
+            }
+          } catch {
+            if (!disposed && !ctrl.signal.aborted) {
+              degradeStuckRunToInterrupted(runId, exitErrorText)
+            }
+          }
+        } else {
+          degradeStuckRunToInterrupted(runId, exitErrorText)
+        }
       }
     } finally {
       delete reconnectingMap[runId]
@@ -1066,6 +1141,7 @@ async function sendChat(text: string, auto = false) {
   }
   const ctrl = new AbortController()
   msgAbort = ctrl
+  let userMsgPersisted = false
   try {
     await api.sendMessage(
       s.sessionId,
@@ -1077,14 +1153,19 @@ async function sendChat(text: string, auto = false) {
         },
         onMessage: m => {
           if (ctrl.signal.aborted || msgAbort !== ctrl) return
+          if (m.role === 'user') userMsgPersisted = true
           upsertMessage(m)
         },
         onError: e => {
           if (ctrl.signal.aborted || msgAbort !== ctrl) return
           stageToast.error(e.message || '处理失败')
+          if (!auto && text && !userMsgPersisted) {
+            chatInputRef.value?.restoreText(text)
+          }
         },
         onDone: snap => {
           if (ctrl.signal.aborted || msgAbort !== ctrl) return
+          userMsgPersisted = true
           if (snap) applySession(snap)
         },
       },
@@ -1093,6 +1174,9 @@ async function sendChat(text: string, auto = false) {
   } catch (err) {
     if (!isAbortError(err) && !ctrl.signal.aborted && msgAbort === ctrl) {
       stageToast.error(`发送失败：${chatErrorText(err)}`)
+      if (!auto && text && !userMsgPersisted) {
+        chatInputRef.value?.restoreText(text)
+      }
     }
   } finally {
     if (localId) {
@@ -1398,16 +1482,9 @@ function formatTime(iso: string): string {
 
 function onGlobalKeydown(e: KeyboardEvent) {
   if (e.key !== 'Escape') return
+  // 严格按照视觉层级从高到低依次判断关闭：确认框(1280) -> 结构预览(1220) -> 业务弹窗(1160) -> 顶栏浮层(90)
   if (confirmDialog.visible) {
     closeConfirmDialog(false)
-    return
-  }
-  if (inputsPanelOpen.value) {
-    inputsPanelOpen.value = false
-    return
-  }
-  if (memoryPanelOpen.value) {
-    memoryPanelOpen.value = false
     return
   }
   if (tplStructureId.value !== null) {
@@ -1425,6 +1502,14 @@ function onGlobalKeydown(e: KeyboardEvent) {
   }
   if (compositeDialogVisible.value) {
     compositeDialogVisible.value = false
+    return
+  }
+  if (inputsPanelOpen.value) {
+    inputsPanelOpen.value = false
+    return
+  }
+  if (memoryPanelOpen.value) {
+    memoryPanelOpen.value = false
   }
 }
 
@@ -1460,6 +1545,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  disposed = true
   resizeObserver?.disconnect()
   resizeObserver = null
   window.removeEventListener('resize', measureViewport)
@@ -2057,6 +2143,7 @@ onBeforeUnmount(() => {
       <SwitchTemplateDialog
         :visible="switchTplVisible"
         :session-id="session?.sessionId || ''"
+        :target="session?.target || 'online'"
         :current-template-id="activeTemplateId"
         :busy="busy"
         :action-pending="actionPending"
@@ -2069,6 +2156,8 @@ onBeforeUnmount(() => {
       <CompositeRunDialog
         :visible="compositeDialogVisible"
         :session-id="session?.sessionId || ''"
+        :target="session?.target || 'online'"
+        :refresh-key="libraryRefreshKey"
         :session-inputs="session?.inputs || {}"
         :session-items="sessionItems"
         :busy="busy"
@@ -2323,7 +2412,7 @@ onBeforeUnmount(() => {
 .popover-click-mask {
   position: absolute;
   inset: 0;
-  z-index: 80;
+  z-index: var(--z-popover-mask, 80);
   background: transparent;
 }
 
@@ -2333,7 +2422,7 @@ onBeforeUnmount(() => {
   right: 14px;
   width: min(500px, calc(100% - 28px));
   max-height: calc(100% - 64px);
-  z-index: 90;
+  z-index: var(--z-popover, 90);
   background: #ffffff;
   border: 1px solid var(--gpt-border);
   border-radius: 10px;

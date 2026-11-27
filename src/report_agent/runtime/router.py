@@ -18,11 +18,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai import (
     Agent,
     ModelRetry,
-    NativeOutput,
-    PromptedOutput,
     RunContext,
     Tool,
-    ToolOutput,
     UnexpectedModelBehavior,
     UsageLimitExceeded,
     UsageLimits,
@@ -30,9 +27,11 @@ from pydantic_ai import (
 from pydantic_ai.exceptions import AgentRunError, ModelAPIError
 
 from ..domain.resources import ResourceSet
+from ..domain.sanitize import sanitize_sensitive_text
 from ..domain.skill import SkillParseError, normalize_skill_doc_path
 from ..domain.template import Template
-from .tools import render_skill_doc_block, render_skill_docs_index
+from .model_factory import build_output_spec
+from .tools import collect_doc_requests, render_skill_doc_block, render_skill_docs_index
 from .workspace import EventSink
 
 if TYPE_CHECKING:
@@ -130,14 +129,7 @@ def _resolve_chat_skill(
         msg = f"当前未配置 {req_name}，请使用 list_templates 查看在线模板"
         return msg, False, {"skill": req_name, "error": msg}
 
-    raw_docs: list[str] = []
-    if doc and str(doc).strip():
-        raw_docs.append(str(doc).strip())
-    if docs:
-        for item in docs:
-            if item is not None and str(item).strip():
-                raw_docs.append(str(item).strip())
-    raw_docs = list(dict.fromkeys(raw_docs))
+    raw_docs = collect_doc_requests(doc, docs)
     if raw_docs:
         available = sorted(skill.docs)
         if not available:
@@ -371,14 +363,7 @@ async def _route_load_skill(
     """
     deps = ctx.deps
     req_name = (name or ROUTER_SKILL_NAME).strip() or ROUTER_SKILL_NAME
-    raw_docs: list[str] = []
-    if doc and str(doc).strip():
-        raw_docs.append(str(doc).strip())
-    if docs:
-        for item in docs:
-            if item is not None and str(item).strip():
-                raw_docs.append(str(item).strip())
-    raw_docs = list(dict.fromkeys(raw_docs))
+    raw_docs = collect_doc_requests(doc, docs)
 
     if raw_docs:
         rec_args: dict[str, Any] = (
@@ -509,18 +494,6 @@ def _build_route_context_instructions(deps: RouteDeps, output_mode: str, setting
 {submit_hint}"""
 
 
-def _build_route_output_spec(mode: str, strict: bool) -> Any:
-    if mode == "native":
-        return NativeOutput(TemplateRouteDecision, name="submit_route_decision", strict=strict)
-    if mode in ("json_object", "prompted"):
-        return PromptedOutput(TemplateRouteDecision, name="submit_route_decision")
-    return ToolOutput(
-        TemplateRouteDecision,
-        name="submit_route_decision",
-        description="提交自动路由匹配结果（matched、templateId、confidence、reason 与最多 3 个候选模板）。",
-    )
-
-
 # ============================================================================ 无状态模板路由器
 class TemplateRouter:
     """无状态模板路由器：复用 AgentRunner 的运行期模型快照并按 seq 缓存 Pydantic AI Agent。#Created By AiCoding(codex)"""
@@ -542,7 +515,12 @@ class TemplateRouter:
         rt_model_settings: Any,
     ) -> tuple[Agent[RouteDeps, TemplateRouteDecision], float]:
         mode = rt_settings.agent_output_mode
-        output = _build_route_output_spec(mode, rt_settings.agent_native_strict)
+        output = build_output_spec(
+            TemplateRouteDecision,
+            name="submit_route_decision",
+            description="提交自动路由匹配结果（matched、templateId、confidence、reason 与最多 3 个候选模板）。",
+            settings=rt_settings,
+        )
 
         agent: Agent[RouteDeps, TemplateRouteDecision] = Agent(
             rt_model,
@@ -717,7 +695,11 @@ class TemplateRouter:
             events.emit("route_failed", runId=run_id, error=err_msg, reason=err_msg, candidates=[])
             raise TemplateRouteError(err_msg, reason=err_msg, candidates=[]) from exc
         except (UsageLimitExceeded, UnexpectedModelBehavior, ModelAPIError, AgentRunError) as exc:
-            err_msg = f"自动模板路由失败：{exc}"
+            err_msg = sanitize_sensitive_text(f"自动模板路由失败：{exc}")
+            events.emit("route_failed", runId=run_id, error=err_msg, reason=err_msg, candidates=[])
+            raise TemplateRouteError(err_msg, reason=err_msg, candidates=[]) from exc
+        except Exception as exc:  # noqa: BLE001 - 兜底未知异常并确保发射 route_failed 事件与脱敏错误
+            err_msg = sanitize_sensitive_text(f"自动模板路由失败：{type(exc).__name__} {exc}".strip())
             events.emit("route_failed", runId=run_id, error=err_msg, reason=err_msg, candidates=[])
             raise TemplateRouteError(err_msg, reason=err_msg, candidates=[]) from exc
 

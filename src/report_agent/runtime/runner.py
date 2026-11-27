@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict, deque
+from contextlib import suppress
 import dataclasses
 import itertools
 import json
@@ -19,7 +20,7 @@ from datetime import datetime
 from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
-from pydantic_ai import (Agent, ModelRetry, NativeOutput, PromptedOutput, RunContext, TextPart, ToolOutput,
+from pydantic_ai import (Agent, ModelRetry, RunContext, TextPart,
                          UnexpectedModelBehavior, UsageLimitExceeded, UsageLimits)
 from pydantic_ai.exceptions import AgentRunError, ModelAPIError
 from pydantic_ai.messages import ModelResponse, ToolCallPart
@@ -27,6 +28,7 @@ from pydantic_ai.messages import ModelResponse, ToolCallPart
 from ..config import Settings
 from ..domain.jinja_env import render_body
 from ..domain.resources import ResourceSet
+from ..domain.sanitize import sanitize_sensitive_text
 from ..domain.template import Template
 from ..gateway.base import GatewayClient
 from ..store.releases import ReleaseStore
@@ -42,7 +44,7 @@ from .evidence import (
     locate_quote_in_document,
     scalar_to_str,
 )
-from .model_factory import build_model, build_model_settings
+from .model_factory import build_model, build_model_settings, build_output_spec
 from .output_model import build_report_model, report_to_dict
 from .prompt import USER_PROMPT, build_task_instructions
 from .render import field_render
@@ -200,6 +202,11 @@ def _cascade_degraded_fields(
     ws = deps.workspace if deps is not None else None
     inputs = deps.inputs if deps is not None else None
     doc_idx = get_document_index(deps.workspace, deps.document) if deps is not None else None
+    fields_by_name = (
+        {f.name: f for f in deps.template.definition.fields}
+        if deps is not None and deps.template is not None
+        else {}
+    )
     while True:
         valid_found = {
             k
@@ -237,8 +244,9 @@ def _cascade_degraded_fields(
                 msg = f"引用的前置字段（{'、'.join(bad_failed_refs)}）校验未通过已降级，衍生结论同步降级"
                 newly_failed.append((fname, msg))
             elif not_found_refs:
+                fdef = fields_by_name.get(fname)
                 val = ans.get("value")
-                is_empty_list = isinstance(val, list) and len(val) == 0
+                is_empty_list = fdef is not None and fdef.is_list and isinstance(val, list) and len(val) == 0
                 if not has_supporting_real_source(
                     raw_ev,
                     valid_found,
@@ -293,7 +301,7 @@ def _salvage_partial_report(candidate: dict[str, Any], report_model: type[BaseMo
                 parsed: Any = ann.model_validate(raw_ans)
             else:
                 parsed = TypeAdapter(ann).validate_python(raw_ans)
-            salvaged[f.name] = parsed.model_dump(mode="json") if isinstance(parsed, BaseModel) else dict(parsed)
+            salvaged[f.name] = parsed.model_dump(by_alias=True, mode="json") if isinstance(parsed, BaseModel) else dict(parsed)
         except ValidationError as ve:
             msg = "字段结构不合法：" + "；".join(e.get("msg", "格式错误") for e in ve.errors()[:3])
             issues.append(FieldIssue(f.name, msg))
@@ -317,6 +325,7 @@ def _salvage_partial_report(candidate: dict[str, Any], report_model: type[BaseMo
     if issue_dicts:
         deps.workspace.validation_rounds.append(issue_dicts)
     if failed:
+        deps.workspace.degraded_fields.update(failed)
         deps.events.emit("report_degraded", attempt=max(1, len(deps.workspace.validation_rounds)),
                          issues=issue_dicts, fields=sorted(failed))
     else:
@@ -368,24 +377,30 @@ class _DynamicLimiter:
             self._inflight += 1
             fut.set_result(None)
 
-    def set_limit(self, limit: int) -> None:
-        self._limit = max(1, int(limit))
+    def _apply_limit_on_loop(self, new_limit: int) -> None:
+        self._limit = new_limit
         self._prune_waiters()
-        loop = self._waiters[0].get_loop() if self._waiters else self._loop
-        if loop is not None and not loop.is_closed() and loop.is_running():
-            try:
-                running = asyncio.get_running_loop()
-            except RuntimeError:
-                running = None
-            if running is loop:
-                self._wake_waiters()
-            else:
-                try:
-                    loop.call_soon_threadsafe(self._wake_waiters)
-                except RuntimeError:
-                    self._wake_waiters()
-        else:
-            self._wake_waiters()
+        self._wake_waiters()
+
+    def set_limit(self, limit: int) -> None:
+        new_limit = max(1, int(limit))
+        loop = self._loop
+        if loop is None:
+            self._limit = new_limit
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            self._apply_limit_on_loop(new_limit)
+            return
+        if not loop.is_closed() and loop.is_running():
+            with suppress(RuntimeError):
+                loop.call_soon_threadsafe(self._apply_limit_on_loop, new_limit)
+                return
+        # 目标事件循环已关闭或未在运行：仅更新配额数值，绝不在外部线程直接操作 deque / Future
+        self._limit = new_limit
 
     async def __aenter__(self) -> _DynamicLimiter:
         loop = asyncio.get_running_loop()
@@ -501,15 +516,12 @@ class AgentRunner:
         rt_model = self.model if model is None else model
         rt_model_settings = self.model_settings if model_settings is None else model_settings
         rt_tools = self._tools if tools is None else tools
-        mode = rt_settings.agent_output_mode
-        if mode == "native":
-            output: Any = NativeOutput(report_model, name="submit_report",
-                                       strict=rt_settings.agent_native_strict)
-        elif mode in ("json_object", "prompted"):
-            output = PromptedOutput(report_model, name="submit_report")
-        else:
-            output = ToolOutput(report_model, name="submit_report",
-                                description="提交全部字段的结论与证据。所有字段都有结论后调用一次。")
+        output = build_output_spec(
+            report_model,
+            name="submit_report",
+            description="提交全部字段的结论与证据。所有字段都有结论后调用一次。",
+            settings=rt_settings,
+        )
         agent: Agent[RunDeps, Any] = Agent(
             rt_model,
             deps_type=RunDeps,
@@ -534,6 +546,7 @@ class AgentRunner:
                 # 重试用完：不通过的字段及引用它们的下游衍生字段按“找不到”处理，其余字段照常使用
                 failed = _degrade_failed_fields(report, issues)
                 _cascade_degraded_fields(report, failed, issues, deps=deps)
+                deps.workspace.degraded_fields.update(failed)
                 issue_dicts = [i.to_dict() for i in issues]
                 deps.workspace.validation_rounds.append(issue_dicts)
                 deps.events.emit("report_degraded", attempt=attempt, issues=issue_dicts, fields=sorted(failed))
@@ -666,25 +679,25 @@ class AgentRunner:
         except TimeoutError:
             error = f"运行超时（超过 {rt_settings.agent_run_timeout_s:.0f} 秒）"
         except UsageLimitExceeded as exc:
-            error = f"超过运行上限：{exc}"
+            error = sanitize_sensitive_text(f"超过运行上限：{exc}")
         except UnexpectedModelBehavior as exc:
             candidate = _extract_candidate_report(active_run, {f.name for f in tpl.definition.fields})
             if candidate is not None:
-                log.warning("模型交卷重试耗尽，触发字段级降级 runId=%s：%s", run_id, exc)
+                log.warning("模型交卷重试耗尽，触发字段级降级 runId=%s：%s", run_id, sanitize_sensitive_text(exc))
                 report = _salvage_partial_report(candidate, report_model, deps)
             else:
-                error = f"模型输出异常：{exc}"
+                error = sanitize_sensitive_text(f"模型输出异常：{exc}")
         except ModelAPIError as exc:
-            error = f"大模型调用失败：{exc}"
+            error = sanitize_sensitive_text(f"大模型调用失败：{exc}")
         except AgentRunError as exc:
-            error = f"智能体运行失败：{exc}"
+            error = sanitize_sensitive_text(f"智能体运行失败：{exc}")
         except asyncio.CancelledError as exc:
             # #Created By AiCoding(codex) 被调用方取消（聊天窗口「停止」）：照常写入运行记录后再向上原样重抛取消异常
             cancelled_exc = exc
             error = "运行已取消"
-        except Exception as exc:  # noqa: BLE001 - 兜底，保证运行记录完整
+        except Exception as exc:  # noqa: BLE001 - 兜底，保证运行记录完整且对外消息脱敏
             log.exception("智能体运行异常 runId=%s", run_id)
-            error = f"内部错误：{type(exc).__name__} {exc}"
+            error = sanitize_sensitive_text(f"内部错误：{type(exc).__name__} {exc}".strip())
 
         src = result if result is not None else active_run
         if src is not None:
@@ -723,8 +736,7 @@ class AgentRunner:
         tpl = deps.template
         ws = deps.workspace
         retried = {i["field"] for rnd in ws.validation_rounds for i in rnd if isinstance(i, dict) and "field" in i}
-        degraded_fields = {f for e in deps.events.events if e.type == "report_degraded"
-                           for f in (e.data.get("fields") or [])}
+        degraded_fields = ws.degraded_fields
         fields_out: list[dict[str, Any]] = []
         context: dict[str, Any] = {}
         for f in tpl.definition.fields:
@@ -741,7 +753,10 @@ class AgentRunner:
             if not fr.found:
                 ev_list = []
             context[f.name] = fr.context_value
-            label, target = _evidence_label(ev_list, ws, deps.document, value=_value_hint(fr.value), report=report)
+            label, target = _evidence_label(
+                ev_list, ws, deps.document, value=_value_hint(fr.value),
+                report=report, degraded_fields=degraded_fields,
+            )
             fo = {
                 "name": f.name, "visible": f.visible, "type": f.type, "evidenceType": f.evidence,
                 "whenMissing": f.whenMissing, "status": "found" if fr.found else "not_found", "value": fr.value,
@@ -759,7 +774,7 @@ class AgentRunner:
         try:
             report_text, used = render_body(tpl.body, context)
         except Exception as exc:  # noqa: BLE001 - 草稿正文可能有错误
-            render_error = f"正文渲染失败：{exc}"
+            render_error = sanitize_sensitive_text(f"正文渲染失败：{exc}")
         by_name = {f.name: f for f in tpl.definition.fields}
         missing_shown = [fo["name"] for fo in fields_out
                          if fo["name"] in used and by_name[fo["name"]].visible and fo["status"] == "not_found"
@@ -818,10 +833,17 @@ def _value_hint(value: Any) -> str | None:
     return scalar_to_str(value) or None
 
 
-def _evidence_label(evidence: list[dict[str, Any]], ws: Workspace, document: str,
-                    value: str | None = None, report: dict[str, dict[str, Any]] | None = None,
-                    _seen: set[str] | None = None) -> tuple[str, dict[str, Any]]:
-    """生成给人看的证据说明，以及前端定位用的 evidenceTarget。"""
+def _collect_evidence_label(
+    evidence: list[dict[str, Any]],
+    ws: Workspace,
+    document: str,
+    *,
+    value: str | None = None,
+    report: dict[str, dict[str, Any]] | None = None,
+    degraded_fields: set[str],
+    seen: set[str] | None = None,
+) -> tuple[str, dict[str, Any] | None]:
+    """内部递归收集证据标签与定位目标（无具体目标时返回 None，避免前置 field 证据兜底把后续真实证据短路）。#Created By AiCoding(codex)"""
     labels: list[str] = []
     target: dict[str, Any] | None = None
     doc_idx = get_document_index(ws, document)
@@ -874,15 +896,49 @@ def _evidence_label(evidence: list[dict[str, Any]], ws: Workspace, document: str
         elif t == "field":
             ref_name = str(e.get("name") or "")
             labels.append(f"字段[{ref_name}]")
-            if target is None and report and ref_name in report:
-                seen = set(_seen or set())
-                if ref_name not in seen:
-                    seen.add(ref_name)
+            if target is None and report and ref_name in report and ref_name not in degraded_fields:
+                next_seen = set(seen or set())
+                if ref_name not in next_seen:
+                    next_seen.add(ref_name)
                     ref_ans = report.get(ref_name)
-                    if isinstance(ref_ans, dict) and isinstance(ref_ans.get("evidence"), list) and ref_ans["evidence"]:
-                        _, sub_target = _evidence_label(
-                            ref_ans["evidence"], ws, document,
-                            value=_value_hint(ref_ans.get("value")), report=report, _seen=seen,
+                    if (
+                        isinstance(ref_ans, dict)
+                        and ref_ans.get("status") == "found"
+                        and isinstance(ref_ans.get("evidence"), list)
+                        and ref_ans["evidence"]
+                    ):
+                        _, sub_target = _collect_evidence_label(
+                            ref_ans["evidence"],
+                            ws,
+                            document,
+                            value=_value_hint(ref_ans.get("value")),
+                            report=report,
+                            degraded_fields=degraded_fields,
+                            seen=next_seen,
                         )
                         target = sub_target
-    return (" + ".join(labels), target or {"tab": "doc"})
+    return (" + ".join(labels), target)
+
+
+def _evidence_label(
+    evidence: list[dict[str, Any]],
+    ws: Workspace,
+    document: str,
+    value: str | None = None,
+    report: dict[str, dict[str, Any]] | None = None,
+    _seen: set[str] | None = None,
+    *,
+    degraded_fields: set[str] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """生成给人看的证据说明，以及前端定位用的 evidenceTarget。"""
+    eff_degraded = ws.degraded_fields if degraded_fields is None else degraded_fields
+    label, target = _collect_evidence_label(
+        evidence,
+        ws,
+        document,
+        value=value,
+        report=report,
+        degraded_fields=eff_degraded,
+        seen=_seen,
+    )
+    return (label, target or {"tab": "doc"})

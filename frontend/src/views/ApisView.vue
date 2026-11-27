@@ -4,7 +4,7 @@
   #Created By AiCoding(codex)
 -->
 <script setup lang="ts">
-import { ref, computed, reactive, watch } from 'vue'
+import { ref, computed, reactive, watch, onBeforeUnmount } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import YAML from 'yaml'
 import { buildDiffRows, type DiffRow } from '@/utils/textDiff'
@@ -232,10 +232,71 @@ function onVisualYamlUpdate(nextVal: string) {
   yamlText.value = nextVal
 }
 
+interface LiveApiMeta {
+  protoKind: 'HTTP' | 'JSON' | 'XML'
+  isJson: boolean
+  isHttp: boolean
+  title: string
+  processCode: string
+  method: string
+  url: string
+  params: ApiParamItem[]
+  columns: Record<string, string>
+}
+
+/** 对大 YAML 编辑器输入做轻量防抖与错误缓存保护，避免连续击键同步解析阻塞主线程 */
+const debouncedYamlForMeta = ref(store.apiYamlText)
+let metaDebounceTimer: ReturnType<typeof setTimeout> | null = null
+let lastInvalidYaml = ''
+let lastValidMetaCache: { apiName: string; meta: LiveApiMeta } | null = null
+
+function clearMetaDebounceTimer() {
+  if (metaDebounceTimer !== null) {
+    clearTimeout(metaDebounceTimer)
+    metaDebounceTimer = null
+  }
+}
+
+function flushLiveMeta() {
+  clearMetaDebounceTimer()
+  if (debouncedYamlForMeta.value !== store.apiYamlText) {
+    debouncedYamlForMeta.value = store.apiYamlText
+  }
+}
+
+watch(
+  () => store.selectedApiName,
+  () => {
+    clearMetaDebounceTimer()
+    lastInvalidYaml = ''
+    lastValidMetaCache = null
+    debouncedYamlForMeta.value = store.apiYamlText
+  },
+)
+
+watch(
+  () => store.apiYamlText,
+  nextVal => {
+    clearMetaDebounceTimer()
+    if (!nextVal || !nextVal.trim()) {
+      debouncedYamlForMeta.value = nextVal
+      return
+    }
+    metaDebounceTimer = setTimeout(() => {
+      metaDebounceTimer = null
+      debouncedYamlForMeta.value = nextVal
+    }, 160)
+  },
+)
+
+onBeforeUnmount(() => {
+  clearMetaDebounceTimer()
+})
+
 /** 从当前实时 YAML 源码中无损提取协议类型、标题、交易编码/URL、入参与列映射（支持未保存即试调用） */
-const liveMeta = computed(() => {
+const liveMeta = computed<LiveApiMeta>(() => {
   const fallbackKind = getApiProtoKind(api.value)
-  const fallbackMeta = {
+  const fallbackMeta: LiveApiMeta = {
     protoKind: fallbackKind,
     isJson: fallbackKind === 'JSON',
     isHttp: fallbackKind === 'HTTP',
@@ -246,9 +307,14 @@ const liveMeta = computed(() => {
     params: api.value.params || [],
     columns: {} as Record<string, string>,
   }
-  const raw = store.apiYamlText
+  const raw = debouncedYamlForMeta.value
   if (!raw || !raw.trim()) {
     return fallbackMeta
+  }
+  if (raw === lastInvalidYaml) {
+    return lastValidMetaCache?.apiName === store.selectedApiName
+      ? lastValidMetaCache.meta
+      : fallbackMeta
   }
 
   try {
@@ -314,7 +380,7 @@ const liveMeta = computed(() => {
       })
     }
 
-    // 动态解析 response.records.columns
+    // 动态解析 response.records.columns（同时兼容简写 response.columns）
     const columns: Record<string, string> = {}
     const respObj =
       doc.response && typeof doc.response === 'object' && !Array.isArray(doc.response)
@@ -327,7 +393,9 @@ const liveMeta = computed(() => {
     const colsObj =
       recObj?.columns && typeof recObj.columns === 'object' && !Array.isArray(recObj.columns)
         ? (recObj.columns as Record<string, unknown>)
-        : null
+        : respObj?.columns && typeof respObj.columns === 'object' && !Array.isArray(respObj.columns)
+          ? (respObj.columns as Record<string, unknown>)
+          : null
     if (colsObj) {
       for (const [k, v] of Object.entries(colsObj)) {
         if (k && k !== 'row') {
@@ -336,7 +404,7 @@ const liveMeta = computed(() => {
       }
     }
 
-    return {
+    const nextMeta: LiveApiMeta = {
       protoKind,
       isJson: protoKind === 'JSON',
       isHttp: protoKind === 'HTTP',
@@ -347,8 +415,14 @@ const liveMeta = computed(() => {
       params,
       columns,
     }
+    lastInvalidYaml = ''
+    lastValidMetaCache = { apiName: store.selectedApiName, meta: nextMeta }
+    return nextMeta
   } catch {
-    return fallbackMeta
+    lastInvalidYaml = raw
+    return lastValidMetaCache?.apiName === store.selectedApiName
+      ? lastValidMetaCache.meta
+      : fallbackMeta
   }
 })
 
@@ -375,6 +449,7 @@ watch(
 
 /** 发起试调用：未保存的可视化或 YAML 修改会直接用于本次调用 */
 async function handleRunTestCall() {
+  flushLiveMeta()
   const missing = effectiveApiParams.value.filter(
     p => p.required && !String(testParams[p.name] || '').trim(),
   )
@@ -485,7 +560,7 @@ const recordColumns = computed<Array<{ key: string; label: string }>>(() => {
   return orderedKeys.map(k => ({ key: k, label: mergedLabels[k] || '' }))
 })
 
-/** ⚡ 将试调用返回记录字段一键同步合并至 store.apiYamlText 的 response.records.columns */
+/** ⚡ 将试调用返回记录字段一键同步合并至 store.apiYamlText（使用 YAML AST 保留全部中文注释与排版） */
 function handleSyncColumnsToContract() {
   if (visualEditorRef.value && typeof visualEditorRef.value.syncColumnsFromTestResult === 'function') {
     const count = visualEditorRef.value.syncColumnsFromTestResult()
@@ -503,49 +578,63 @@ function handleSyncColumnsToContract() {
     return
   }
 
-  let parsed: unknown
-  try {
-    parsed = YAML.parse(store.apiYamlText || '')
-  } catch {
+  const docAst: YAML.Document = YAML.parseDocument(store.apiYamlText || '')
+  if (docAst.errors.length > 0) {
     store.showToast('当前 API YAML 存在语法错误，请先在编辑器修复后再同步列映射', 'warning')
     return
   }
 
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+  if (!docAst.contents) {
+    docAst.contents = docAst.createNode({})
+  }
+  if (!YAML.isMap(docAst.contents)) {
     store.showToast('当前 API YAML 顶层结构无效，无法同步列映射', 'warning')
     return
   }
 
-  const doc = parsed as Record<string, unknown>
-  if (!doc.response || typeof doc.response !== 'object' || Array.isArray(doc.response)) {
-    doc.response = {}
+  const respNode = docAst.get('response', true)
+  if (!YAML.isMap(respNode)) {
+    docAst.set('response', docAst.createNode({}))
   }
-  const respObj = doc.response as Record<string, unknown>
-  if (!respObj.records || typeof respObj.records !== 'object' || Array.isArray(respObj.records)) {
-    respObj.records = { path: '' }
+
+  // 优先遵循标准 response.records.columns 结构；若原契约仅声明了简写 response.columns 则原地更新该节点
+  const useFlatResponseColumns =
+    docAst.hasIn(['response', 'columns']) && !docAst.hasIn(['response', 'records'])
+  const colPath = useFlatResponseColumns
+    ? (['response', 'columns'] as const)
+    : (['response', 'records', 'columns'] as const)
+
+  if (!useFlatResponseColumns) {
+    const recordsNode = docAst.getIn(['response', 'records'], true)
+    if (!YAML.isMap(recordsNode)) {
+      docAst.setIn(['response', 'records'], docAst.createNode({ path: '' }))
+    }
   }
-  const recordsObj = respObj.records as Record<string, unknown>
-  const existingCols =
-    recordsObj.columns && typeof recordsObj.columns === 'object' && !Array.isArray(recordsObj.columns)
-      ? ({ ...(recordsObj.columns as Record<string, string>) } as Record<string, string>)
-      : ({} as Record<string, string>)
+
+  const colsNode = docAst.getIn(colPath, true)
+  if (!YAML.isMap(colsNode)) {
+    docAst.setIn(colPath, docAst.createNode({}))
+  }
 
   let addedCount = 0
   const resCols = testResult.value?.columns || {}
   for (const key of keys) {
-    if (!(key in existingCols) || !String(existingCols[key] ?? '').trim()) {
-      existingCols[key] = resCols[key] || key
+    const curVal = docAst.getIn([...colPath, key])
+    if (curVal === undefined || curVal === null || !String(curVal).trim()) {
+      docAst.setIn([...colPath, key], resCols[key] || key)
       addedCount += 1
     }
   }
 
-  recordsObj.columns = existingCols
-  const nextYaml = YAML.stringify(doc, { indent: 2, lineWidth: 0 })
-  store.setApiYaml(nextYaml)
-
   if (addedCount > 0) {
+    const finalColsNode = docAst.getIn(colPath, true)
+    const totalCols = YAML.isMap(finalColsNode) ? finalColsNode.items.length : keys.length
+    const nextYaml = docAst.toString({ lineWidth: 0 })
+    if (yamlEditorRef.value) yamlEditorRef.value.resetEdit(nextYaml, true)
+    else store.setApiYaml(nextYaml)
+    flushLiveMeta()
     store.showToast(
-      `已将 ${addedCount} 个返回字段同步至列映射（共 ${Object.keys(existingCols).length} 列），可切至「配置编辑」完善中文列名`,
+      `已将 ${addedCount} 个返回字段同步至列映射（共 ${totalCols} 列），可切至「配置编辑」完善中文列名`,
     )
   } else {
     store.showToast(`返回的 ${keys.length} 个字段已全部在列映射中，无需重复添加`, 'info')

@@ -14,11 +14,17 @@ import type {
   TemplateOption,
   TemplatePreview,
 } from './types'
+import {
+  ADMIN_SESSION_TOKEN_KEY,
+  extractApiErrorInfo,
+  isAbortError,
+  normalizeApiBase,
+} from '@/utils/httpCore'
 import { readSseStream } from '@/utils/sse'
 
-const API_BASE = `${import.meta.env.VITE_API_BASE_URL || 'api/v1'}/chat`
-/** 管理端登录 token 的 sessionStorage 键（同源模拟页默认鉴权） */
-const ADMIN_TOKEN_KEY = 'agent-python-token'
+export { isAbortError }
+
+const API_BASE = `${normalizeApiBase(import.meta.env.VITE_API_BASE_URL, '/api/v1')}/chat`
 
 /** 后端错误：status 为 HTTP 状态码，code / message 来自后端统一错误格式，其余字段放在 details */
 export class ChatApiError extends Error {
@@ -41,8 +47,8 @@ export function chatErrorText(err: unknown): string {
   return String(err)
 }
 
-export function isAbortError(err: unknown): boolean {
-  return (err as { name?: string } | null)?.name === 'AbortError'
+function isPlainRecord(val: unknown): val is Record<string, unknown> {
+  return !!val && typeof val === 'object' && !Array.isArray(val)
 }
 
 /** apiKey 与当前会话 sessionId 仅保存在内存中 */
@@ -57,25 +63,29 @@ export function setSessionId(sid: string) {
   currentSessionId = (sid || '').trim()
 }
 
-/** 读取管理端登录令牌：依次尝试当前窗口 → window.parent → window.opener 的 sessionStorage（跨域时自动忽略） */
+/** 读取管理端登录令牌：依次尝试当前窗口 → window.parent → 同源 window.opener 的 sessionStorage（跨域时自动忽略） */
 function readAdminToken(): string | null {
   try {
-    const token = sessionStorage.getItem(ADMIN_TOKEN_KEY)
+    const token = sessionStorage.getItem(ADMIN_SESSION_TOKEN_KEY)
     if (token) return token
   } catch {
     /* 第三方 iframe 禁用存储时忽略 */
   }
   try {
     if (window.parent && window.parent !== window) {
-      const parentToken = window.parent.sessionStorage.getItem(ADMIN_TOKEN_KEY)
+      const parentToken = window.parent.sessionStorage.getItem(ADMIN_SESSION_TOKEN_KEY)
       if (parentToken) return parentToken
     }
   } catch {
     /* 跨域嵌入访问父窗口 sessionStorage 受限时自动忽略 */
   }
   try {
-    if (window.opener && !window.opener.closed) {
-      const openerToken = (window.opener as Window).sessionStorage.getItem(ADMIN_TOKEN_KEY)
+    if (
+      window.opener &&
+      !window.opener.closed &&
+      (window.opener as Window).location.origin === window.location.origin
+    ) {
+      const openerToken = (window.opener as Window).sessionStorage.getItem(ADMIN_SESSION_TOKEN_KEY)
       if (openerToken) return openerToken
     }
   } catch {
@@ -98,25 +108,14 @@ function authHeaders(): Record<string, string> {
 }
 
 async function parseError(resp: Response): Promise<ChatApiError> {
-  let body: Record<string, unknown> = {}
+  let rawText = ''
   try {
-    body = (await resp.json()) as Record<string, unknown>
+    rawText = await resp.text()
   } catch {
-    /* 非 JSON 错误体 */
+    /* 读取错误体失败 */
   }
-  // 兼容 FastAPI 默认的 {detail: {...}} 包装
-  const detail = body.detail
-  if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
-    body = { ...(detail as Record<string, unknown>), ...body }
-    delete body.detail
-  }
-  const { code, message, ...rest } = body as { code?: string; message?: string }
-  return new ChatApiError(
-    resp.status,
-    code || `HTTP_${resp.status}`,
-    message || (typeof detail === 'string' ? detail : `请求失败（HTTP ${resp.status}）`),
-    rest,
-  )
+  const { code, message, details } = extractApiErrorInfo(resp.status, rawText)
+  return new ChatApiError(resp.status, code, message, details)
 }
 
 async function doFetch(path: string, init: RequestInit): Promise<Response> {
@@ -226,13 +225,22 @@ export async function sendMessage(
   await readSse(
     resp,
     ev => {
-      const data = ev.data as Record<string, unknown>
-      if (ev.event === 'status') handlers.onStatus?.(String(data?.text ?? ''))
-      else if (ev.event === 'message') handlers.onMessage?.(data as unknown as ChatMessage)
-      else if (ev.event === 'error')
-        handlers.onError?.({ code: String(data?.code ?? 'ERROR'), message: String(data?.message ?? '处理失败') })
-      else if (ev.event === 'done') {
-        handlers.onDone?.(data?.session as ChatSession)
+      const data = isPlainRecord(ev.data) ? ev.data : null
+      if (ev.event === 'status') {
+        handlers.onStatus?.(String(data?.text ?? (typeof ev.data === 'string' ? ev.data : '')))
+      } else if (ev.event === 'message') {
+        if (data && typeof data.id === 'string' && typeof data.kind === 'string') {
+          handlers.onMessage?.(data as unknown as ChatMessage)
+        }
+      } else if (ev.event === 'error') {
+        handlers.onError?.({
+          code: String(data?.code ?? 'ERROR'),
+          message: String(data?.message ?? (typeof ev.data === 'string' && ev.data ? ev.data : '处理失败')),
+        })
+      } else if (ev.event === 'done') {
+        if (data && isPlainRecord(data.session)) {
+          handlers.onDone?.(data.session as unknown as ChatSession)
+        }
         return true
       }
       return false
@@ -332,11 +340,32 @@ export async function streamRunEvents(
   await readSse(
     resp,
     ev => {
-      if (ev.event === 'step') handlers.onStep(ev.data as RunStep)
-      else if (ev.event === 'raw') handlers.onRaw?.(ev.data as RawProcessEvent)
-      else if (ev.event === 'final') {
+      if (ev.event === 'error') {
+        const payload = isPlainRecord(ev.data) ? ev.data : {}
+        const status = typeof payload.status === 'number' && payload.status > 0 ? payload.status : 400
+        const code = typeof payload.code === 'string' && payload.code ? payload.code : 'STREAM_ERROR'
+        const message =
+          typeof payload.message === 'string' && payload.message
+            ? payload.message
+            : typeof ev.data === 'string' && ev.data.trim()
+              ? ev.data.trim()
+              : '运行过程事件流返回异常'
+        throw new ChatApiError(status, code, message, payload)
+      }
+      if (ev.event === 'step') {
+        if (isPlainRecord(ev.data) && typeof ev.data.seq === 'number') {
+          handlers.onStep(ev.data as unknown as RunStep)
+        }
+      } else if (ev.event === 'raw') {
+        if (isPlainRecord(ev.data)) {
+          handlers.onRaw?.(ev.data as unknown as RawProcessEvent)
+        }
+      } else if (ev.event === 'final') {
+        if (!isPlainRecord(ev.data) || typeof ev.data.id !== 'string' || typeof ev.data.kind !== 'string') {
+          throw new ChatApiError(500, 'INVALID_FINAL_EVENT', '运行结束事件格式不合法')
+        }
         gotFinal = true
-        handlers.onFinal(ev.data as ChatMessage)
+        handlers.onFinal(ev.data as unknown as ChatMessage)
         return true
       }
       return false

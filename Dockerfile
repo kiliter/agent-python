@@ -54,4 +54,7 @@ ENV DATA_DIR=/data \
 USER 2000
 EXPOSE 8000
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD ["python", "-c", "import os, sys, urllib.request; port = os.environ.get('PORT', '8000'); r = urllib.request.urlopen(f'http://127.0.0.1:{port}/healthz', timeout=3); sys.exit(0 if r.status == 200 else 1)"]
+
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

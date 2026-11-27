@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import threading
 from dataclasses import dataclass, field
@@ -30,6 +31,14 @@ from .layout import META_FILE, DataLayout, ResourceRef, copy_resource, ensure_wi
 from .releases import ReleaseStore
 
 log = logging.getLogger(__name__)
+_TRAILER_BREAK_RE = re.compile(r"[\r\n\x00-\x08\x0b\x0c\x0e-\x1f\x7f]+")
+
+
+def _clean_trailer_value(raw: str | None) -> str:
+    """将 Git 提交标题与 Trailer 字段中的换行符及控制字符折叠为单行空格，防止 Trailer 伪造。"""
+    if not raw:
+        return ""
+    return _TRAILER_BREAK_RE.sub(" ", raw).strip()
 
 ChangeAction = Literal["publish", "rollback", "offline", "delete"]
 
@@ -146,10 +155,13 @@ class Publisher:
 
                 repo_touched = True
                 replace_dir_contents(self.repo.path, build, keep={".git"})
-                message = f"{summary}\n\nRelease: {rev}\nBase: {base_rev or '-'}\nOperator: {operator}\n"
-                if note:
-                    message += f"Note: {note}\n"
-                commit = self.repo.commit_all(message, operator)
+                clean_summary = _clean_trailer_value(summary) or f"{type_label} {rev}"
+                clean_operator = _clean_trailer_value(operator) or "system"
+                clean_note = _clean_trailer_value(note)
+                message = f"{clean_summary}\n\nRelease: {rev}\nBase: {base_rev or '-'}\nOperator: {clean_operator}\n"
+                if clean_note:
+                    message += f"Note: {clean_note}\n"
+                commit = self.repo.commit_all(message, clean_operator)
                 entry = {
                     "rev": rev,
                     "n": n,
@@ -204,7 +216,8 @@ class Publisher:
                 raise PublishError([Issue("error", "NO_DRAFT", f"{ch.ref.label()} 没有草稿", ch.ref.kind, ch.ref.key)])
             self.drafts.apply_to_tree(ch.ref, build)
         elif ch.source == "tree" and ch.source_dir is not None:
-            copy_resource(ch.source_dir, build, ch.ref)
+            extra_ignore = {OFFLINE_FILE, ".offline.json"} if ch.action == "rollback" else None
+            copy_resource(ch.source_dir, build, ch.ref, ignore_names=extra_ignore)
 
     def emergency_switch(self, rev: str, operator: str, reason: str) -> None:
         """紧急把线上切到某个历史版本，不生成新版本。"""

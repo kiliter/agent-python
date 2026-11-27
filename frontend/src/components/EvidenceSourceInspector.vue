@@ -3,6 +3,7 @@
 import { ref, computed, watch, nextTick } from 'vue'
 import { Database, FileText, Wrench } from 'lucide-vue-next'
 import { usePlatformStore } from '@/stores/platform'
+import { formatRunFieldSummary, getApiResultColumns } from '@/utils/fieldFormat'
 import type { ApiResult, TemplateField } from '@/types/platform'
 import StatusTag from './StatusTag.vue'
 import SvgIcon from './SvgIcon.vue'
@@ -37,15 +38,7 @@ const highlightApiResultIds = computed(() => {
 /** 当前定位字段的值状态简述（区分合法空列表 0 行 vs 缺失列表） #Created By AiCoding(codex) */
 const activeFieldValueSummary = computed(() => {
   const f = activeEvField.value
-  if (!f) return ''
-  if (f.type === '列表') {
-    if (f.runStatus === 'found') {
-      const n = Array.isArray(f.runRows) ? f.runRows.length : (f.runValue || '').trim() === '[]' ? 0 : -1
-      return n === 0 ? '无记录（0 行）' : n > 0 ? `已找到（共 ${n} 行）` : f.runValue || '已找到'
-    }
-    return '缺失（未取到列表结果）'
-  }
-  return f.runStatus === 'found' ? f.runValue || '已找到' : '未找到'
+  return f ? formatRunFieldSummary(f, 'inspector') : ''
 })
 
 /** 接口结果中需要高亮的行：键为 resultId#row，值为该行被引用的列 */
@@ -73,11 +66,31 @@ const quoteLines = computed(() =>
     .filter(Boolean),
 )
 
+/** 判断单据某一行是否为 evidenceTarget 精确指定的目标行（优先于短词文本子串匹配） */
+function isPrimaryDocTarget(line: number): boolean {
+  const t = activeEvField.value?.evidenceTarget
+  return Boolean(t?.tab === 'doc' && t.line === line)
+}
+
 /** 判断单据某一行是否需要高亮 */
 function isDocLineHighlighted(line: number, text: string): boolean {
-  const t = activeEvField.value?.evidenceTarget
-  if (t?.tab === 'doc' && t.line === line) return true
+  if (isPrimaryDocTarget(line)) return true
   return quoteLines.value.some(q => text.includes(q))
+}
+
+function isPrimaryApiBlockTarget(resultId: string): boolean {
+  const t = activeEvField.value?.evidenceTarget
+  return Boolean(t?.tab === 'api' && t.resultId === resultId)
+}
+
+function isPrimaryApiRowTarget(resultId: string, row: number): boolean {
+  const t = activeEvField.value?.evidenceTarget
+  return Boolean(t?.tab === 'api' && t.resultId === resultId && t.row === row)
+}
+
+function isPrimaryInputTarget(key: string): boolean {
+  const t = activeEvField.value?.evidenceTarget
+  return Boolean(t?.tab === 'input' && t.key === key)
 }
 
 /** 被引用的入参键 */
@@ -109,13 +122,9 @@ const inputEntries = computed(() => Object.entries(run.value?.inputs ?? {}))
 const toolCalls = computed(() => run.value?.toolCalls ?? [])
 const inputToolCount = computed(() => inputEntries.value.length + toolCalls.value.length)
 
-/** 接口结果表的列：优先用接口定义的列，否则取所有记录键的并集（不含 row） */
+/** 接口结果表的列：优先用接口定义的列，否则取所有记录键的并集（WeakMap 缓存避免重复遍历） */
 function resultColumns(res: ApiResult): string[] {
-  const defined = Object.keys(res.columns ?? {})
-  if (defined.length) return defined
-  const set = new Set<string>()
-  ;(res.records ?? []).forEach(r => Object.keys(r).forEach(k => k !== 'row' && set.add(k)))
-  return [...set]
+  return getApiResultColumns(res)
 }
 
 /** 单元格文本 */
@@ -149,14 +158,15 @@ function compactJson(v: unknown): string {
   }
 }
 
-/** 切换字段、页签或运行时，自动滚动到第一个高亮位置 */
+/** 切换字段、重复点击同一字段、切页签或切换运行时，优先滚动到精确坐标命中行，防止 "1"/"是" 等短词滚到无关首部行 */
 watch(
-  () => [store.activeEvidenceKey, store.inspectorTab, run.value?.runId],
+  () => [store.activeEvidenceKey, store.inspectorTab, run.value?.runId, store.evidenceLocateSeq],
   () => {
     nextTick(() => {
-      const target = scrollBodyRef.value?.querySelector(
-        '.evidence-highlight-mark, .row-highlight',
-      ) as HTMLElement | null
+      const container = scrollBodyRef.value
+      if (!container) return
+      const target = (container.querySelector('.is-primary-evidence-target') ||
+        container.querySelector('.evidence-highlight-mark, .row-highlight')) as HTMLElement | null
       target?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
     })
   },
@@ -261,6 +271,8 @@ watch(
             :class="{
               'api-block-highlight row-highlight':
                 res.records.length === 0 && highlightApiResultIds.has(res.resultId),
+              'is-primary-evidence-target':
+                res.records.length === 0 && isPrimaryApiBlockTarget(res.resultId),
             }"
           >
             <div class="insp-api-meta">
@@ -292,7 +304,10 @@ watch(
                   <tr
                     v-for="r in res.records"
                     :key="r.row"
-                    :class="{ 'row-highlight': isRowHighlighted(res.resultId, r.row) }"
+                    :class="{
+                      'row-highlight': isRowHighlighted(res.resultId, r.row),
+                      'is-primary-evidence-target': isPrimaryApiRowTarget(res.resultId, r.row),
+                    }"
                   >
                     <td class="mono" style="font-weight: 600">#{{ r.row }}</td>
                     <td
@@ -346,7 +361,10 @@ watch(
               v-for="d in run.documentLines"
               :key="d.line"
               class="code-line"
-              :class="{ 'row-highlight is-doc-hl': isDocLineHighlighted(d.line, d.text) }"
+              :class="{
+                'row-highlight is-doc-hl': isDocLineHighlighted(d.line, d.text),
+                'is-primary-evidence-target': isPrimaryDocTarget(d.line),
+              }"
             >
               <div class="code-gutter">{{ d.line }}</div>
               <div class="code-content">
@@ -376,7 +394,10 @@ watch(
               <tr
                 v-for="[k, v] in inputEntries"
                 :key="k"
-                :class="{ 'row-highlight': highlightInputKeys.has(k) }"
+                :class="{
+                  'row-highlight': highlightInputKeys.has(k),
+                  'is-primary-evidence-target': isPrimaryInputTarget(k),
+                }"
               >
                 <td class="mono" style="font-weight: 600">{{ k }}</td>
                 <td class="mono">

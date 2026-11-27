@@ -13,20 +13,30 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import secrets
 import shutil
 import threading
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 from ..domain.resources import ResourceSet, load_resource_dir
-from .fsutil import append_jsonl, atomic_symlink, atomic_write_bytes, read_jsonl, write_json
+from .fsutil import (
+    append_jsonl,
+    atomic_symlink,
+    atomic_write_bytes,
+    read_json,
+    read_jsonl,
+    unlink_or_rmtree,
+    write_json,
+)
 from .git_repo import GitRepo
-from .layout import REV_RE, DataLayout, ResourceRef, ensure_within
+from .layout import META_FILE, REV_RE, DataLayout, ResourceRef, ensure_within, is_valid_resource_key
 
 log = logging.getLogger(__name__)
+_DRAFT_TMP_RE = re.compile(r"^\.(?P<key>.+)\.[0-9]+\.[0-9a-fA-F]+\.(?P<ext>tmp|bak)$")
 
 
 class ReleaseNotFound(KeyError):
@@ -45,6 +55,7 @@ class ReleaseStore:
         self._by_rev: dict[str, dict[str, Any]] | None = None
         self._entries_sig: tuple[int, int] | None = None
         self._snapshots: OrderedDict[str, ResourceSet] = OrderedDict()
+        self._loading_revs: dict[str, int] = {}
         self._snap_lock = threading.Lock()
 
     def _index_sig(self) -> tuple[int, int]:
@@ -118,18 +129,20 @@ class ReleaseStore:
 
     # ------------------------------------------------------------------ 快照
     def ensure_materialized(self, rev: str) -> Path:
-        """确保版本目录存在；已被清理的版本从 Git 提交重新导出（线程安全）。"""
+        """确保版本目录完整存在；已被清理或缺失 .release.json 的版本从 Git 提交重新导出（线程安全）。"""
         entry = self.entry(rev)
         path = self.layout.release_dir(rev)
-        if path.exists():
+        if (path / ".release.json").is_file():
             return path
         with self.lock:
-            if path.exists():
+            if (path / ".release.json").is_file():
                 return path
             tmp = self.layout.releases / f".restore-{rev}-{os.getpid()}-{secrets.token_hex(4)}"
             try:
                 self.repo.export(entry["commit"], tmp)
                 write_json(tmp / ".release.json", entry)
+                if os.path.lexists(path):
+                    unlink_or_rmtree(path, ignore_errors=True)
                 os.replace(tmp, path)
             except BaseException:
                 shutil.rmtree(tmp, ignore_errors=True)
@@ -138,17 +151,38 @@ class ReleaseStore:
             return path
 
     def snapshot(self, rev: str) -> ResourceSet:
-        """读取某个版本的资源集合（带进程内缓存，版本不可变所以缓存永不过期）。"""
+        """读取某个版本的资源集合（带进程内缓存；加载期间钉住版本号防 prune 并发误删，写缓存前复核完整性）。"""
         with self._snap_lock:
             if rev in self._snapshots:
                 self._snapshots.move_to_end(rev)
                 return self._snapshots[rev]
-        rs = load_resource_dir(self.ensure_materialized(rev))
-        with self._snap_lock:
-            self._snapshots[rev] = rs
-            while len(self._snapshots) > 8:
-                self._snapshots.popitem(last=False)
-        return rs
+        with self.lock:
+            path = self.ensure_materialized(rev)
+            with self._snap_lock:
+                if rev in self._snapshots:
+                    self._snapshots.move_to_end(rev)
+                    return self._snapshots[rev]
+                self._loading_revs[rev] = self._loading_revs.get(rev, 0) + 1
+        try:
+            rs = load_resource_dir(path)
+            if not (path / ".release.json").is_file():
+                with self.lock:
+                    path = self.ensure_materialized(rev)
+                    rs = load_resource_dir(path)
+            with self._snap_lock:
+                if (path / ".release.json").is_file():
+                    self._snapshots[rev] = rs
+                    self._snapshots.move_to_end(rev)
+                    while len(self._snapshots) > 8:
+                        self._snapshots.popitem(last=False)
+            return rs
+        finally:
+            with self._snap_lock:
+                rem = self._loading_revs.get(rev, 1) - 1
+                if rem <= 0:
+                    self._loading_revs.pop(rev, None)
+                else:
+                    self._loading_revs[rev] = rem
 
     def live_snapshot(self) -> tuple[str, ResourceSet]:
         """请求开始时调用一次：返回（线上版本号，资源集合）。"""
@@ -250,14 +284,16 @@ class ReleaseStore:
             atomic_symlink(rev, self.layout.current)
 
     def prune(self) -> None:
-        """只保留最近 keep 个版本目录和线上版本目录（先原子重命名再删除，避免与无锁读并发半删冲突）。"""
+        """只保留最近 keep 个版本目录、线上版本及正在加载的版本（先原子重命名再删除，避免并发读半删冲突）。"""
         with self.lock:
             live = self.live_rev()
             revs = [e["rev"] for e in self.entries()]
-            keep = set(revs[-self.keep:]) | ({live} if live else set())
+            with self._snap_lock:
+                pinned = set(self._loading_revs)
+            keep_revs = (set(revs[-self.keep:]) if self.keep > 0 else set()) | ({live} if live else set()) | pinned
             for rev in revs:
                 path = self.layout.release_dir(rev)
-                if rev not in keep and path.exists():
+                if rev not in keep_revs and path.exists():
                     trash = self.layout.releases / f".prune-{rev}-{os.getpid()}-{secrets.token_hex(4)}"
                     try:
                         os.replace(path, trash)
@@ -266,22 +302,70 @@ class ReleaseStore:
                     else:
                         shutil.rmtree(trash, ignore_errors=True)
 
-    def recover(self) -> None:
-        """启动时清理未完成的构建目录、恢复目录、淘汰目录与临时草稿目录，并确保线上版本目录存在。"""
-        for pattern in (".build-*", ".restore-*", ".prune-*"):
-            for tmp in self.layout.releases.glob(pattern):
-                shutil.rmtree(tmp, ignore_errors=True)
-        if self.layout.drafts.exists():
-            for kind_dir in self.layout.drafts.iterdir():
-                if not kind_dir.is_dir():
+    def _recover_draft_dirs(self) -> None:
+        """恢复在两段式 os.replace 中间崩溃中断的完整草稿，并清理其余残留 .tmp / .bak 目录。"""
+        if not self.layout.drafts.exists():
+            return
+        for kind_dir in self.layout.drafts.iterdir():
+            if kind_dir.is_symlink() or not kind_dir.is_dir():
+                continue
+            kind = kind_dir.name
+            candidates_by_key: dict[str, list[tuple[tuple[int, int], Path]]] = defaultdict(list)
+            stale_entries: list[Path] = []
+            for entry in kind_dir.iterdir():
+                if not (entry.name.startswith(".") and entry.name.endswith((".tmp", ".bak"))):
                     continue
-                for tmp in kind_dir.iterdir():
-                    if tmp.name.startswith(".") and (tmp.name.endswith(".tmp") or tmp.name.endswith(".bak")):
-                        shutil.rmtree(tmp, ignore_errors=True)
-        live = self.live_rev()
-        if live and self.has(live):
-            self.ensure_materialized(live)
-        elif self.entries():
-            last = self.entries()[-1]["rev"]
-            log.warning("线上指针缺失或无效，指向最新版本 %s", last)
-            self.switch(last)
+                stale_entries.append(entry)
+                if entry.is_symlink() or not entry.is_dir():
+                    continue
+                m = _DRAFT_TMP_RE.match(entry.name)
+                if not m:
+                    continue
+                key = m.group("key")
+                ext = m.group("ext")
+                if not is_valid_resource_key(kind, key):
+                    continue
+                meta = read_json(entry / META_FILE)
+                if not isinstance(meta, dict):
+                    continue
+                try:
+                    rev_num = int(meta.get("revision") or 0)
+                except (TypeError, ValueError):
+                    rev_num = 0
+                priority = (rev_num, 1 if ext == "tmp" else 0)
+                candidates_by_key[key].append((priority, entry))
+
+            for key, items in candidates_by_key.items():
+                target = kind_dir / key
+                if os.path.lexists(target):
+                    continue
+                items.sort(key=lambda pair: pair[0], reverse=True)
+                best_dir = items[0][1]
+                try:
+                    os.replace(best_dir, target)
+                    log.warning("启动恢复找回中断的草稿目录 %s/%s（源自 %s）", kind, key, best_dir.name)
+                except OSError:
+                    log.exception("恢复中断草稿目录失败 %s -> %s", best_dir, target)
+
+            for entry in stale_entries:
+                if os.path.lexists(entry):
+                    unlink_or_rmtree(entry, ignore_errors=True)
+
+    def recover(self) -> None:
+        """启动时清理残留锁与未完成构建/淘汰目录，安全恢复中断草稿，并确保线上版本目录存在。"""
+        with self.lock:
+            git_lock = self.repo.path / ".git" / "index.lock"
+            if os.path.lexists(git_lock):
+                log.warning("启动恢复发现残留 Git 锁文件 %s，已自动清理", git_lock)
+                unlink_or_rmtree(git_lock, ignore_errors=True)
+            for pattern in (".build-*", ".restore-*", ".prune-*"):
+                for tmp in self.layout.releases.glob(pattern):
+                    unlink_or_rmtree(tmp, ignore_errors=True)
+            self._recover_draft_dirs()
+            live = self.live_rev()
+            if live and self.has(live):
+                self.ensure_materialized(live)
+            elif self.entries():
+                last = self.entries()[-1]["rev"]
+                log.warning("线上指针缺失或无效，指向最新版本 %s", last)
+                self.switch(last)

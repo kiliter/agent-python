@@ -339,32 +339,52 @@ const scopeHintText = computed(() => {
   return '仅对显式勾选了本技能的填报模板生效'
 })
 
-/** 切换作用域：无损更新 SKILL.md YAML Frontmatter 中的 scope 字段（可 Ctrl+Z 撤销） */
+/** 切换作用域：使用 YAML.parseDocument 无损更新 SKILL.md Frontmatter 中的 scope 字段（保留其余字段、注释与正文） */
 function handleChangeSkillScope(nextScope: 'template' | 'global' | 'chat') {
   if (liveSkillScope.value === nextScope) return
   const raw = String(skillMarkdownText.value || '')
   const fmMatch = raw.match(/^(---\r?\n)([\s\S]*?)(\r?\n---(?:\r?\n|$))([\s\S]*)$/)
   let nextText = ''
+  let hasNonEmptyApis = false
   if (fmMatch) {
     const [, openDelim, fmBody, closeDelim, rest] = fmMatch
     const lineEnding = openDelim.includes('\r\n') ? '\r\n' : '\n'
-    const lines = fmBody.split(/\r?\n/)
-    const scopeIdx = lines.findIndex(ln => /^\s*scope\s*:/.test(ln))
-    if (scopeIdx >= 0) {
-      lines[scopeIdx] = `scope: ${nextScope}`
-    } else {
-      const apisIdx = lines.findIndex(ln => /^\s*apis\s*:/.test(ln))
-      if (apisIdx >= 0) {
-        lines.splice(apisIdx, 0, `scope: ${nextScope}`)
-      } else {
-        lines.push(`scope: ${nextScope}`)
+    try {
+      const doc: YAML.Document = YAML.parseDocument(fmBody)
+      if (doc.errors.length > 0) {
+        store.showToast(
+          `当前 YAML Frontmatter 存在语法错误，请先修复后再切换作用域：${doc.errors[0].message}`,
+          'warning',
+        )
+        return
       }
+      if (!doc.contents || !YAML.isMap(doc.contents)) {
+        doc.contents = doc.createNode({ scope: nextScope })
+      } else {
+        doc.set('scope', nextScope)
+      }
+      const plain = doc.toJS() as Record<string, unknown> | null
+      hasNonEmptyApis = Array.isArray(plain?.apis) ? plain.apis.length > 0 : Boolean(plain?.apis)
+      const serializedFm = doc
+        .toString({ lineWidth: 0 })
+        .replace(/\r?\n$/, '')
+        .replace(/\r?\n/g, lineEnding)
+      nextText = `${openDelim}${serializedFm}${closeDelim}${rest}`
+    } catch (err) {
+      store.showToast(`解析 YAML Frontmatter 失败：${(err as Error).message}`, 'warning')
+      return
     }
-    nextText = `${openDelim}${lines.join(lineEnding)}${closeDelim}${rest}`
   } else {
     const sid = currentSkill.value.id || store.selectedSkillId
     const sname = currentSkill.value.name || sid
-    nextText = `---\nname: ${sid}\ntitle: ${sname}\ndescription: ""\nscope: ${nextScope}\napis: []\n---\n\n${raw}`
+    const initDoc = new YAML.Document({
+      name: sid,
+      title: sname,
+      description: '',
+      scope: nextScope,
+      apis: [],
+    })
+    nextText = `---\n${initDoc.toString({ lineWidth: 0 }).trimEnd()}\n---\n\n${raw}`
   }
 
   if (isEditingMainFile.value && skillEditorRef.value) {
@@ -372,7 +392,7 @@ function handleChangeSkillScope(nextScope: 'template' | 'global' | 'chat') {
   } else {
     skillMarkdownText.value = nextText
   }
-  if (nextScope === 'chat' && /^\s*apis\s*:(?!\s*\[\s*\]\s*$)/m.test(nextText)) {
+  if (nextScope === 'chat' && hasNonEmptyApis) {
     store.showToast('已切换为「聊天专用」，注意聊天专用技能不允许声明业务 API（请将 apis 置为 []）', 'warning')
   }
 }
@@ -693,10 +713,22 @@ function handleDiscardDraft() {
     .catch(() => {})
 }
 
-/** 列表页直接发布：先加载技能详情，再打开发布确认弹窗 */
+/** 列表页直接发布：先加载技能详情，校验未被脏拦截取消且详情加载成功后才打开发布确认弹窗 */
 async function handlePublishFromList(skillId: string) {
   await store.openSkillDetail(skillId)
-  store.openModal('skill-publish')
+  const extStore = store as unknown as {
+    skillDetail?: { id?: string; item?: { id?: string } } | null
+  }
+  const loadedDetail = extStore.skillDetail
+  const detailReady =
+    loadedDetail !== undefined
+      ? (loadedDetail?.id ?? loadedDetail?.item?.id) === skillId
+      : store.skillsSubView === 'detail' &&
+        store.currentSkill.id === skillId &&
+        Boolean(store.skillMarkdown)
+  if (store.selectedSkillId === skillId && detailReady) {
+    store.openModal('skill-publish')
+  }
 }
 
 /** 判定技能不可删除的原因（空字符串表示允许删除）：仅允许 scope=template 且无模板关联 */

@@ -28,6 +28,8 @@ from .api.routes_templates import router as templates_router
 from .chat.service import ChatError
 from .config import Settings, get_settings
 from .container import Container, build_container
+from .domain.composite import CompositeTemplateError
+from .runtime.model_factory import aclose_model
 from .runtime.router import TemplateRouteError
 from .runtime.runner import InputValidationError, TemplateUnavailable
 from .store.drafts import DraftConflict
@@ -81,6 +83,37 @@ def _error(status: int, code: str, message: str, **extra) -> JSONResponse:
     return JSONResponse(status_code=status, content={"code": code, "message": message, **extra})
 
 
+def _to_json_safe(val: Any) -> Any:
+    """递归将校验错误上下文中的非基础 JSON 类型（如 ValueError/Exception）安全转为字符串。#Created By AiCoding(codex)"""
+    if val is None or isinstance(val, (str, int, float, bool)):
+        return val
+    if isinstance(val, dict):
+        return {str(k): _to_json_safe(v) for k, v in val.items()}
+    if isinstance(val, (list, tuple, set, frozenset)):
+        return [_to_json_safe(v) for v in val]
+    return str(val)
+
+
+def _format_validation_errors(exc: RequestValidationError) -> list[Any]:
+    """提取请求参数校验错误：屏蔽原始 input/url 字段，并确保 ctx 完全可 JSON 序列化。#Created By AiCoding(codex)"""
+    try:
+        raw_errors = exc.errors(include_url=False, include_input=False)  # type: ignore[call-arg]
+    except TypeError:
+        raw_errors = exc.errors()
+    cleaned: list[Any] = []
+    for item in raw_errors:
+        if isinstance(item, dict):
+            entry = {
+                str(k): _to_json_safe(v)
+                for k, v in item.items()
+                if k not in ("input", "url")
+            }
+            cleaned.append(entry)
+        else:
+            cleaned.append(_to_json_safe(item))
+    return cleaned
+
+
 def install_error_handlers(app: FastAPI) -> None:
     """统一错误响应：{code, message, ...}。"""
 
@@ -92,7 +125,7 @@ def install_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(RequestValidationError)
     async def _validation(_: Request, exc: RequestValidationError):
-        return _error(422, "VALIDATION_ERROR", "请求参数不合法", errors=exc.errors())
+        return _error(422, "VALIDATION_ERROR", "请求参数不合法", errors=_format_validation_errors(exc))
 
     handlers = {
         ResourceNotFound: (404, "NOT_FOUND"), ReleaseNotFound: (404, "RELEASE_NOT_FOUND"),
@@ -105,6 +138,11 @@ def install_error_handlers(app: FastAPI) -> None:
                 return _error(status, code, str(exc).strip("'\""))
             return _h
         app.add_exception_handler(exc_type, make())
+
+    @app.exception_handler(CompositeTemplateError)
+    async def _composite_tpl(_: Request, exc: CompositeTemplateError):
+        extra = {"line": exc.line} if exc.line is not None else {}
+        return _error(400, "INVALID_COMPOSITE_TEMPLATE", str(exc), **extra)
 
     @app.exception_handler(DraftConflict)
     async def _conflict(_: Request, exc: DraftConflict):
@@ -159,7 +197,7 @@ class _SubpathPrefixMiddleware:
         self.app = app
         self.prefix = prefix
         self._prefix_slash = f"{prefix}/"
-        self._prefix_bytes = prefix.encode("ascii")
+        self._prefix_bytes = prefix.encode("utf-8")
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] in ("http", "websocket"):
@@ -217,6 +255,11 @@ def create_app(settings: Settings | None = None, container: Container | None = N
                 await c.chat.aclose()
             await c.runs.stop()
             await c.gateway.aclose()
+            aclose_models = getattr(c, "aclose_models", None)
+            if callable(aclose_models):
+                await aclose_models()
+            elif not getattr(c, "external_model", False):
+                await aclose_model(c.runner.model)
 
     root_path = settings.normalized_root_path()
     app = FastAPI(title="智能申告报告填写平台", version="0.1.0", lifespan=lifespan)

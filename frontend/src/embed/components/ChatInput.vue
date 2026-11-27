@@ -70,7 +70,17 @@ function prefill(promptText: string, focus = true) {
   })
 }
 
-defineExpose({ prefill })
+/** 发送请求报错时回填文本：仅在当前输入框为空时回填，防止覆盖用户已新输入的内容 */
+function restoreText(val: string) {
+  if (!val || text.value.trim().length > 0) return
+  text.value = val
+  void nextTick(() => {
+    adjustHeight()
+    textareaRef.value?.focus()
+  })
+}
+
+defineExpose({ prefill, restoreText })
 </script>
 
 <template>

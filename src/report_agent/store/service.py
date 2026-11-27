@@ -32,7 +32,17 @@ from ..domain.template import (BODY_FILE, OFFLINE_FILE, TEMPLATE_FILE, Template,
                                parse_template_yaml)
 from .drafts import DraftConflict, DraftStore
 from .fsutil import now_iso
-from .layout import REV_RE, SYSTEM_PROMPT_KEY, DataLayout, InvalidResource, ResourceRef, ensure_within
+from .layout import (
+    META_FILE,
+    REV_RE,
+    SYSTEM_PROMPT_KEY,
+    TEMPLATE_KEY_RE,
+    DataLayout,
+    InvalidResource,
+    ResourceRef,
+    ensure_within,
+    read_tree_text_files,
+)
 from .publisher import Change, NothingToPublish, Publisher, PublishResult
 from .releases import ReleaseStore
 
@@ -203,7 +213,7 @@ class ResourceService:
     def _in_live(self, ref: ResourceRef, rs: ResourceSet) -> tuple[bool, bool]:
         """（线上是否存在，是否已下线）。"""
         if ref.kind == "template":
-            tpl = rs.templates.get(int(ref.key)) if ref.key.isdigit() else None
+            tpl = rs.templates.get(int(ref.key)) if TEMPLATE_KEY_RE.match(ref.key) else None
             return (tpl is not None, bool(tpl and tpl.offline))
         if ref.kind == "skill":
             return (ref.key in rs.skills, False)
@@ -251,7 +261,7 @@ class ResourceService:
             live_keys = [SYSTEM_PROMPT_KEY]
         keys = list(dict.fromkeys([*live_keys, *self.drafts.list_keys(kind)]))
         if kind == "template":
-            keys.sort(key=lambda k: int(k) if k.isdigit() else 0)
+            keys.sort(key=lambda k: int(k) if TEMPLATE_KEY_RE.match(k) else 0)
         return keys
 
     def discard(self, ref: ResourceRef) -> bool:
@@ -260,6 +270,32 @@ class ResourceService:
         if deleted:
             self._bump_draft_seq()
         return deleted
+
+    def _save_or_clear_draft(
+        self,
+        ref: ResourceRef,
+        files: dict[str, str],
+        operator: str,
+        expected_revision: int | None,
+        action: str,
+        *,
+        same_as_online: bool,
+        change: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """在已持有 self.lock 的临界区内统一处理乐观锁校验、与线上一致自动清草稿或写入草稿。"""
+        if same_as_online:
+            return self._clear_draft_if_same_as_online(ref, operator, expected_revision, change)
+        self._check_missing_draft_conflict(ref, expected_revision, change)
+        meta = self.drafts.write(
+            ref,
+            files,
+            operator,
+            base_rev=change["rev"] if change else None,
+            expected_revision=expected_revision,
+            action=action,
+        )
+        self._bump_draft_seq()
+        return meta
 
     def _clear_draft_if_same_as_online(
         self,
@@ -361,36 +397,48 @@ class ResourceService:
 
     def rollback(self, ref: ResourceRef, target_rev: str, mode: Literal["draft_only", "publish_now"],
                  reason: str, operator: str) -> dict[str, Any]:
-        """把资源恢复到某个历史版本：draft_only 只写入草稿；publish_now 直接发布为新版本。"""
-        self.releases.entry(target_rev)
-        tree = self.releases.ensure_materialized(target_rev)
-        target_path = tree / ref.tree_path()
-        if not target_path.exists():
-            raise ResourceNotFound(f"{ref.label()} 在 {target_rev} 中不存在")
-        target_offline = ref.kind == "template" and (target_path / OFFLINE_FILE).exists()
-        title = self.title_of(ref)
-        if mode == "publish_now":
-            summary = f"回退 {self.summary_label(ref, title)} 至 {target_rev}" + (f"（{reason}）" if reason else "")
-            with self.lock:
+        """把资源恢复到某个历史版本：draft_only 写入草稿；publish_now 直接发布为新版本（均剥离历史下线标记）。"""
+        with self.lock:
+            self.releases.entry(target_rev)
+            tree = self.releases.ensure_materialized(target_rev)
+            target_path = ensure_within(tree, tree / ref.tree_path())
+            if not target_path.exists():
+                raise ResourceNotFound(f"{ref.label()} 在 {target_rev} 中不存在")
+            target_offline = ref.kind == "template" and (
+                (target_path / OFFLINE_FILE).exists() or (target_path / ".offline.json").exists()
+            )
+            title = self.title_of(ref)
+            if mode == "publish_now":
+                summary = f"回退 {self.summary_label(ref, title)} 至 {target_rev}" + (f"（{reason}）" if reason else "")
                 result = self.publisher.publish(
                     [Change(ref, "rollback", title=title, source="tree", source_dir=tree)],
                     operator, "回退", summary, reason)
                 self.drafts.delete(ref)
                 self._bump_draft_seq()
-            return {
-                "mode": mode,
-                "rev": result.entry["rev"],
-                "targetRev": target_rev,
-                "targetOffline": target_offline,
-            }
-        files = self._files_from_tree(ref, tree)
-        state_online = self.releases.online_change(ref)
-        action = f"rollback:{target_rev}:offline-source" if target_offline else f"rollback:{target_rev}"
-        cleared = False
-        with self.lock:
-            self.drafts.write(ref, files, operator, base_rev=state_online["rev"] if state_online else None,
-                              action=action)
-            self.drafts.rebase(ref, state_online["rev"] if state_online else None, action=action)
+                pub_out: dict[str, Any] = {
+                    "mode": mode,
+                    "rev": result.entry["rev"],
+                    "targetRev": target_rev,
+                    "targetOffline": target_offline,
+                }
+                if target_offline:
+                    pub_out["warning"] = (
+                        f"注意：目标版本 {target_rev} 中该模板处于已下线归档状态；"
+                        "本次回退发布已自动剥离下线标记并恢复为上线生效状态"
+                    )
+                return pub_out
+            files = self._files_from_tree(ref, tree)
+            state_online = self.releases.online_change(ref)
+            action = f"rollback:{target_rev}:offline-source" if target_offline else f"rollback:{target_rev}"
+            cleared = False
+            self.drafts.write(
+                ref,
+                files,
+                operator,
+                base_rev=state_online["rev"] if state_online else None,
+                action=action,
+                overwrite_base=True,
+            )
             # #Created By AiCoding(codex) 若恢复的历史版本内容与当前线上未下线版本一致，自动清理冗余草稿，避免“有草稿却无法发布”
             if self._same_as_online(ref):
                 self.drafts.delete(ref)
@@ -411,23 +459,19 @@ class ResourceService:
         return out
 
     def _files_from_tree(self, ref: ResourceRef, tree) -> dict[str, str]:
-        """从一棵发布树中递归取出资源文件内容（用于回退恢复到草稿，支持 Skill 子目录文档）。#Created By AiCoding(codex)"""
+        """从一棵发布树中递归取出资源文件内容（防软链逃逸并过滤下线/元数据标记）。#Created By AiCoding(codex)"""
         path = ensure_within(tree, tree / ref.tree_path())
+        if path.is_symlink():
+            raise InvalidResource(f"资源路径「{ref.tree_path()}」包含非法软链接")
         if ref.is_dir():
-            out: dict[str, str] = {}
-            stack: list[tuple[Any, str]] = [(path, "")]
-            while stack:
-                cur, rel_prefix = stack.pop()
-                for p in sorted(cur.iterdir(), key=lambda x: x.name):
-                    if p.is_symlink() or p.name in (OFFLINE_FILE, ".meta.json", ".DS_Store"):
-                        continue
-                    rel_posix = f"{rel_prefix}/{p.name}" if rel_prefix else p.name
-                    if p.is_dir():
-                        stack.append((p, rel_posix))
-                    elif p.is_file():
-                        out[rel_posix] = p.read_text(encoding="utf-8")
-            return out
-        return {self.drafts.single_file_name(ref): path.read_text(encoding="utf-8")}
+            return read_tree_text_files(
+                path,
+                ignore_names={META_FILE, ".DS_Store", OFFLINE_FILE, ".offline.json"},
+            )
+        try:
+            return {self.drafts.single_file_name(ref): path.read_text(encoding="utf-8")}
+        except UnicodeDecodeError as exc:
+            raise InvalidResource(f"{ref.label()} 文件不是有效的 UTF-8 文本") from exc
 
     @staticmethod
     def _clone_resource_set(rs: ResourceSet) -> ResourceSet:
@@ -540,17 +584,19 @@ class ResourceService:
                       action: str = "edit") -> dict[str, Any]:
         """保存模板草稿；若与当前线上未下线版本完全一致，自动清理冗余草稿并恢复为已发布状态。"""
         ref = tpl_ref(tpl.id)
-        change = self.releases.online_change(ref)
-        online = self.template_online(tpl.id)
-        if online is not None and not online.offline and tpl.definition == online.definition and tpl.body == online.body:
-            return self._clear_draft_if_same_as_online(ref, operator, expected_revision, change)
         files = {TEMPLATE_FILE: dump_template_yaml(tpl.definition), BODY_FILE: tpl.body}
         with self.lock:
-            self._check_missing_draft_conflict(ref, expected_revision, change)
-            meta = self.drafts.write(ref, files, operator, base_rev=change["rev"] if change else None,
-                                     expected_revision=expected_revision, action=action)
-        self._bump_draft_seq()
-        return meta
+            change = self.releases.online_change(ref)
+            online = self.template_online(tpl.id)
+            same = bool(
+                online is not None
+                and not online.offline
+                and tpl.definition == online.definition
+                and tpl.body == online.body
+            )
+            return self._save_or_clear_draft(
+                ref, files, operator, expected_revision, action, same_as_online=same, change=change
+            )
 
     def validate_template_working(self, tid: int, tpl: Template | None = None) -> list[Issue]:
         """校验模板工作副本（Skill 引用按“线上 + 草稿”判断）。"""
@@ -560,19 +606,27 @@ class ResourceService:
         return validate_template(tpl, self.overlay())
 
     def offline_template(self, tid: int, operator: str, reason: str = "") -> PublishResult:
-        """下线模板：生成新版本，模板文件保留，只加下线标记。"""
+        """下线模板：生成新版本，模板文件保留，只加下线标记；未发布上线的纯草稿模板禁止下线。"""
         ref = tpl_ref(tid)
-        online = self.template_online(tid)
-        if online is None and not self.drafts.exists(ref):
-            raise ResourceNotFound(f"模板 {tid} 不存在")
-        if online is not None and online.offline:
-            raise NothingToPublish(f"模板 {tid} 已处于下线状态")
-        title = self.title_of(ref)
-        marker = {"by": operator, "at": now_iso(), "reason": reason}
-        result = self.publisher.publish([Change(ref, "offline", title=title, source="none", offline_marker=marker)],
-                                        operator, "下线", f"下线 {self.summary_label(ref, title)}", reason)
-        self._bump_draft_seq()
-        return result
+        with self.lock:
+            online = self.template_online(tid)
+            if online is None:
+                if not self.drafts.exists(ref):
+                    raise ResourceNotFound(f"模板 {tid} 不存在")
+                raise InvalidResource("模板尚未发布上线，无法下线")
+            if online.offline:
+                raise NothingToPublish(f"模板 {tid} 已处于下线状态")
+            title = self.title_of(ref)
+            marker = {"by": operator, "at": now_iso(), "reason": reason}
+            result = self.publisher.publish(
+                [Change(ref, "offline", title=title, source="none", offline_marker=marker)],
+                operator,
+                "下线",
+                f"下线 {self.summary_label(ref, title)}",
+                reason,
+            )
+            self._bump_draft_seq()
+            return result
 
     def restore_template(self, tid: int, operator: str) -> dict[str, Any]:
         """恢复已下线的模板：用线上内容生成一份草稿，发布后重新上线。"""
@@ -684,34 +738,32 @@ class ResourceService:
         action: str = "edit",
         docs: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """保存 Skill 草稿（校验 frontmatter、name 一致及全部子文档路径与大小）。#Created By AiCoding(codex)"""
+        """保存 Skill 草稿（在锁内读取默认子文档并校验 frontmatter、name 一致及子文档路径与大小）。#Created By AiCoding(codex)"""
         ref = skill_ref(sid)
-        if docs is None:
-            # 向后兼容：仅提交 SKILL.md 的旧调用方不误删已有的子目录文档
-            try:
-                effective_docs = self.skill_docs(sid, "working") or {}
-            except (InvalidResource, ValueError):
-                effective_docs = {}
-        else:
-            effective_docs = docs
-        try:
-            skill = parse_skill_markdown(markdown, docs=effective_docs)
-        except (SkillParseError, ValidationError) as exc:
-            raise InvalidResource(str(exc)) from exc
-        if skill.id != sid:
-            raise InvalidResource(f"frontmatter 中 name={skill.id} 必须与 Skill 标识 {sid} 一致")
-        change = self.releases.online_change(ref)
-        online_sk = self.skill_online(sid)
-        if online_sk is not None and markdown == online_sk.markdown and skill.docs == online_sk.docs:
-            return self._clear_draft_if_same_as_online(ref, operator, expected_revision, change)
-        files = {SKILL_FILE: markdown, **skill.docs}
         with self.lock:
-            self._check_missing_draft_conflict(ref, expected_revision, change)
-            meta = self.drafts.write(ref, files, operator,
-                                     base_rev=change["rev"] if change else None,
-                                     expected_revision=expected_revision, action=action)
-        self._bump_draft_seq()
-        return meta
+            if docs is None:
+                # 向后兼容：仅提交 SKILL.md 的旧调用方不误删已有的子目录文档
+                try:
+                    effective_docs = self.skill_docs(sid, "working") or {}
+                except (InvalidResource, ValueError):
+                    effective_docs = {}
+            else:
+                effective_docs = docs
+            try:
+                skill = parse_skill_markdown(markdown, docs=effective_docs)
+            except (SkillParseError, ValidationError) as exc:
+                raise InvalidResource(str(exc)) from exc
+            if skill.id != sid:
+                raise InvalidResource(f"frontmatter 中 name={skill.id} 必须与 Skill 标识 {sid} 一致")
+            change = self.releases.online_change(ref)
+            online_sk = self.skill_online(sid)
+            same = bool(
+                online_sk is not None and markdown == online_sk.markdown and skill.docs == online_sk.docs
+            )
+            files = {SKILL_FILE: markdown, **skill.docs}
+            return self._save_or_clear_draft(
+                ref, files, operator, expected_revision, action, same_as_online=same, change=change
+            )
 
     def validate_skill_working(self, sid: str) -> list[Issue]:
         sk = self.skill_working(sid)
@@ -735,7 +787,7 @@ class ResourceService:
                     "offline": bool(tpl.offline),
                 }
         for key in self.drafts.list_keys("template"):
-            if not key.isdigit():
+            if not TEMPLATE_KEY_RE.match(key):
                 continue
             tid = int(key)
             try:
@@ -860,17 +912,14 @@ class ResourceService:
         if errors:
             raise InvalidResource("；".join(errors))
         ref = api_ref(name)
-        change = self.releases.online_change(ref)
-        online_api = self.api_online(name)
-        if online_api is not None and api == online_api:
-            return self._clear_draft_if_same_as_online(ref, operator, expected_revision, change)
         with self.lock:
-            self._check_missing_draft_conflict(ref, expected_revision, change)
-            meta = self.drafts.write(ref, {f"{name}.yaml": yaml_text}, operator,
-                                     base_rev=change["rev"] if change else None,
-                                     expected_revision=expected_revision, action=action)
-        self._bump_draft_seq()
-        return meta
+            change = self.releases.online_change(ref)
+            online_api = self.api_online(name)
+            same = bool(online_api is not None and api == online_api)
+            return self._save_or_clear_draft(
+                ref, {f"{name}.yaml": yaml_text}, operator, expected_revision, action,
+                same_as_online=same, change=change,
+            )
 
     def api_skill_references(self, name: str) -> list[dict[str, Any]]:
         """查找所有（线上 + 草稿，涵盖 template/global/chat 全部作用域）关联了指定 API 的技能清单。#Created By AiCoding(codex)"""
@@ -967,16 +1016,14 @@ class ResourceService:
     def save_system_prompt(self, text: str, operator: str, expected_revision: int | None = None) -> dict[str, Any]:
         if not text.strip():
             raise InvalidResource("系统提示词不能为空")
-        change = self.releases.online_change(SP_REF)
-        online_text = self.system_prompt("online")
-        if online_text and text == online_text:
-            return self._clear_draft_if_same_as_online(SP_REF, operator, expected_revision, change)
         with self.lock:
-            self._check_missing_draft_conflict(SP_REF, expected_revision, change)
-            meta = self.drafts.write(SP_REF, {SYSTEM_PROMPT_FILE: text}, operator,
-                                     base_rev=change["rev"] if change else None, expected_revision=expected_revision)
-        self._bump_draft_seq()
-        return meta
+            change = self.releases.online_change(SP_REF)
+            online_text = self.system_prompt("online")
+            same = bool(online_text and text == online_text)
+            return self._save_or_clear_draft(
+                SP_REF, {SYSTEM_PROMPT_FILE: text}, operator, expected_revision, "edit",
+                same_as_online=same, change=change,
+            )
 
     # ================================================================ 汇总大模板（复合工单）
     def composite_template(self, version: str = "working", *, fallback_default: bool = False) -> str:
@@ -1003,21 +1050,14 @@ class ResourceService:
         errs = validate_composite_template(text)
         if errs:
             raise InvalidResource("；".join(errs))
-        change = self.releases.online_change(CT_REF)
-        online_text = self.composite_template("online")
-        if online_text and text == online_text:
-            return self._clear_draft_if_same_as_online(CT_REF, operator, expected_revision, change)
         with self.lock:
-            self._check_missing_draft_conflict(CT_REF, expected_revision, change)
-            meta = self.drafts.write(
-                CT_REF,
-                {COMPOSITE_TEMPLATE_FILE: text},
-                operator,
-                base_rev=change["rev"] if change else None,
-                expected_revision=expected_revision,
+            change = self.releases.online_change(CT_REF)
+            online_text = self.composite_template("online")
+            same = bool(online_text and text == online_text)
+            return self._save_or_clear_draft(
+                CT_REF, {COMPOSITE_TEMPLATE_FILE: text}, operator, expected_revision, "edit",
+                same_as_online=same, change=change,
             )
-        self._bump_draft_seq()
-        return meta
 
 
 def template_from_payload(tid: int, base: Template | None, defn_data: dict[str, Any], body: str | None) -> Template:

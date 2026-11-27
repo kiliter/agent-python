@@ -30,9 +30,14 @@ _TOOL_LABELS: dict[str, str] = {
 }
 
 _BEARER_TOKEN_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._\-+/=]{6,}")
-_API_KEY_PREFIX_RE = re.compile(r"\b(?:sk|rk|ak|pk)-[A-Za-z0-9_\-]{8,}\b", re.IGNORECASE)
+_API_KEY_PREFIX_RE = re.compile(r"\b(?:ra|sk|rk|ak|pk)[_-][A-Za-z0-9_\-]{6,}\b", re.IGNORECASE)
 _CREDENTIAL_KV_RE = re.compile(
-    r"(?i)\b(api[_-]?key|access[_-]?token|secret|password|authorization)\s*([:=])\s*[^\s,;'\"]+"
+    r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|authorization)"
+    r"(\s*[:=]\s*)([^\s,;'\"&]+)"
+)
+_URL_USERINFO_RE = re.compile(r"(https?://)([^/\s:@]+):([^/\s@]+)@")
+_URL_QUERY_SECRET_RE = re.compile(
+    r"(?i)([?&](?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|key)=)([^&#\s'\"<>]+)"
 )
 _POSIX_PATH_RE = re.compile(
     r"(?:(?<=^)|(?<=[\s:=(,'\"\uff1a]))"
@@ -56,10 +61,12 @@ def _safe_nonneg_int(val: Any, default: int = 0) -> int:
 
 
 def sanitize_error_text(raw: Any, fallback: str = "未知错误") -> str:
-    """清洗错误提示：折叠换行，掩码本地路径、密钥凭证、单双引号入参字面量与长数字/证件号，防止泄露内部路径或客户隐私。"""
+    """清洗错误提示：折叠换行，掩码 URL 凭证、密钥前缀（含 ra_）、路径、引号字面量与长数字，防隐私或凭据泄露。#Created By AiCoding(codex)"""
     text = " ".join(str(raw or "").split()).strip()
     if not text:
         return fallback
+    text = _URL_USERINFO_RE.sub(r"\1***:***@", text)
+    text = _URL_QUERY_SECRET_RE.sub(r"\1***", text)
     text = _BEARER_TOKEN_RE.sub("Bearer ***", text)
     text = _API_KEY_PREFIX_RE.sub("***", text)
     text = _CREDENTIAL_KV_RE.sub(r"\1\2***", text)
@@ -168,8 +175,10 @@ class StepMapper:
         for sid in dict.fromkeys(raw_names):
             if self.resources is not None and sid in self.resources.skills:
                 resolved.append(self.resources.skills[sid].title)
-            elif len(sid) <= 64:
-                resolved.append(sid)
+            else:
+                clean_sid = sanitize_error_text(sid, fallback="")
+                if clean_sid and len(clean_sid) <= 64:
+                    resolved.append(clean_sid)
         return resolved
 
     def _api_title(self, name: str, result: dict[str, Any]) -> str:
@@ -179,8 +188,10 @@ class StepMapper:
                 return contract_title
         res_title = result.get("title")
         if isinstance(res_title, str) and res_title.strip():
-            return res_title.strip()
-        return name or "业务接口"
+            return sanitize_error_text(res_title.strip(), fallback="业务接口")
+        if name:
+            return sanitize_error_text(name, fallback="业务接口")
+        return "业务接口"
 
     def _map_tool(self, data: dict[str, Any], at_ms: int) -> dict[str, Any]:
         tool_name = str(data.get("tool") or "")

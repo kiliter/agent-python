@@ -25,8 +25,10 @@ from pathlib import Path
 
 from ..domain.composite import COMPOSITE_TEMPLATE_FILE, COMPOSITE_TEMPLATE_KEY
 from ..domain.resources import SYSTEM_PROMPT_FILE, ResourceKind
+from .fsutil import unlink_or_rmtree
 
 META_FILE = ".meta.json"
+DEFAULT_IGNORE_FILES: frozenset[str] = frozenset({META_FILE, ".DS_Store"})
 KINDS: tuple[ResourceKind, ...] = ("template", "skill", "api", "system-prompt", "composite-template")
 KIND_LABEL = {
     "template": "模板",
@@ -37,10 +39,10 @@ KIND_LABEL = {
 }
 SYSTEM_PROMPT_KEY = "system-prompt"
 
-TEMPLATE_KEY_RE = re.compile(r"^[1-9]\d{0,9}$")
+TEMPLATE_KEY_RE = re.compile(r"^[1-9][0-9]{0,9}$")
 SKILL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{0,63}$")
 API_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_\-]{0,63}$")
-REV_RE = re.compile(r"^r[1-9]\d{0,9}$")
+REV_RE = re.compile(r"^r[1-9][0-9]{0,9}$")
 CASE_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,40}$")
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
 
@@ -193,16 +195,90 @@ class DataLayout:
         return ensure_within(self.drafts, self.drafts / ref.kind / ref.key)
 
 
-def copy_resource(src_root: Path, dst_root: Path, ref: ResourceRef) -> None:
-    """把一个资源从 src 树复制到 dst 树（先删除 dst 中的旧内容）。"""
+def read_tree_text_files(
+    root: Path,
+    *,
+    ignore_names: set[str] | frozenset[str] = DEFAULT_IGNORE_FILES,
+) -> dict[str, str]:
+    """递归读取目录下的全部 UTF-8 文本文件（拦截一切软链接并将非 UTF-8 字节转为 InvalidResource）。"""
+    if root.is_symlink():
+        raise InvalidResource(f"资源目录包含非法软链接「{root.name}」")
+    out: dict[str, str] = {}
+    stack: list[tuple[Path, str]] = [(root, "")]
+    while stack:
+        cur_dir, rel_prefix = stack.pop()
+        try:
+            with os.scandir(cur_dir) as it:
+                entries = sorted(it, key=lambda e: e.name)
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name in ignore_names:
+                continue
+            if entry.is_symlink():
+                raise InvalidResource(f"资源目录包含非法软链接「{entry.name}」")
+            rel_posix = f"{rel_prefix}/{entry.name}" if rel_prefix else entry.name
+            entry_path = ensure_within(root, Path(entry.path))
+            if entry.is_dir(follow_symlinks=False):
+                stack.append((entry_path, rel_posix))
+            elif entry.is_file(follow_symlinks=False):
+                try:
+                    out[rel_posix] = entry_path.read_text(encoding="utf-8")
+                except FileNotFoundError:
+                    continue
+                except UnicodeDecodeError as exc:
+                    raise InvalidResource(f"文件「{rel_posix}」不是有效的 UTF-8 文本") from exc
+    return dict(sorted(out.items()))
+
+
+def copy_dir_no_symlinks(
+    src: Path,
+    dst: Path,
+    *,
+    ignore_names: set[str] | frozenset[str] = DEFAULT_IGNORE_FILES,
+) -> None:
+    """递归复制目录内容，严格拒绝任何软链接并过滤指定忽略文件名。"""
+    if src.is_symlink():
+        raise InvalidResource(f"资源目录包含非法软链接「{src.name}」")
+    dst.mkdir(parents=True, exist_ok=True)
+    stack: list[tuple[Path, Path]] = [(src, dst)]
+    while stack:
+        cur_src, cur_dst = stack.pop()
+        with os.scandir(cur_src) as it:
+            entries = sorted(it, key=lambda e: e.name)
+        for entry in entries:
+            if entry.name in ignore_names:
+                continue
+            if entry.is_symlink():
+                raise InvalidResource(f"资源目录包含非法软链接「{entry.name}」")
+            src_child = ensure_within(src, Path(entry.path))
+            dst_child = ensure_entry_within(dst, cur_dst / entry.name)
+            if entry.is_dir(follow_symlinks=False):
+                dst_child.mkdir(parents=True, exist_ok=True)
+                stack.append((src_child, dst_child))
+            elif entry.is_file(follow_symlinks=False):
+                shutil.copy2(src_child, dst_child)
+
+
+def copy_resource(
+    src_root: Path,
+    dst_root: Path,
+    ref: ResourceRef,
+    *,
+    ignore_names: set[str] | frozenset[str] | None = None,
+) -> None:
+    """把一个资源从 src 树复制到 dst 树（先删除 dst 中的旧内容，拦截软链接并过滤忽略文件）。"""
     remove_resource(dst_root, ref)
     src = ensure_within(src_root, src_root / ref.tree_path())
     dst = ensure_entry_within(dst_root, dst_root / ref.tree_path())
+    if src.is_symlink():
+        raise InvalidResource(f"资源路径「{ref.tree_path()}」包含非法软链接")
     if not src.exists():
         return
     dst.parent.mkdir(parents=True, exist_ok=True)
-    if src.is_dir() and not src.is_symlink():
-        shutil.copytree(src, dst, ignore=shutil.ignore_patterns(META_FILE))
+    skip = DEFAULT_IGNORE_FILES if ignore_names is None else (DEFAULT_IGNORE_FILES | set(ignore_names))
+    if src.is_dir():
+        copy_dir_no_symlinks(src, dst, ignore_names=skip)
     else:
         shutil.copy2(src, dst)
 
@@ -210,7 +286,4 @@ def copy_resource(src_root: Path, dst_root: Path, ref: ResourceRef) -> None:
 def remove_resource(root: Path, ref: ResourceRef) -> None:
     """从树中删除一个资源（兼容指向外部或悬空的目录/文件软链接安全摘除）。"""
     target = ensure_entry_within(root, root / ref.tree_path())
-    if target.is_symlink() or target.is_file():
-        target.unlink(missing_ok=True)
-    elif target.is_dir():
-        shutil.rmtree(target)
+    unlink_or_rmtree(target)

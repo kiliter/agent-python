@@ -150,6 +150,28 @@ const compositeLineCount = computed(() =>
 const compositePreviewLoading = ref(false)
 const compositePreviewText = ref('')
 const compositePreviewError = ref('')
+const highlightCompositeRev = ref('')
+
+function consumePendingCompositeTargetRev() {
+  let targetRev = ''
+  const extStore = store as unknown as { settingsTargetCompositeRev?: string }
+  if (extStore.settingsTargetCompositeRev) {
+    targetRev = extStore.settingsTargetCompositeRev
+    extStore.settingsTargetCompositeRev = ''
+  }
+  if (!targetRev) {
+    try {
+      targetRev = sessionStorage.getItem('agent-target-composite-rev') || ''
+      if (targetRev) sessionStorage.removeItem('agent-target-composite-rev')
+    } catch {
+      /* 忽略受限存储异常 */
+    }
+  }
+  if (targetRev) {
+    highlightCompositeRev.value = targetRev
+    store.showToast(`已定位汇总大模板版本 ${targetRev}，可在右侧版本历史恢复草稿或回退上线`, 'info')
+  }
+}
 
 async function handlePreviewComposite() {
   compositePreviewLoading.value = true
@@ -161,7 +183,10 @@ async function handlePreviewComposite() {
       compositePreviewText.value = res.rendered
       compositePreviewError.value = ''
     } else {
-      compositePreviewError.value = res.error || '模板语法或渲染失败'
+      const detailErr =
+        (res as { errors?: string[]; error?: string | null }).errors?.filter(Boolean).join('；') ||
+        res.error
+      compositePreviewError.value = detailErr || '模板语法或渲染失败'
     }
   } finally {
     compositePreviewLoading.value = false
@@ -169,8 +194,11 @@ async function handlePreviewComposite() {
 }
 
 watch(activeSubView, val => {
-  if (val === 'composite-template' && !compositePreviewText.value && !compositePreviewError.value) {
-    void handlePreviewComposite()
+  if (val === 'composite-template') {
+    consumePendingCompositeTargetRev()
+    if (!compositePreviewText.value && !compositePreviewError.value) {
+      void handlePreviewComposite()
+    }
   }
 })
 
@@ -1040,11 +1068,17 @@ function populateRuntimeForm(cfg: RuntimeConfig | null, note = '') {
 }
 
 function handleResetDefaultParams() {
-  // 只重置数值/配额/枚举模式为默认值，绝不清空网关 URL、大模型 URL、模型名及已填密钥
+  // 重置数值/配额/枚举模式为默认值，同步取消清空密钥勾选并清空密码框输入草稿（保留已生效的服务地址、模型名及线上密钥）
   runtimeForm.gatewayMode = DEFAULT_RUNTIME_CONFIG.gatewayMode
   runtimeForm.gatewayXmlStyle = DEFAULT_RUNTIME_CONFIG.gatewayXmlStyle
   runtimeForm.gatewayConnectTimeoutS = DEFAULT_RUNTIME_CONFIG.gatewayConnectTimeoutS
   runtimeForm.gatewayMaxConcurrency = DEFAULT_RUNTIME_CONFIG.gatewayMaxConcurrency
+  runtimeForm.clearGatewayAppId = false
+  runtimeForm.gatewayAppIdInput = ''
+  runtimeForm.clearGatewayAccessToken = false
+  runtimeForm.gatewayAccessTokenInput = ''
+  runtimeForm.clearLlmApiKey = false
+  runtimeForm.llmApiKeyInput = ''
   runtimeForm.llmTemperature = DEFAULT_RUNTIME_CONFIG.llmTemperature
   runtimeForm.llmMaxTokensStr = ''
   runtimeForm.llmTimeoutS = DEFAULT_RUNTIME_CONFIG.llmTimeoutS
@@ -1097,14 +1131,20 @@ watch(
 
 const runtimeFormInitialSnapshot = ref<string>('')
 
+/** 序列化运行配置表单的可比较字段（排除修改备注 note，保证历史快照载入与脏状态比对准确一致） */
+function serializeRuntimeComparable(form: RuntimeFormModel): string {
+  const { note: _note, ...comparable } = form
+  return JSON.stringify(comparable)
+}
+
 const isRuntimeFormModified = computed(() => {
   if (!isEditingRuntime.value) return false
-  return JSON.stringify(runtimeForm) !== runtimeFormInitialSnapshot.value
+  return serializeRuntimeComparable(runtimeForm) !== runtimeFormInitialSnapshot.value
 })
 
 function startEditRuntime() {
   populateRuntimeForm(effectiveRuntimeConfig.value)
-  runtimeFormInitialSnapshot.value = JSON.stringify(runtimeForm)
+  runtimeFormInitialSnapshot.value = serializeRuntimeComparable(runtimeForm)
   isEditingRuntime.value = true
 }
 
@@ -1127,27 +1167,158 @@ watch(
   },
 )
 
-async function handleSaveRuntimeConfig() {
-  if (savingRuntime.value) return
-  if (!isRuntimeFormModified.value) {
-    store.showToast('运行配置与当前生效值一致，无需保存', 'info')
-    cancelEditRuntime()
-    return
+type RuntimeNumericRule = {
+  int?: boolean
+  min?: number
+  max?: number
+  gtZero?: boolean
+}
+
+type RuntimeNumericKey =
+  | 'gatewayConnectTimeoutS'
+  | 'gatewayMaxConcurrency'
+  | 'llmTemperature'
+  | 'llmTimeoutS'
+  | 'llmHttpRetries'
+  | 'agentOutputRetries'
+  | 'agentToolRetries'
+  | 'agentRequestLimit'
+  | 'agentToolCallsLimit'
+  | 'agentRunTimeoutS'
+  | 'agentMaxConcurrentRuns'
+  | 'agentPreviewRows'
+  | 'releasesKeep'
+  | 'runsKeepDays'
+  | 'agentQueryDefaultLimit'
+  | 'agentQueryMaxLimit'
+  | 'agentMaxPeriodMonths'
+  | 'chatMaxDocChars'
+  | 'chatMaxHistoryMessages'
+  | 'chatMaxRunCards'
+  | 'chatMaxMarkdownPreviewChars'
+  | 'chatCompactTriggerMessages'
+  | 'chatCompactKeepRecent'
+  | 'chatManualCompactKeepRecent'
+  | 'chatManualCompactMinSlice'
+  | 'chatMaxMemorySummaryChars'
+  | 'chatMaxSummaryMsgChars'
+  | 'chatRequestLimit'
+  | 'chatToolCallsLimit'
+  | 'chatTimeoutS'
+  | 'chatSummaryRequestLimit'
+  | 'chatSummaryToolCallsLimit'
+  | 'chatSummaryTimeoutS'
+
+interface RuntimeNumericSpec {
+  key: RuntimeNumericKey
+  label: string
+  rule: RuntimeNumericRule
+  afterCheck?: (parsed: Partial<Record<RuntimeNumericKey, number>>) => string | null
+}
+
+/** 声明式运行参数数值校验规格表（与服务端配置边界及错误提示逐字对齐） */
+const RUNTIME_NUMERIC_SPECS: readonly RuntimeNumericSpec[] = [
+  { key: 'gatewayConnectTimeoutS', label: '网关连接超时 (gatewayConnectTimeoutS)', rule: { gtZero: true } },
+  { key: 'gatewayMaxConcurrency', label: '网关最大并发连接数 (gatewayMaxConcurrency)', rule: { int: true, min: 1, max: 512 } },
+  { key: 'llmTemperature', label: '采样温度 (llmTemperature)', rule: { min: 0, max: 2 } },
+  { key: 'llmTimeoutS', label: '模型请求超时 (llmTimeoutS)', rule: { gtZero: true } },
+  { key: 'llmHttpRetries', label: '模型 HTTP 重试次数 (llmHttpRetries)', rule: { int: true, min: 0, max: 10 } },
+  { key: 'agentOutputRetries', label: '校验退回重试上限 (agentOutputRetries)', rule: { int: true, min: 0, max: 10 } },
+  { key: 'agentToolRetries', label: '工具报错重试上限 (agentToolRetries)', rule: { int: true, min: 0, max: 10 } },
+  { key: 'agentRequestLimit', label: '单次请求轮数上限 (agentRequestLimit)', rule: { int: true, min: 1, max: 200 } },
+  { key: 'agentToolCallsLimit', label: '工具调用次数上限 (agentToolCallsLimit)', rule: { int: true, min: 1, max: 500 } },
+  { key: 'agentRunTimeoutS', label: '单次核查总超时 (agentRunTimeoutS)', rule: { gtZero: true } },
+  { key: 'agentMaxConcurrentRuns', label: '最大并发运行路数 (agentMaxConcurrentRuns)', rule: { int: true, min: 1, max: 128 } },
+  { key: 'agentPreviewRows', label: '工具预览行数上限 (agentPreviewRows)', rule: { int: true, min: 1, max: 200 } },
+  { key: 'releasesKeep', label: '发布版本保留数 (releasesKeep)', rule: { int: true, min: 1, max: 500 } },
+  { key: 'runsKeepDays', label: '运行与会话留存天数 (runsKeepDays)', rule: { int: true, min: 0, max: 3650 } },
+  { key: 'agentQueryDefaultLimit', label: '结果筛选默认行数 (agentQueryDefaultLimit)', rule: { int: true, min: 1, max: 500 } },
+  {
+    key: 'agentQueryMaxLimit',
+    label: '结果筛选最大行数 (agentQueryMaxLimit)',
+    rule: { int: true, min: 1, max: 1000 },
+    afterCheck: nums =>
+      nums.agentQueryMaxLimit! < nums.agentQueryDefaultLimit!
+        ? '结果筛选最大行数 (agentQueryMaxLimit) 必须大于或等于默认行数 (agentQueryDefaultLimit)'
+        : null,
+  },
+  { key: 'agentMaxPeriodMonths', label: '多账期展开跨度上限 (agentMaxPeriodMonths)', rule: { int: true, min: 1, max: 120 } },
+  { key: 'chatMaxDocChars', label: '对话单据注入字符上限 (chatMaxDocChars)', rule: { int: true, min: 500, max: 200000 } },
+  { key: 'chatMaxHistoryMessages', label: '对话历史滑窗条数 (chatMaxHistoryMessages)', rule: { int: true, min: 1, max: 200 } },
+  { key: 'chatMaxRunCards', label: '历史运行卡片保留数 (chatMaxRunCards)', rule: { int: true, min: 1, max: 50 } },
+  { key: 'chatMaxMarkdownPreviewChars', label: '报告预览截取字符上限 (chatMaxMarkdownPreviewChars)', rule: { int: true, min: 100, max: 20000 } },
+  { key: 'chatCompactTriggerMessages', label: '自动压缩触发阈值 (chatCompactTriggerMessages)', rule: { int: true, min: 2, max: 500 } },
+  {
+    key: 'chatCompactKeepRecent',
+    label: '自动压缩保留原文条数 (chatCompactKeepRecent)',
+    rule: { int: true, min: 1, max: 200 },
+    afterCheck: nums =>
+      nums.chatCompactTriggerMessages! <= nums.chatCompactKeepRecent!
+        ? '自动压缩触发阈值 (chatCompactTriggerMessages) 必须严格大于保留原文条数 (chatCompactKeepRecent)'
+        : null,
+  },
+  { key: 'chatManualCompactKeepRecent', label: '手动压缩保留原文条数 (chatManualCompactKeepRecent)', rule: { int: true, min: 1, max: 200 } },
+  { key: 'chatManualCompactMinSlice', label: '手动压缩最小归档切片 (chatManualCompactMinSlice)', rule: { int: true, min: 1, max: 100 } },
+  { key: 'chatMaxMemorySummaryChars', label: '记忆摘要长度上限 (chatMaxMemorySummaryChars)', rule: { int: true, min: 200, max: 10000 } },
+  { key: 'chatMaxSummaryMsgChars', label: '待压缩单条截取上限 (chatMaxSummaryMsgChars)', rule: { int: true, min: 100, max: 10000 } },
+  { key: 'chatRequestLimit', label: '对话请求轮数上限 (chatRequestLimit)', rule: { int: true, min: 1, max: 50 } },
+  { key: 'chatToolCallsLimit', label: '对话工具调用上限 (chatToolCallsLimit)', rule: { int: true, min: 1, max: 100 } },
+  { key: 'chatTimeoutS', label: '对话单次超时 (chatTimeoutS)', rule: { gtZero: true } },
+  { key: 'chatSummaryRequestLimit', label: '摘要请求轮数上限 (chatSummaryRequestLimit)', rule: { int: true, min: 1, max: 20 } },
+  { key: 'chatSummaryToolCallsLimit', label: '摘要工具调用上限 (chatSummaryToolCallsLimit)', rule: { int: true, min: 1, max: 30 } },
+  { key: 'chatSummaryTimeoutS', label: '摘要生成超时 (chatSummaryTimeoutS)', rule: { gtZero: true } },
+]
+
+function parseRuntimeNumberOrDefault(
+  raw: unknown,
+  defaultVal: number,
+  label: string,
+  opts: RuntimeNumericRule,
+): number | null {
+  if (raw === '' || raw === null || raw === undefined || (typeof raw === 'string' && raw.trim() === '')) {
+    return defaultVal
   }
+  const n = Number(raw)
+  if (!Number.isFinite(n)) {
+    store.showToast(`${label}必须是有效数值`, 'warning')
+    return null
+  }
+  if (opts.int && !Number.isInteger(n)) {
+    store.showToast(`${label}必须为整数`, 'warning')
+    return null
+  }
+  if (opts.gtZero && n <= 0) {
+    store.showToast(`${label}必须大于 0`, 'warning')
+    return null
+  }
+  if (opts.min !== undefined && n < opts.min) {
+    const rangeMsg = opts.max !== undefined ? `${opts.min} ~ ${opts.max}` : `≥ ${opts.min}`
+    store.showToast(`${label}必须在 ${rangeMsg} 范围内`, 'warning')
+    return null
+  }
+  if (opts.max !== undefined && n > opts.max) {
+    const rangeMsg = opts.min !== undefined ? `${opts.min} ~ ${opts.max}` : `≤ ${opts.max}`
+    store.showToast(`${label}必须在 ${rangeMsg} 范围内`, 'warning')
+    return null
+  }
+  return n
+}
+
+function buildValidatedRuntimePayload(): RuntimeConfigUpdatePayload | null {
   if (runtimeForm.gatewayMode === 'live') {
     const url = runtimeForm.gatewayUrl.trim()
     if (!url || !/^https?:\/\//i.test(url)) {
       store.showToast('统一网关为 live 真实调用模式时，必须填写 http:// 或 https:// 开头的网关地址', 'warning')
-      return
+      return null
     }
   }
   if (!runtimeForm.llmModel.trim()) {
     store.showToast('请填写推理模型名称（llmModel）', 'warning')
-    return
+    return null
   }
   if (!runtimeForm.llmBaseUrl.trim() || !/^https?:\/\//i.test(runtimeForm.llmBaseUrl.trim())) {
     store.showToast('推理服务地址（llmBaseUrl）必须以 http:// 或 https:// 开头', 'warning')
-    return
+    return null
   }
 
   const maxTokensTrim = String(runtimeForm.llmMaxTokensStr ?? '').trim()
@@ -1156,339 +1327,44 @@ async function handleSaveRuntimeConfig() {
     const n = Number(maxTokensTrim)
     if (!Number.isInteger(n) || n < 1) {
       store.showToast('最大输出 Token（llmMaxTokens）必须为正整数，或留空表示不限制', 'warning')
-      return
+      return null
     }
     parsedMaxTokens = n
   }
 
-  function parseNumOrDefault(
-    raw: unknown,
-    defaultVal: number,
-    label: string,
-    opts: { int?: boolean; min?: number; max?: number; gtZero?: boolean } = {},
-  ): number | null {
-    if (raw === '' || raw === null || raw === undefined || (typeof raw === 'string' && raw.trim() === '')) {
-      return defaultVal
-    }
-    const n = Number(raw)
-    if (!Number.isFinite(n)) {
-      store.showToast(`${label}必须是有效数值`, 'warning')
-      return null
-    }
-    if (opts.int && !Number.isInteger(n)) {
-      store.showToast(`${label}必须为整数`, 'warning')
-      return null
-    }
-    if (opts.gtZero && n <= 0) {
-      store.showToast(`${label}必须大于 0`, 'warning')
-      return null
-    }
-    if (opts.min !== undefined && n < opts.min) {
-      const rangeMsg = opts.max !== undefined ? `${opts.min} ~ ${opts.max}` : `≥ ${opts.min}`
-      store.showToast(`${label}必须在 ${rangeMsg} 范围内`, 'warning')
-      return null
-    }
-    if (opts.max !== undefined && n > opts.max) {
-      const rangeMsg = opts.min !== undefined ? `${opts.min} ~ ${opts.max}` : `≤ ${opts.max}`
-      store.showToast(`${label}必须在 ${rangeMsg} 范围内`, 'warning')
-      return null
-    }
-    return n
-  }
-
-  const gatewayConnectTimeoutS = parseNumOrDefault(
-    runtimeForm.gatewayConnectTimeoutS,
-    DEFAULT_RUNTIME_CONFIG.gatewayConnectTimeoutS,
-    '网关连接超时 (gatewayConnectTimeoutS)',
-    { gtZero: true },
-  )
-  if (gatewayConnectTimeoutS === null) return
-  const gatewayMaxConcurrency = parseNumOrDefault(
-    runtimeForm.gatewayMaxConcurrency,
-    DEFAULT_RUNTIME_CONFIG.gatewayMaxConcurrency,
-    '网关最大并发连接数 (gatewayMaxConcurrency)',
-    { int: true, min: 1, max: 512 },
-  )
-  if (gatewayMaxConcurrency === null) return
-  const llmTemperature = parseNumOrDefault(
-    runtimeForm.llmTemperature,
-    DEFAULT_RUNTIME_CONFIG.llmTemperature,
-    '采样温度 (llmTemperature)',
-    { min: 0, max: 2 },
-  )
-  if (llmTemperature === null) return
-  const llmTimeoutS = parseNumOrDefault(
-    runtimeForm.llmTimeoutS,
-    DEFAULT_RUNTIME_CONFIG.llmTimeoutS,
-    '模型请求超时 (llmTimeoutS)',
-    { gtZero: true },
-  )
-  if (llmTimeoutS === null) return
-  const llmHttpRetries = parseNumOrDefault(
-    runtimeForm.llmHttpRetries,
-    DEFAULT_RUNTIME_CONFIG.llmHttpRetries,
-    '模型 HTTP 重试次数 (llmHttpRetries)',
-    { int: true, min: 0, max: 10 },
-  )
-  if (llmHttpRetries === null) return
-  const agentOutputRetries = parseNumOrDefault(
-    runtimeForm.agentOutputRetries,
-    DEFAULT_RUNTIME_CONFIG.agentOutputRetries,
-    '校验退回重试上限 (agentOutputRetries)',
-    { int: true, min: 0, max: 10 },
-  )
-  if (agentOutputRetries === null) return
-  const agentToolRetries = parseNumOrDefault(
-    runtimeForm.agentToolRetries,
-    DEFAULT_RUNTIME_CONFIG.agentToolRetries,
-    '工具报错重试上限 (agentToolRetries)',
-    { int: true, min: 0, max: 10 },
-  )
-  if (agentToolRetries === null) return
-  const agentRequestLimit = parseNumOrDefault(
-    runtimeForm.agentRequestLimit,
-    DEFAULT_RUNTIME_CONFIG.agentRequestLimit,
-    '单次请求轮数上限 (agentRequestLimit)',
-    { int: true, min: 1, max: 200 },
-  )
-  if (agentRequestLimit === null) return
-  const agentToolCallsLimit = parseNumOrDefault(
-    runtimeForm.agentToolCallsLimit,
-    DEFAULT_RUNTIME_CONFIG.agentToolCallsLimit,
-    '工具调用次数上限 (agentToolCallsLimit)',
-    { int: true, min: 1, max: 500 },
-  )
-  if (agentToolCallsLimit === null) return
-  const agentRunTimeoutS = parseNumOrDefault(
-    runtimeForm.agentRunTimeoutS,
-    DEFAULT_RUNTIME_CONFIG.agentRunTimeoutS,
-    '单次核查总超时 (agentRunTimeoutS)',
-    { gtZero: true },
-  )
-  if (agentRunTimeoutS === null) return
-  const agentMaxConcurrentRuns = parseNumOrDefault(
-    runtimeForm.agentMaxConcurrentRuns,
-    DEFAULT_RUNTIME_CONFIG.agentMaxConcurrentRuns,
-    '最大并发运行路数 (agentMaxConcurrentRuns)',
-    { int: true, min: 1, max: 128 },
-  )
-  if (agentMaxConcurrentRuns === null) return
-  const agentPreviewRows = parseNumOrDefault(
-    runtimeForm.agentPreviewRows,
-    DEFAULT_RUNTIME_CONFIG.agentPreviewRows,
-    '工具预览行数上限 (agentPreviewRows)',
-    { int: true, min: 1, max: 200 },
-  )
-  if (agentPreviewRows === null) return
-
-  const releasesKeep = parseNumOrDefault(
-    runtimeForm.releasesKeep,
-    DEFAULT_RUNTIME_CONFIG.releasesKeep,
-    '发布版本保留数 (releasesKeep)',
-    { int: true, min: 1, max: 500 },
-  )
-  if (releasesKeep === null) return
-  const runsKeepDays = parseNumOrDefault(
-    runtimeForm.runsKeepDays,
-    DEFAULT_RUNTIME_CONFIG.runsKeepDays,
-    '运行与会话留存天数 (runsKeepDays)',
-    { int: true, min: 0, max: 3650 },
-  )
-  if (runsKeepDays === null) return
-  const agentQueryDefaultLimit = parseNumOrDefault(
-    runtimeForm.agentQueryDefaultLimit,
-    DEFAULT_RUNTIME_CONFIG.agentQueryDefaultLimit,
-    '结果筛选默认行数 (agentQueryDefaultLimit)',
-    { int: true, min: 1, max: 500 },
-  )
-  if (agentQueryDefaultLimit === null) return
-  const agentQueryMaxLimit = parseNumOrDefault(
-    runtimeForm.agentQueryMaxLimit,
-    DEFAULT_RUNTIME_CONFIG.agentQueryMaxLimit,
-    '结果筛选最大行数 (agentQueryMaxLimit)',
-    { int: true, min: 1, max: 1000 },
-  )
-  if (agentQueryMaxLimit === null) return
-  if (agentQueryMaxLimit < agentQueryDefaultLimit) {
-    store.showToast(
-      '结果筛选最大行数 (agentQueryMaxLimit) 必须大于或等于默认行数 (agentQueryDefaultLimit)',
-      'warning',
+  const parsedNums: Partial<Record<RuntimeNumericKey, number>> = {}
+  for (const spec of RUNTIME_NUMERIC_SPECS) {
+    const val = parseRuntimeNumberOrDefault(
+      runtimeForm[spec.key],
+      DEFAULT_RUNTIME_CONFIG[spec.key],
+      spec.label,
+      spec.rule,
     )
-    return
+    if (val === null) return null
+    parsedNums[spec.key] = val
+    if (spec.afterCheck) {
+      const crossErr = spec.afterCheck(parsedNums)
+      if (crossErr) {
+        store.showToast(crossErr, 'warning')
+        return null
+      }
+    }
   }
-  const agentMaxPeriodMonths = parseNumOrDefault(
-    runtimeForm.agentMaxPeriodMonths,
-    DEFAULT_RUNTIME_CONFIG.agentMaxPeriodMonths,
-    '多账期展开跨度上限 (agentMaxPeriodMonths)',
-    { int: true, min: 1, max: 120 },
-  )
-  if (agentMaxPeriodMonths === null) return
-
-  const chatMaxDocChars = parseNumOrDefault(
-    runtimeForm.chatMaxDocChars,
-    DEFAULT_RUNTIME_CONFIG.chatMaxDocChars,
-    '对话单据注入字符上限 (chatMaxDocChars)',
-    { int: true, min: 500, max: 200000 },
-  )
-  if (chatMaxDocChars === null) return
-  const chatMaxHistoryMessages = parseNumOrDefault(
-    runtimeForm.chatMaxHistoryMessages,
-    DEFAULT_RUNTIME_CONFIG.chatMaxHistoryMessages,
-    '对话历史滑窗条数 (chatMaxHistoryMessages)',
-    { int: true, min: 1, max: 200 },
-  )
-  if (chatMaxHistoryMessages === null) return
-  const chatMaxRunCards = parseNumOrDefault(
-    runtimeForm.chatMaxRunCards,
-    DEFAULT_RUNTIME_CONFIG.chatMaxRunCards,
-    '历史运行卡片保留数 (chatMaxRunCards)',
-    { int: true, min: 1, max: 50 },
-  )
-  if (chatMaxRunCards === null) return
-  const chatMaxMarkdownPreviewChars = parseNumOrDefault(
-    runtimeForm.chatMaxMarkdownPreviewChars,
-    DEFAULT_RUNTIME_CONFIG.chatMaxMarkdownPreviewChars,
-    '报告预览截取字符上限 (chatMaxMarkdownPreviewChars)',
-    { int: true, min: 100, max: 20000 },
-  )
-  if (chatMaxMarkdownPreviewChars === null) return
-  const chatCompactTriggerMessages = parseNumOrDefault(
-    runtimeForm.chatCompactTriggerMessages,
-    DEFAULT_RUNTIME_CONFIG.chatCompactTriggerMessages,
-    '自动压缩触发阈值 (chatCompactTriggerMessages)',
-    { int: true, min: 2, max: 500 },
-  )
-  if (chatCompactTriggerMessages === null) return
-  const chatCompactKeepRecent = parseNumOrDefault(
-    runtimeForm.chatCompactKeepRecent,
-    DEFAULT_RUNTIME_CONFIG.chatCompactKeepRecent,
-    '自动压缩保留原文条数 (chatCompactKeepRecent)',
-    { int: true, min: 1, max: 200 },
-  )
-  if (chatCompactKeepRecent === null) return
-  if (chatCompactTriggerMessages <= chatCompactKeepRecent) {
-    store.showToast(
-      '自动压缩触发阈值 (chatCompactTriggerMessages) 必须严格大于保留原文条数 (chatCompactKeepRecent)',
-      'warning',
-    )
-    return
-  }
-  const chatManualCompactKeepRecent = parseNumOrDefault(
-    runtimeForm.chatManualCompactKeepRecent,
-    DEFAULT_RUNTIME_CONFIG.chatManualCompactKeepRecent,
-    '手动压缩保留原文条数 (chatManualCompactKeepRecent)',
-    { int: true, min: 1, max: 200 },
-  )
-  if (chatManualCompactKeepRecent === null) return
-  const chatManualCompactMinSlice = parseNumOrDefault(
-    runtimeForm.chatManualCompactMinSlice,
-    DEFAULT_RUNTIME_CONFIG.chatManualCompactMinSlice,
-    '手动压缩最小归档切片 (chatManualCompactMinSlice)',
-    { int: true, min: 1, max: 100 },
-  )
-  if (chatManualCompactMinSlice === null) return
-  const chatMaxMemorySummaryChars = parseNumOrDefault(
-    runtimeForm.chatMaxMemorySummaryChars,
-    DEFAULT_RUNTIME_CONFIG.chatMaxMemorySummaryChars,
-    '记忆摘要长度上限 (chatMaxMemorySummaryChars)',
-    { int: true, min: 200, max: 10000 },
-  )
-  if (chatMaxMemorySummaryChars === null) return
-  const chatMaxSummaryMsgChars = parseNumOrDefault(
-    runtimeForm.chatMaxSummaryMsgChars,
-    DEFAULT_RUNTIME_CONFIG.chatMaxSummaryMsgChars,
-    '待压缩单条截取上限 (chatMaxSummaryMsgChars)',
-    { int: true, min: 100, max: 10000 },
-  )
-  if (chatMaxSummaryMsgChars === null) return
-  const chatRequestLimit = parseNumOrDefault(
-    runtimeForm.chatRequestLimit,
-    DEFAULT_RUNTIME_CONFIG.chatRequestLimit,
-    '对话请求轮数上限 (chatRequestLimit)',
-    { int: true, min: 1, max: 50 },
-  )
-  if (chatRequestLimit === null) return
-  const chatToolCallsLimit = parseNumOrDefault(
-    runtimeForm.chatToolCallsLimit,
-    DEFAULT_RUNTIME_CONFIG.chatToolCallsLimit,
-    '对话工具调用上限 (chatToolCallsLimit)',
-    { int: true, min: 1, max: 100 },
-  )
-  if (chatToolCallsLimit === null) return
-  const chatTimeoutS = parseNumOrDefault(
-    runtimeForm.chatTimeoutS,
-    DEFAULT_RUNTIME_CONFIG.chatTimeoutS,
-    '对话单次超时 (chatTimeoutS)',
-    { gtZero: true },
-  )
-  if (chatTimeoutS === null) return
-  const chatSummaryRequestLimit = parseNumOrDefault(
-    runtimeForm.chatSummaryRequestLimit,
-    DEFAULT_RUNTIME_CONFIG.chatSummaryRequestLimit,
-    '摘要请求轮数上限 (chatSummaryRequestLimit)',
-    { int: true, min: 1, max: 20 },
-  )
-  if (chatSummaryRequestLimit === null) return
-  const chatSummaryToolCallsLimit = parseNumOrDefault(
-    runtimeForm.chatSummaryToolCallsLimit,
-    DEFAULT_RUNTIME_CONFIG.chatSummaryToolCallsLimit,
-    '摘要工具调用上限 (chatSummaryToolCallsLimit)',
-    { int: true, min: 1, max: 30 },
-  )
-  if (chatSummaryToolCallsLimit === null) return
-  const chatSummaryTimeoutS = parseNumOrDefault(
-    runtimeForm.chatSummaryTimeoutS,
-    DEFAULT_RUNTIME_CONFIG.chatSummaryTimeoutS,
-    '摘要生成超时 (chatSummaryTimeoutS)',
-    { gtZero: true },
-  )
-  if (chatSummaryTimeoutS === null) return
+  const nums = parsedNums as Record<RuntimeNumericKey, number>
 
   const payload: RuntimeConfigUpdatePayload = {
     gatewayMode: runtimeForm.gatewayMode,
     gatewayXmlStyle: runtimeForm.gatewayXmlStyle,
     gatewayUrl: runtimeForm.gatewayUrl.trim(),
-    gatewayConnectTimeoutS,
-    gatewayMaxConcurrency,
+    ...nums,
     llmModel: runtimeForm.llmModel.trim(),
     llmBaseUrl: runtimeForm.llmBaseUrl.trim(),
-    llmTemperature,
     llmMaxTokens: parsedMaxTokens,
-    llmTimeoutS,
-    llmHttpRetries,
     llmParallelToolCalls: boolFromTri(runtimeForm.llmParallelToolCalls),
     llmStrictTools: boolFromTri(runtimeForm.llmStrictTools),
     llmToolChoiceRequired: boolFromTri(runtimeForm.llmToolChoiceRequired),
     agentOutputMode: runtimeForm.agentOutputMode,
     agentNativeStrict: Boolean(runtimeForm.agentNativeStrict),
-    agentOutputRetries,
-    agentToolRetries,
-    agentRequestLimit,
-    agentToolCallsLimit,
-    agentRunTimeoutS,
-    agentMaxConcurrentRuns,
-    agentPreviewRows,
-    releasesKeep,
-    runsKeepDays,
-    agentQueryDefaultLimit,
-    agentQueryMaxLimit,
-    agentMaxPeriodMonths,
-    chatMaxDocChars,
-    chatMaxHistoryMessages,
-    chatMaxRunCards,
-    chatMaxMarkdownPreviewChars,
-    chatCompactTriggerMessages,
-    chatCompactKeepRecent,
-    chatManualCompactKeepRecent,
-    chatManualCompactMinSlice,
-    chatMaxMemorySummaryChars,
-    chatMaxSummaryMsgChars,
-    chatRequestLimit,
-    chatToolCallsLimit,
-    chatTimeoutS,
-    chatSummaryRequestLimit,
-    chatSummaryToolCallsLimit,
-    chatSummaryTimeoutS,
     note: runtimeForm.note.trim(),
   }
 
@@ -1509,6 +1385,19 @@ async function handleSaveRuntimeConfig() {
   } else if (runtimeForm.gatewayAccessTokenInput.trim()) {
     payload.gatewayAccessToken = runtimeForm.gatewayAccessTokenInput.trim()
   }
+
+  return payload
+}
+
+async function handleSaveRuntimeConfig() {
+  if (savingRuntime.value) return
+  if (!isRuntimeFormModified.value) {
+    store.showToast('运行配置与当前生效值一致，无需保存', 'info')
+    cancelEditRuntime()
+    return
+  }
+  const payload = buildValidatedRuntimePayload()
+  if (!payload) return
 
   savingRuntime.value = true
   try {
@@ -1916,7 +1805,12 @@ const displayedRuntimeCompareRows = computed(() =>
 )
 
 function handleLoadSnapshotToForm(revItem: RuntimeConfigRevision) {
-  populateRuntimeForm(revItem.config, `基于历史版本 ${revItem.rev} 微调`)
+  // 先以当前线上生效配置计算基准快照，再灌入历史快照，保证脏状态判断与直接保存均准确无误
+  populateRuntimeForm(effectiveRuntimeConfig.value)
+  runtimeFormInitialSnapshot.value = serializeRuntimeComparable(runtimeForm)
+  const snap =
+    (revItem as RuntimeConfigRevision & { snapshot?: RuntimeConfig }).snapshot ?? revItem.config
+  populateRuntimeForm(snap, `基于历史版本 ${revItem.rev} 微调`)
   isEditingRuntime.value = true
   activeSubView.value = 'workspace'
   store.showToast(`已将 ${revItem.rev} 的非敏感参数载入编辑表单，确认后点击保存即可生效`, 'info')
@@ -1947,6 +1841,11 @@ onMounted(async () => {
   ensureDefaultRuntimeRev()
   if (activeSubView.value === 'prompt-rollback' && selectedPromptRev.value) {
     void fetchPromptRevisionText(selectedPromptRev.value)
+  } else if (activeSubView.value === 'composite-template') {
+    consumePendingCompositeTargetRev()
+    if (!compositePreviewText.value && !compositePreviewError.value) {
+      void handlePreviewComposite()
+    }
   }
 })
 </script>
@@ -3353,6 +3252,7 @@ onMounted(async () => {
               v-for="rev in store.compositeTemplateRevisions"
               :key="rev.rev"
               class="composite-rev-item"
+              :class="{ 'is-target-rev': highlightCompositeRev === rev.rev }"
             >
               <div class="composite-rev-top">
                 <div style="display: flex; align-items: center; gap: 6px">

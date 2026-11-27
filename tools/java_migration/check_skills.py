@@ -34,47 +34,30 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from report_agent.config import Settings
-from report_agent.domain.api_contract import parse_api_yaml
-from report_agent.domain.resources import load_resource_dir
-from report_agent.domain.skill import parse_skill_markdown
-from report_agent.gateway.base import extract_records, parse_xml
-from report_agent.gateway.mock import MockGatewayClient
-from report_agent.gateway.unified_xml import build_request_xml
-from report_agent.runtime import tools as rt_tools
-from report_agent.runtime.deps import RunDeps
-from report_agent.runtime.evidence import EvidenceChecker
-from report_agent.runtime.output_model import build_report_model
-from report_agent.runtime.tools import Condition, OrderBy
-from report_agent.runtime.workspace import ApiResult, EventSink, Workspace
-from report_agent.store.layout import API_NAME_RE, SKILL_ID_RE
-
 HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent.parent
+sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(HERE))
+
+from _java_env import compile_java_harness, resolve_java_classpath  # noqa: E402
+from report_agent.config import Settings  # noqa: E402
+from report_agent.domain.api_contract import parse_api_yaml  # noqa: E402
+from report_agent.domain.resources import load_resource_dir, validate_skill  # noqa: E402
+from report_agent.domain.skill import load_skill_dir  # noqa: E402
+from report_agent.gateway.base import extract_records, parse_xml  # noqa: E402
+from report_agent.gateway.mock import MockGatewayClient  # noqa: E402
+from report_agent.gateway.unified_xml import build_request_xml  # noqa: E402
+from report_agent.runtime import tools as rt_tools  # noqa: E402
+from report_agent.runtime.deps import RunDeps  # noqa: E402
+from report_agent.runtime.evidence import EvidenceChecker  # noqa: E402
+from report_agent.runtime.output_model import build_report_model  # noqa: E402
+from report_agent.runtime.tools import Condition, OrderBy  # noqa: E402
+from report_agent.runtime.workspace import ApiResult, EventSink, Workspace  # noqa: E402
+from report_agent.store.layout import API_NAME_RE, SKILL_ID_RE  # noqa: E402
+
 # 待校验的 Python 资源目录（默认内置 seed），可用环境变量 MIGRATION_RESOURCES 指定其它目录
-STAGING = Path(os.environ.get("MIGRATION_RESOURCES") or (HERE.parent.parent / "src/report_agent/seed"))
+STAGING = Path(os.environ.get("MIGRATION_RESOURCES") or (ROOT / "src/report_agent/seed"))
 HARNESS = HERE / "harness"
-JAVA_AGENT = Path(os.environ.get("JAVA_AGENT_HOME", "/Users/zhangjialin/IdeaProjects/agent"))
-JAVA_CLASSES = JAVA_AGENT / "pdf-agent-parse/target/classes"
-M2 = Path.home() / ".m2/repository"
-JARS = [
-    "tools/jackson/core/jackson-core/3.1.4/jackson-core-3.1.4.jar",
-    "tools/jackson/core/jackson-databind/3.1.4/jackson-databind-3.1.4.jar",
-    "tools/jackson/dataformat/jackson-dataformat-xml/3.1.4/jackson-dataformat-xml-3.1.4.jar",
-    "com/fasterxml/jackson/core/jackson-annotations/2.22/jackson-annotations-2.22.jar",
-    "com/fasterxml/woodstox/woodstox-core/7.1.1/woodstox-core-7.1.1.jar",
-    "org/codehaus/woodstox/stax2-api/4.2.2/stax2-api-4.2.2.jar",
-    "org/springframework/spring-webflux/7.0.8/spring-webflux-7.0.8.jar",
-    "org/springframework/spring-web/7.0.8/spring-web-7.0.8.jar",
-    "org/springframework/spring-core/7.0.8/spring-core-7.0.8.jar",
-    "io/projectreactor/reactor-core/3.8.6/reactor-core-3.8.6.jar",
-    "org/reactivestreams/reactive-streams/1.0.4/reactive-streams-1.0.4.jar",
-    "org/slf4j/slf4j-api/2.0.18/slf4j-api-2.0.18.jar",
-    "org/apache/groovy/groovy/4.0.26/groovy-4.0.26.jar",
-    "org/apache/groovy/groovy-xml/4.0.26/groovy-xml-4.0.26.jar",
-    "org/apache/groovy/groovy-json/4.0.26/groovy-json-4.0.26.jar",
-    "org/apache/commons/commons-lang3/3.18.0/commons-lang3-3.18.0.jar",
-    "commons-logging/commons-logging/1.3.5/commons-logging-1.3.5.jar",
-]
 
 FAILS: list[str] = []
 
@@ -119,8 +102,10 @@ def check(cond: bool, msg: str) -> None:
 
 # ============================================================================ 1/2 解析与校验
 def load_resources():
-    """加载并校验全部 Skill 与接口契约文件。#Created By AiCoding(codex)"""
-    print("== 1. Skill 解析与校验")
+    """加载并校验全部 Skill（含 references/*.md 子文档与相对链接）与接口契约文件。#Created By AiCoding(codex)"""
+    print("== 1. Skill 目录解析（含 references/*.md 子文档）与 validate_skill 校验")
+    rs = load_resource_dir(STAGING)
+    check(not rs.load_issues, f"资源目录加载无异常：load_issues={rs.load_issues}")
     apis = {}
     for p in sorted((STAGING / "apis").glob("*.yaml")):
         apis[p.stem] = parse_api_yaml(p.read_text(encoding="utf-8"))
@@ -128,12 +113,20 @@ def load_resources():
     for d in sorted((STAGING / "skills").iterdir()):
         if not d.is_dir():
             continue
-        sk = parse_skill_markdown((d / "SKILL.md").read_text(encoding="utf-8"))
+        sk = load_skill_dir(d)
         skills[d.name] = sk
         missing = [a for a in sk.meta.apis if a not in apis]
-        check(sk.meta.name == d.name and bool(SKILL_ID_RE.match(sk.meta.name)) and not missing
-              and bool(sk.meta.description.strip()) and bool(sk.meta.title.strip()),
-              f"skill {d.name}: title={sk.meta.title} apis={sk.meta.apis} 缺失接口={missing}")
+        sk_issues = validate_skill(sk, rs)
+        check(
+            sk.meta.name == d.name
+            and bool(SKILL_ID_RE.match(sk.meta.name))
+            and not missing
+            and bool(sk.meta.description.strip())
+            and bool(sk.meta.title.strip())
+            and not sk_issues,
+            f"skill {d.name}: title={sk.meta.title} docs={len(sk.docs)} apis={sk.meta.apis} "
+            f"缺失接口={missing} issues={[i.to_dict() for i in sk_issues]}",
+        )
     # 11 个填报取数 Skill + 1 个聊天 template-router Skill
     check(len(skills) == 12, f"共 {len(skills)} 个 Skill（期望 12：11 个填报取数 + 1 个聊天 template-router）")
     print("== 2. 接口契约解析与 schema_errors")
@@ -145,13 +138,8 @@ def load_resources():
 
 # ============================================================================ 3 报文比对
 def java_cp() -> str | None:
-    """拼接 Java Harness 编译与运行所需的 classpath。#Created By AiCoding(codex)"""
-    if not shutil.which("javac") or not JAVA_CLASSES.exists():
-        return None
-    paths = [JAVA_CLASSES] + [M2 / j for j in JARS]
-    if not all(p.exists() for p in paths):
-        return None
-    return os.pathsep.join(str(p) for p in paths)
+    """统一通过 _java_env 解析 Java Harness 编译与运行所需的 classpath。#Created By AiCoding(codex)"""
+    return resolve_java_classpath(require_javac=True)
 
 
 def run_java(main: str, *args: str) -> dict[str, str] | None:
@@ -162,10 +150,9 @@ def run_java(main: str, *args: str) -> dict[str, str] | None:
     out_dir = Path(tempfile.mkdtemp(prefix="jxh_"))
     try:
         src = HARNESS / f"{main}.java"
-        subprocess.run(["javac", "-encoding", "UTF-8", "-cp", cp, "-d", str(out_dir), str(src)], check=True,
-                       capture_output=True)
+        run_cp = compile_java_harness(src, out_dir, cp)
         res = subprocess.run(
-            ["java", "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-cp", f"{out_dir}{os.pathsep}{cp}", main, *args],
+            ["java", "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-cp", run_cp, main, *args],
             capture_output=True, text=True, encoding="utf-8", check=True,
         )
         out = {}

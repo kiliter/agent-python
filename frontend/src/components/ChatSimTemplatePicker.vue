@@ -49,7 +49,10 @@ const inputsVersion = ref('')
 const cases = ref<RegressionCase[]>([])
 const casesLoading = ref(false)
 const fillSample = ref(true)
+const loadedTarget = ref<'online' | 'draft' | ''>('')
 let detailSeq = 0
+let inflightSelectKey = ''
+let inflightSelectPromise: Promise<void> | null = null
 
 const filtered = computed(() => {
   const q = keyword.value.trim().toLowerCase()
@@ -86,7 +89,7 @@ watch(
 watch(
   () => props.target,
   () => {
-    if (props.modelValue && selected.value) void selectTemplate(selected.value)
+    if (props.modelValue && selected.value) void selectTemplate(selected.value, true)
   },
 )
 
@@ -114,39 +117,69 @@ async function loadInputs(t: TemplateItem): Promise<{ inputs: TemplateInput[]; v
   }
 }
 
-async function selectTemplate(t: TemplateItem) {
+function selectTemplate(t: TemplateItem, force = false): Promise<void> {
+  const reqKey = `${t.id}:${props.target}`
+  if (!force && inflightSelectPromise && inflightSelectKey === reqKey) {
+    return inflightSelectPromise
+  }
+  if (
+    !force &&
+    !detailLoading.value &&
+    !casesLoading.value &&
+    !detailError.value &&
+    selected.value?.id === t.id &&
+    loadedTarget.value === props.target
+  ) {
+    return Promise.resolve()
+  }
+
   const seq = ++detailSeq
+  const reqTarget = props.target
   selected.value = t
+  loadedTarget.value = ''
   detailLoading.value = true
   detailError.value = ''
   inputs.value = []
   cases.value = []
   casesLoading.value = true
-  const casesTask = platformApi
-    .fetchTemplateCases(t.id)
-    .then(list => {
-      if (seq === detailSeq) cases.value = list || []
-    })
-    .catch(() => {
-      if (seq === detailSeq) cases.value = []
-    })
-    .finally(() => {
-      if (seq === detailSeq) casesLoading.value = false
-    })
-  try {
-    const res = await loadInputs(t)
-    if (seq !== detailSeq) return
-    inputs.value = res.inputs
-    inputsVersion.value = res.version
-  } catch (err) {
-    if (seq === detailSeq) detailError.value = `读取模板入参失败：${errorMessage(err)}`
-  } finally {
-    if (seq === detailSeq) detailLoading.value = false
-  }
-  await casesTask
+
+  const task = (async () => {
+    const casesTask = platformApi
+      .fetchTemplateCases(t.id)
+      .then(list => {
+        if (seq === detailSeq) cases.value = list || []
+      })
+      .catch(() => {
+        if (seq === detailSeq) cases.value = []
+      })
+      .finally(() => {
+        if (seq === detailSeq) casesLoading.value = false
+      })
+    try {
+      const res = await loadInputs(t)
+      if (seq !== detailSeq) return
+      inputs.value = res.inputs
+      inputsVersion.value = res.version
+      loadedTarget.value = reqTarget
+    } catch (err) {
+      if (seq === detailSeq) detailError.value = `读取模板入参失败：${errorMessage(err)}`
+    } finally {
+      if (seq === detailSeq) detailLoading.value = false
+    }
+    await casesTask
+  })()
+
+  inflightSelectKey = reqKey
+  inflightSelectPromise = task.finally(() => {
+    if (inflightSelectKey === reqKey) {
+      inflightSelectKey = ''
+      inflightSelectPromise = null
+    }
+  })
+  return inflightSelectPromise
 }
 
-/** 双击：选中并直接填入示例入参 */
+/** 双击：选中并直接填入示例入参（复用第一次点击已发起的请求，避免重复请求） */
 async function quickApply(t: TemplateItem) {
   await selectTemplate(t)
   if (!detailError.value && selected.value?.id === t.id) applyTemplate()
@@ -154,7 +187,7 @@ async function quickApply(t: TemplateItem) {
 
 function applyTemplate() {
   const t = selected.value
-  if (!t || detailLoading.value) return
+  if (!t || detailLoading.value || Boolean(detailError.value)) return
   emit('apply', {
     template: { id: t.id, name: t.name },
     inputs: inputs.value,
@@ -166,7 +199,7 @@ function applyTemplate() {
 
 function applyCase(c: RegressionCase) {
   const t = selected.value
-  if (!t) return
+  if (!t || detailLoading.value || casesLoading.value || Boolean(detailError.value)) return
   const caseInputs = c.inputs || {}
   const values: Array<{ key: string; value: string }> = inputs.value.map(i => ({
     key: i.key,
@@ -283,7 +316,13 @@ function caseSummary(c: RegressionCase): string {
                   <span v-if="caseSummary(c)"> · {{ caseSummary(c) }}</span>
                 </div>
               </div>
-              <el-button size="small" type="primary" plain :disabled="detailLoading" @click="applyCase(c)">
+              <el-button
+                size="small"
+                type="primary"
+                plain
+                :disabled="detailLoading || casesLoading || !!detailError"
+                @click="applyCase(c)"
+              >
                 载入入参 + 单据
               </el-button>
             </div>

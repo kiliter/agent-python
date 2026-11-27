@@ -36,13 +36,20 @@ const expanded = ref(true)
 const generatingAi = ref(false)
 const aiError = ref('')
 const expandedGroups = ref<Record<string, boolean>>({})
+let aiReqSeq = 0
+let trackedRunId = ''
 
 const hasNonFound = computed(() => Boolean(props.summary && props.summary.nonFoundCount > 0))
 const isBodyVisible = computed(() => props.alwaysExpanded || expanded.value)
 
 watch(
   () => [props.runId, props.summary?.impactedCount, props.defaultExpanded, props.alwaysExpanded] as const,
-  ([, impacted, defExp, alwaysExp]) => {
+  ([nextRunId, impacted, defExp, alwaysExp]) => {
+    if (nextRunId !== trackedRunId) {
+      trackedRunId = nextRunId
+      aiReqSeq += 1
+      generatingAi.value = false
+    }
     // 独立页签常驻展开；报告页签可按 defaultExpanded 默认收起为紧凑条，避免挤压正文
     expanded.value = alwaysExp ? true : (defExp && (impacted ?? 0) > 0)
     aiError.value = ''
@@ -113,19 +120,25 @@ const aiLines = computed<AiLine[]>(() => {
 })
 
 async function triggerAiSummary(force = false) {
-  if (!props.runId || !hasNonFound.value || generatingAi.value) return
+  const targetRunId = props.runId
+  if (!targetRunId || !hasNonFound.value || generatingAi.value) return
+  const reqSeq = ++aiReqSeq
   generatingAi.value = true
   aiError.value = ''
   expanded.value = true
   try {
-    const next = await platformApi.generateMissingFieldsAiSummary(props.runId, force)
+    const next = await platformApi.generateMissingFieldsAiSummary(targetRunId, force)
+    if (reqSeq !== aiReqSeq || props.runId !== targetRunId) return
     emit('updated', next)
     store.showToast(next.cached ? '已加载缓存的 AI 缺失原因总结' : 'AI 缺失原因总结已生成并保存', 'success')
   } catch (err) {
+    if (reqSeq !== aiReqSeq || props.runId !== targetRunId) return
     aiError.value = (err as Error).message || '生成 AI 总结失败'
     store.showToast(aiError.value, 'error')
   } finally {
-    generatingAi.value = false
+    if (reqSeq === aiReqSeq) {
+      generatingAi.value = false
+    }
   }
 }
 

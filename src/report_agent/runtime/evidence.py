@@ -679,7 +679,11 @@ class EvidenceChecker:
             nul_norms = [ns for ns in norm_set if "\x00" in ns]
             num_set: set[Decimal] | None = None
 
+            non_enum_cols = [c for c in f.columns if c.type != "enum"]
             for i, row in enumerate(rows):
+                if non_enum_cols and not any(scalar_to_str(row.get(c.name)).strip() for c in non_enum_cols):
+                    msgs.append(f"第 {i + 1} 行（value[{i}]）的非枚举列不能全部为空")
+                    continue
                 for col in f.columns:
                     if col.type == "enum":
                         continue

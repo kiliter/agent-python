@@ -166,7 +166,7 @@ def test_build_missing_summary_mixed_root_causes():
     assert res["foundCount"] == 1
     assert res["nonFoundCount"] == 7
     assert res["shownMissingCount"] == 4
-    assert res["defaultFallbackCount"] == 2
+    assert res["defaultFallbackCount"] == 1
     assert res["skippedCount"] == 1
     assert res["impactedCount"] == 6
 

@@ -7,6 +7,7 @@
 import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
 import Sortable from 'sortablejs'
 import { usePlatformStore } from '@/stores/platform'
+import { buildFieldInsertSnippet, formatRunFieldSummary } from '@/utils/fieldFormat'
 import type { EvidenceType, TemplateField } from '@/types/platform'
 
 type IdeLeftSection = 'info' | 'fields' | 'inputs' | 'skills' | 'cases' | 'history'
@@ -279,19 +280,9 @@ function evidenceBadgeMeta(evType: EvidenceType): { short: string; label: string
 function fieldDotMeta(field: TemplateField): { cls: string; title: string } {
   const rf = runFieldMap.value.get(field.name)
   if (rf) {
-    if (rf.runStatus === 'found') {
-      if (rf.type === '列表') {
-        const n = Array.isArray(rf.runRows) ? rf.runRows.length : (rf.runValue || '').trim() === '[]' ? 0 : -1
-        return {
-          cls: 'ok',
-          title: n === 0 ? '调试结果：无记录（0 行）' : n > 0 ? `已找到：共 ${n} 行` : '已找到',
-        }
-      }
-      return { cls: 'ok', title: `已找到：${rf.runValue || '有效值'}` }
-    }
     return {
-      cls: 'warn',
-      title: rf.type === '列表' ? '缺失：未取到列表结果' : '未取到证据，按缺失时处理方式处理',
+      cls: rf.runStatus === 'found' ? 'ok' : 'warn',
+      title: formatRunFieldSummary(rf, 'dot'),
     }
   }
   if ((field.bodyUsageCount ?? 0) > 0) {
@@ -360,13 +351,18 @@ function handleBackClick() {
 }
 
 /** 点击左侧 50px 活动栏按钮：同项切换折叠，异项展开并激活对应属性检查器 */
-function onSectionTabClick(sec: IdeLeftSection) {
+async function onSectionTabClick(sec: IdeLeftSection) {
   if (store.ideLeftSection === sec) {
     store.ideLeftCollapsed = !store.ideLeftCollapsed
     if (!store.ideLeftCollapsed) {
       ensureSectionSelection(sec)
     }
     return
+  }
+  if (store.ideLeftSection === 'fields') {
+    if (!(await store.flushPendingInspectorEdits('switch-field'))) return
+  } else if (store.ideLeftSection === 'cases') {
+    if (!(await store.flushPendingInspectorEdits('switch-case'))) return
   }
   searchQuery.value = ''
   store.ideLeftSection = sec
@@ -376,9 +372,12 @@ function onSectionTabClick(sec: IdeLeftSection) {
 }
 
 /** 列表头右侧新建 / 绑定 / 刷新动作 */
-function handleHeaderCreateAction() {
+async function handleHeaderCreateAction() {
   const sec = store.ideLeftSection
   if (sec === 'fields') {
+    if (store.ideSelectedFieldIdx !== -1 && !(await store.flushPendingInspectorEdits('switch-field'))) {
+      return
+    }
     store.ideCreatingFieldDraft = ''
     store.ideSelectedFieldIdx = -1
     store.ideRightMode = 'inspector'
@@ -389,6 +388,9 @@ function handleHeaderCreateAction() {
   } else if (sec === 'skills') {
     store.openModal('add-skill')
   } else if (sec === 'cases') {
+    if (store.ideSelectedCaseIdx !== -1 && !(await store.flushPendingInspectorEdits('switch-case'))) {
+      return
+    }
     store.ideSelectedCaseIdx = -1
     store.ideRightMode = 'inspector'
   } else if (sec === 'history') {
@@ -400,7 +402,12 @@ function clearSearch() {
   searchQuery.value = ''
 }
 
-function onSelectField(realIdx: number) {
+async function onSelectField(realIdx: number) {
+  if (store.ideSelectedFieldIdx === realIdx && store.ideLeftSection === 'fields') {
+    store.ideRightMode = 'inspector'
+    return
+  }
+  if (!(await store.flushPendingInspectorEdits('switch-field'))) return
   store.ideCreatingFieldDraft = ''
   store.ideSelectedFieldIdx = realIdx
   store.ideRightMode = 'inspector'
@@ -410,12 +417,12 @@ function onFieldDoubleClick(fieldName: string) {
   store.requestLocateFieldInBody(fieldName)
 }
 
-function onQuickInsertField(fieldName: string) {
-  store.requestInsertIntoBody(`{{${fieldName}}}`)
+function onQuickInsertField(field: TemplateField) {
+  store.requestInsertIntoBody(buildFieldInsertSnippet(field))
 }
 
 function onSelectUndefinedVar(varName: string) {
-  store.selectIdeFieldByName(varName)
+  void store.selectIdeFieldByName(varName)
 }
 
 function onSelectInput(realIdx: number) {
@@ -428,7 +435,12 @@ function onSelectSkill(skillId: string) {
   store.ideRightMode = 'inspector'
 }
 
-function onSelectCase(realIdx: number) {
+async function onSelectCase(realIdx: number) {
+  if (store.ideSelectedCaseIdx === realIdx && store.ideLeftSection === 'cases') {
+    store.ideRightMode = 'inspector'
+    return
+  }
+  if (!(await store.flushPendingInspectorEdits('switch-case'))) return
   store.ideSelectedCaseIdx = realIdx
   store.ideRightMode = 'inspector'
 }
@@ -750,10 +762,15 @@ onBeforeUnmount(() => {
             <button
               type="button"
               class="quick-insert-btn"
-              :title="`在编辑器光标处插入 {{${field.name}}}`"
-              @click.stop="onQuickInsertField(field.name)"
+              :title="
+                field.type === '列表'
+                  ? `在编辑器光标处插入列表循环 {% for item in ${field.name} %}`
+                  : `在编辑器光标处插入 {{${field.name}}}`
+              "
+              @click.stop="onQuickInsertField(field)"
             >
-              插入&#123;&#123;&#125;&#125;
+              <template v-if="field.type === '列表'">插入循环</template>
+              <template v-else>插入&#123;&#123;&#125;&#125;</template>
             </button>
           </div>
         </div>

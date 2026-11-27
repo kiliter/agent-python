@@ -64,7 +64,7 @@ const emit = defineEmits<{
 
 <style scoped>
 .confirm-modal-layer {
-  z-index: 2250;
+  z-index: var(--z-confirm, 1280);
 }
 
 .confirm-dialog-card {

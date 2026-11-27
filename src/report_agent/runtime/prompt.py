@@ -11,10 +11,10 @@ from ..domain.jinja_env import body_field_conditions
 from ..domain.template import FieldDef
 from .deps import RunDeps
 from .output_model import EVIDENCE_LABEL
+from .router import strip_java_rule_note
 
 TYPE_LABEL = {"string": "文本", "enum": "枚举", "date": "日期", "list": "列表"}
 MISSING_LABEL = {"placeholder": "保留占位", "empty": "置空", "value": "默认值"}
-_JAVA_RULE_NOTE_RE = re.compile(r"\n+原规则（Java）：")
 
 EVIDENCE_RULES = """## 证据填写规则（平台会逐条核对，不通过会退回重填）
 - 原文引用（quote）：evidence 写 {"type":"api","resultId":"r1","row":3,"column":"smsContent"}（row 用 query_result 返回的 row），
@@ -44,11 +44,32 @@ def _list_columns_line(f: FieldDef) -> str:
     return "\n".join(lines)
 
 
-_EQ_BRANCH_RE = re.compile(r'^\s*\(?([A-Za-z0-9_\u4e00-\u9fff]+)\s*==\s*"([^"]+)"\)?\s*$')
+_EQ_BRANCH_RE = re.compile(r'^\s*([A-Za-z0-9_\u4e00-\u9fff]+)\s*==\s*["\']([^"\']+)["\']\s*$')
+_OR_SPLIT_RE = re.compile(r"\s+(?:或|or)\s+")
+
+
+def _strip_outer_parens(expr: str) -> str:
+    """剥离表达式最外层成对包裹的括号（如 `((a) or (b))` -> `(a) or (b)`）。#Created By AiCoding(codex)"""
+    s = expr.strip()
+    while len(s) >= 2 and s[0] == "(" and s[-1] == ")":
+        depth = 0
+        matched_end = False
+        for i, ch in enumerate(s):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    matched_end = i == len(s) - 1
+                    break
+        if not matched_end:
+            break
+        s = s[1:-1].strip()
+    return s
 
 
 def _covers_all_enum_values(cond_text: str, deps: tuple[str, ...], by_name: dict[str, FieldDef]) -> bool:
-    """判断形如 `(争议类型 == "业务") 或 (争议类型 == "营销活动")` 的分支集合是否覆盖该枚举字段全部可选值。
+    """判断形如 `(争议类型 == "业务") 或/or (争议类型 == "营销活动")` 的分支集合是否覆盖该枚举字段全部可选值。
 
     #Created By AiCoding(codex)
     全覆盖说明只要枚举字段有合法取值就必然展示，视为无条件必查字段，避免多余提示。
@@ -58,7 +79,10 @@ def _covers_all_enum_values(cond_text: str, deps: tuple[str, ...], by_name: dict
     dep_field = by_name.get(deps[0])
     if dep_field is None or dep_field.type != "enum" or not dep_field.values:
         return False
-    branches = [b.strip() for b in cond_text.split(" 或 ") if b.strip()]
+    unwrapped = _strip_outer_parens(cond_text)
+    branches = [_strip_outer_parens(b) for b in _OR_SPLIT_RE.split(unwrapped) if b.strip()]
+    if not branches:
+        return False
     matched_vals: set[str] = set()
     for br in branches:
         m = _EQ_BRANCH_RE.match(br)
@@ -152,7 +176,7 @@ def _field_line(f: FieldDef, *, condition: str | None = None) -> str:
     if f.is_list:
         parts.append(_list_columns_line(f))
     if f.description:
-        cleaned_desc = _JAVA_RULE_NOTE_RE.split(f.description, maxsplit=1)[0].strip()
+        cleaned_desc = strip_java_rule_note(f.description)
         if cleaned_desc:
             parts.append(f"- 说明：{cleaned_desc}")
     return "\n".join(parts)

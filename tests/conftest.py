@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -43,3 +45,28 @@ def container(settings: Settings):
 @pytest.fixture
 def case_c01() -> dict:
     return yaml.safe_load((SEED_DIR / "cases/1001/C-01.yaml").read_text(encoding="utf-8"))
+
+
+def parse_sse(raw_text: str) -> list[dict[str, Any]]:
+    """解析标准 SSE 响应帧序列，忽略空块与注释心跳行。#Created By AiCoding(codex)"""
+    events: list[dict[str, Any]] = []
+    for block in raw_text.replace("\r\n", "\n").split("\n\n"):
+        lines = [ln for ln in block.splitlines() if ln.strip() and not ln.startswith(":")]
+        if not lines:
+            continue
+        evt_name = "message"
+        event_id: str | None = None
+        data_lines: list[str] = []
+        for ln in lines:
+            if ln.startswith("event:"):
+                evt_name = ln[6:].strip()
+            elif ln.startswith("id:"):
+                event_id = ln[3:].strip()
+            elif ln.startswith("data:"):
+                data_lines.append(ln[5:].lstrip())
+        if data_lines:
+            frame: dict[str, Any] = {"event": evt_name, "data": json.loads("\n".join(data_lines))}
+            if event_id is not None:
+                frame["id"] = event_id
+            events.append(frame)
+    return events

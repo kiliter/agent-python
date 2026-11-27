@@ -15,7 +15,7 @@ import time
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
-from pydantic_ai import Agent, ModelRetry, NativeOutput, PromptedOutput, ToolOutput, UsageLimits
+from pydantic_ai import Agent, ModelRetry, UsageLimits
 
 from ..domain.api_contract import ApiContract
 from ..domain.composite import (
@@ -23,10 +23,13 @@ from ..domain.composite import (
     build_composite_summary,
     render_composite_report,
 )
+from ..domain.sanitize import sanitize_sensitive_text
 from ..gateway.base import ApiCallResult, GatewayClient
 from ..store.runs import new_run_id
+from .model_factory import build_output_spec
 from .router import TemplateRouteError
 from .runner import AgentRunner, Entry, InputValidationError, RunRequest, TemplateUnavailable
+from .singleflight import IdempotentSingleFlight
 from .workspace import ProcessEvent
 
 log = logging.getLogger(__name__)
@@ -66,8 +69,12 @@ class SharedGatewayClient(GatewayClient):
 
     def __init__(self, inner: GatewayClient) -> None:
         self._inner = inner
-        self._cache: dict[tuple[str, str], ApiCallResult] = {}
-        self._inflight: dict[tuple[str, str], asyncio.Future[ApiCallResult]] = {}
+        self._singleflight: IdempotentSingleFlight[tuple[str, str], ApiCallResult] = IdempotentSingleFlight(
+            is_success=lambda r: r.ok,
+            to_cached=lambda r: self._clone_result(r, cached=False),
+        )
+        self._cache = self._singleflight.cache
+        self._inflight = self._singleflight.inflight
         self.cache_hits = 0
 
     @staticmethod
@@ -88,46 +95,10 @@ class SharedGatewayClient(GatewayClient):
             return await self._inner.invoke(contract, args)
 
         cache_key = (contract.name, json.dumps(args, sort_keys=True, ensure_ascii=False, default=str))
-        seen_inflight: set[int] = set()
-        while True:
-            cached = self._cache.get(cache_key)
-            if cached is not None:
-                self.cache_hits += 1
-                return self._clone_result(cached, cached=True)
-            inflight = self._inflight.get(cache_key)
-            if inflight is None or id(inflight) in seen_inflight:
-                break
-            seen_inflight.add(id(inflight))
-            try:
-                shared = await asyncio.shield(inflight)
-            except asyncio.CancelledError:
-                cur_task = asyncio.current_task()
-                if cur_task is None or cur_task.cancelling() > 0:
-                    raise
-                continue
-            if shared.ok:
-                self.cache_hits += 1
-                return self._clone_result(shared, cached=True)
-
-        fut: asyncio.Future[ApiCallResult] | None = None
-        if cache_key not in self._inflight:
-            fut = asyncio.get_running_loop().create_future()
-            self._inflight[cache_key] = fut
-
-        try:
-            res = await self._inner.invoke(contract, args)
-            if res.ok:
-                self._cache[cache_key] = self._clone_result(res, cached=False)
-            if fut is not None and not fut.done():
-                fut.set_result(res)
-            return self._clone_result(res, cached=False)
-        except BaseException:
-            if fut is not None and not fut.done():
-                fut.cancel()
-            raise
-        finally:
-            if fut is not None and self._inflight.get(cache_key) is fut:
-                self._inflight.pop(cache_key, None)
+        res, reused = await self._singleflight.do(cache_key, lambda: self._inner.invoke(contract, args))
+        if reused and res.ok:
+            self.cache_hits += 1
+        return self._clone_result(res, cached=reused)
 
 
 @dataclass
@@ -157,42 +128,40 @@ class CompositeRunRequest:
     composite_run_id: str | None = None
 
 
-def _build_polish_output(mode: str, strict: bool) -> Any:
-    if mode == "native":
-        return NativeOutput(CompositePolishOutput, name="submit_polished_report", strict=strict)
-    if mode in ("json_object", "prompted"):
-        return PromptedOutput(CompositePolishOutput, name="submit_polished_report")
-    return ToolOutput(
-        CompositePolishOutput,
-        name="submit_polished_report",
-        description="提交二次润色后的完整 Markdown 复合汇总报告。",
-    )
-
-
 class CompositeRunner:
     """复合工单编排器：复用 AgentRunner 单模板强证据管道，统一拼装与可选二次润色。#Created By AiCoding(codex)"""
 
     def __init__(self, runner: AgentRunner) -> None:
         self.runner = runner
+        self._cached_polish_agent: tuple[tuple[Any, ...], Any, Any, Agent[None, CompositePolishOutput]] | None = None
 
-    async def polish_markdown(
-        self,
-        assembled_markdown: str,
-        *,
-        order: dict[str, Any] | None = None,
-        instruction: str = "",
-    ) -> str:
-        """对已通过 Jinja2 确定性拼装的大报告执行大模型二次润色（严禁篡改核查事实）。#Created By AiCoding(codex)"""
-        base_md = (assembled_markdown or "").strip()
-        if not base_md:
-            raise ValueError("待润色的汇总报告正文不能为空")
-
+    def _get_or_build_polish_agent(self) -> tuple[Agent[None, CompositePolishOutput], Any]:
+        """按运行期配置快照 _bundle.seq 缓存二次润色 Agent，热重载后自动重建。#Created By AiCoding(codex)"""
         bundle = self.runner._bundle
         rt_settings = bundle.settings
         rt_model = bundle.model
         rt_model_settings = bundle.model_settings
+        cache_key = (
+            bundle.seq,
+            rt_settings.agent_output_mode,
+            rt_settings.agent_native_strict,
+            rt_settings.agent_output_retries,
+        )
+        cached = self._cached_polish_agent
+        if (
+            cached is not None
+            and cached[0] == cache_key
+            and cached[1] is rt_model
+            and cached[2] == rt_model_settings
+        ):
+            return cached[3], rt_settings
 
-        output_spec = _build_polish_output(rt_settings.agent_output_mode, rt_settings.agent_native_strict)
+        output_spec = build_output_spec(
+            CompositePolishOutput,
+            name="submit_polished_report",
+            description="提交二次润色后的完整 Markdown 复合汇总报告。",
+            settings=rt_settings,
+        )
         agent: Agent[None, CompositePolishOutput] = Agent(
             rt_model,
             output_type=output_spec,
@@ -208,6 +177,23 @@ class CompositeRunner:
                 raise ModelRetry("润色后的 markdown 正文不能为空。")
             return out.model_copy(update={"markdown": cleaned})
 
+        self._cached_polish_agent = (cache_key, rt_model, rt_model_settings, agent)
+        return agent, rt_settings
+
+    async def polish_markdown(
+        self,
+        assembled_markdown: str,
+        *,
+        order: dict[str, Any] | None = None,
+        instruction: str = "",
+    ) -> str:
+        """对已通过 Jinja2 确定性拼装的大报告执行大模型二次润色（严禁篡改核查事实）。#Created By AiCoding(codex)"""
+        base_md = (assembled_markdown or "").strip()
+        if not base_md:
+            raise ValueError("待润色的汇总报告正文不能为空")
+
+        agent, rt_settings = self._get_or_build_polish_agent()
+
         order_lines = "\n".join(
             f"- {k}：{v}" for k, v in (order or {}).items() if str(k).strip() and str(v or "").strip()
         )
@@ -218,7 +204,9 @@ class CompositeRunner:
             + f"## 待润色的确定性拼装报告（请保留全部核查事实与待补占位符）\n{base_md}"
         )
 
-        timeout_s = max(30.0, float(getattr(rt_settings, "agent_run_timeout_s", POLISH_TIMEOUT_S)))
+        raw_run_timeout = getattr(rt_settings, "agent_run_timeout_s", POLISH_TIMEOUT_S)
+        eff_run_timeout = POLISH_TIMEOUT_S if raw_run_timeout is None else float(raw_run_timeout)
+        timeout_s = min(POLISH_TIMEOUT_S, max(10.0, eff_run_timeout))
         async with asyncio.timeout(timeout_s):
             res = await agent.run(
                 user_prompt,
@@ -311,7 +299,7 @@ class CompositeRunner:
             try:
                 out = await self.runner.run(sub_req, listener=_sub_listener if on_sub_event else None)
             except (InputValidationError, TemplateUnavailable, TemplateRouteError) as exc:
-                err_msg = str(exc)
+                err_msg = sanitize_sensitive_text(exc)
                 matched_tid = getattr(exc, "template_id", None) if item.template_id is None else item.template_id
                 matched_tname = getattr(exc, "template_name", None) or tpl_name
                 matched_routing = getattr(exc, "routing", None)
@@ -339,9 +327,9 @@ class CompositeRunner:
                 }
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001 - 单子项异常不中断整单其他子项
+            except Exception as exc:  # noqa: BLE001 - 单子项异常不中断整单其他子项，对外消息统一脱敏
                 log.exception("复合工单子项运行异常 compositeRunId=%s idx=%d", composite_run_id, idx)
-                err_msg = f"子项运行异常：{type(exc).__name__} {exc}"
+                err_msg = sanitize_sensitive_text(f"子项运行异常：{type(exc).__name__} {exc}".strip())
                 if on_progress:
                     on_progress("error", f"[{idx}/{len(req.items)}] 「{label}」失败：{err_msg}", False)
                 return {
@@ -368,6 +356,8 @@ class CompositeRunner:
             resolved_tid = out.get("templateId") if out.get("templateId") is not None else item.template_id
             resolved_tname = str(out.get("templateName") or tpl_name)
             final_label = explicit_label or resolved_tname
+            raw_sub_err = out.get("error")
+            sub_err = sanitize_sensitive_text(raw_sub_err) if raw_sub_err else None
             if on_progress:
                 icon = "check" if st == "SUCCESS" else ("warn" if st == "PARTIAL" else "error")
                 on_progress(
@@ -387,7 +377,7 @@ class CompositeRunner:
                 "foundCount": found_c,
                 "totalCount": total_c,
                 "missingShown": missing_shown,
-                "error": out.get("error"),
+                "error": sub_err,
                 "durationMs": int(out.get("durationMs") or 0),
                 "params": merged_inputs,
                 **({"routing": out["routing"]} if out.get("routing") else {}),
@@ -439,8 +429,8 @@ class CompositeRunner:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - 润色失败不丢失已完成的强证据拼装版
-                log.warning("复合工单大模型二次润色失败 compositeRunId=%s：%s", composite_run_id, exc)
-                polish_error = f"大模型二次润色失败，已回退确定性拼装版：{exc}"
+                polish_error = sanitize_sensitive_text(f"大模型二次润色失败，已回退确定性拼装版：{exc}")
+                log.warning("复合工单大模型二次润色失败 compositeRunId=%s：%s", composite_run_id, polish_error)
                 if on_progress:
                     on_progress("warn", polish_error, False)
 

@@ -6,9 +6,11 @@ sources:
   - tools/java_migration/MAPPING.md
   - tools/java_migration/TEMPLATES.md
   - tools/java_migration/verify_structure.py
+  - src/report_agent/seed/templates/103/body.md.j2
   - src/report_agent/seed/templates/116/body.md.j2
+  - src/report_agent/seed/templates/131/body.md.j2
   - docs/frontend-api-handoff.md
-updated: 2026-11-12
+updated: 2026-11-27
 ---
 
 # 待业务确认事项与演进议题
@@ -32,6 +34,14 @@ updated: 2026-11-12
 4. **模板 `116`（`增值业务扣费争议处理模板`）源自 Java 原模板的 `受理渠道` 枚举分支失配**
    - 在 `src/report_agent/seed/templates/116/body.md.j2` 第 38 行的条件分支（迁移自前代 Java 原模板，审查报告简记为 `受理渠道 == "合作方平台" or "一级电渠"` 类第三方电渠枚举失配，原模板实际字面量为 `{% elif 受理渠道 == "合作方平台" or 受理渠道 == "电视端" or 受理渠道 == "APP" or 受理渠道 == "短信" %}`）中，比较值不在 `accept-type` 产出的 `受理渠道` 枚举集合 `["热线", "掌上营业厅", "其他"]` 内，因此该 `elif` 分支在 Java 现网与当前 Python 版中均不可达（统一落入后续 `else` 分支）。
    - 为保持与 Java 原模板逐字等价（`S2`），当前未擅自改写该模板正文，并在 `tools/java_migration/verify_structure.py` 的 **S9** 枚举字面量 AST 门禁中将其显式登记为已知历史白名单；后续需业务侧确认是否应合并映射至 `"掌上营业厅"` 或扩展增值业务专属渠道判定规则（待业务确认）。
+
+5. **模板 `131`（`过户业务受阻类`）源自 Java 原模板的三反引号代码围栏包裹控制语句残留**
+   - 在 `src/report_agent/seed/templates/131/body.md.j2` 中，原前代 Java 模板使用三反引号代码围栏（`` ``` ``）包裹了 `{% if 手机号类别 == "靓号" %}`、`{% else %}` 与 `{% endif %}` 三处控制语句；控制语句经模板引擎求值消去后，会在最终渲染正文的开头、分支切换处或结尾输出空代码块。
+   - 为保持迁移结构校验 **S2** 与 Java 现网输出逐字一致，当前暂未擅自删改模板正文，待业务侧核对下游工单系统是否依赖该围栏分隔或应予以清理（待业务确认）。
+
+6. **模板 `103`（`业务办理告知争议类`）尾部三渠道分支告知话术与附件类型对应关系疑似错位**
+   - 在 `src/report_agent/seed/templates/103/body.md.j2` 末尾的 `受理渠道` 三分支段落（第 47～65 行）中：`受理渠道 == "热线"` 分支写“业务受理单已明确标注……”并配二次确认短信附件，`受理渠道 == "掌上营业厅"` 分支写“我公司与客户于{沟通日期}的电话录音第{时间段}处已明确告知……”并配业务办理录音附件，`else`（其他渠道）分支写“办理页面已明确标注……”并配宣传页面附件，告知载体话术与渠道/附件类型的对应关系疑似错位。
+   - 目前为保持 **S2** 与 Java 现网原模板逐字一致暂未擅改，待业务侧核对现网模板口径后确认是否调整（待业务确认）。
 
 ## 2. 平台后续演进议题
 

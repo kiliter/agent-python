@@ -9,7 +9,8 @@
 
 from __future__ import annotations
 
-import shutil
+import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -37,7 +38,17 @@ from report_agent.runtime.workspace import ApiResult, Workspace
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools/java_migration"
-JAVA_AGENT = Path("/Users/zhangjialin/IdeaProjects/agent")
+JAVA_AGENT = Path(os.environ.get("JAVA_AGENT_HOME", "/Users/zhangjialin/IdeaProjects/agent"))
+
+
+def _has_java_render_env() -> bool:
+    """加载 tools/java_migration/_java_env.py 校验 JDK、Java 编译产物与运行依赖目录是否齐备。"""
+    spec = importlib.util.spec_from_file_location("_java_env", TOOLS / "_java_env.py")
+    if spec is None or spec.loader is None:
+        return False
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return bool(mod.has_java_render_env(JAVA_AGENT))
 
 
 def test_prod_seed_loads_and_validates_zero_warnings():
@@ -295,9 +306,8 @@ def test_structure_consistent_with_java():
 
 
 @pytest.mark.skipif(
-    shutil.which("java") is None
-    or not (JAVA_AGENT / "pdf-agent-parse/target/classes/com/agile/agent/pdf/parse/template").exists(),
-    reason="缺少 JDK 或 Java 编译产物",
+    not _has_java_render_env(),
+    reason="缺少 JDK、Java 编译产物或 Java 运行依赖目录",
 )
 def test_render_equivalent_to_java_pebble():
     """Pebble 与 Jinja2 渲染对拍校验（含模板 120 修复分支验证）。#Created By AiCoding(codex)"""

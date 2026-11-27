@@ -31,7 +31,7 @@ import type { ChatTarget, TemplatePreview, TemplatePreviewField, TemplatePreview
 import { chatErrorText, fetchTemplatePreview, isAbortError } from '../chatApi'
 import { copyText, renderSafeMarkdown } from '../markdown'
 import { stageToast } from '../stageToast'
-import { useStageFloatTip } from '../useStageFloatTip'
+import StageModalShell from './StageModalShell.vue'
 
 const props = defineProps<{
   visible: boolean
@@ -49,12 +49,10 @@ const emit = defineEmits<{
   (e: 'useTemplate', templateId: number): void
 }>()
 
-const cardRef = ref<HTMLElement | null>(null)
-const { tip, showTip, hideTip } = useStageFloatTip(cardRef)
+const modalShellRef = ref<InstanceType<typeof StageModalShell> | null>(null)
 
 type SubTab = 'sample' | 'source' | 'schema'
 const subTab = ref<SubTab>('sample')
-const isFullscreen = ref(false)
 const loading = ref(false)
 const errorText = ref('')
 const preview = ref<TemplatePreview | null>(null)
@@ -120,9 +118,8 @@ watch(
   () => [props.visible, props.sessionId, props.inputsVersion ?? 0, props.target ?? 'online', props.templateId] as const,
   ([vis, sid, ver, tgt, tid], prev) => {
     if (!vis) {
-      isFullscreen.value = false
       expandedFields.value = new Set()
-      hideTip()
+      modalShellRef.value?.hideTip()
       abortPending()
       return
     }
@@ -135,7 +132,7 @@ watch(
     if (!prev || prev[1] !== sid || prev[4] !== tid) {
       subTab.value = 'sample'
       expandedFields.value = new Set()
-      hideTip()
+      modalShellRef.value?.hideTip()
     }
     const justOpened = !prev || !prev[0]
     const keyChanged = !prev || prev[1] !== sid || prev[2] !== ver || prev[3] !== tgt || prev[4] !== tid
@@ -155,7 +152,7 @@ watch(
 )
 
 watch(subTab, () => {
-  hideTip()
+  modalShellRef.value?.hideTip()
 })
 
 onBeforeUnmount(() => {
@@ -317,20 +314,16 @@ function onUse() {
 </script>
 
 <template>
-  <div
-    v-if="visible && templateId !== null"
-    class="stage-modal-backdrop tpl-structure-layer"
-    :class="{ 'is-fullscreen': isFullscreen }"
-    role="dialog"
-    aria-modal="true"
+  <StageModalShell
+    ref="modalShellRef"
+    :visible="visible && templateId !== null"
     aria-label="模板结构与样例预览"
-    @click.self="emit('close')"
+    layer="submodal"
+    backdrop-class="tpl-structure-layer"
+    card-class="tpl-structure-card"
+    @close="emit('close')"
   >
-    <div
-      ref="cardRef"
-      class="stage-modal-card tpl-structure-card"
-      :class="{ 'is-fullscreen': isFullscreen }"
-    >
+    <template v-if="templateId !== null" #default="{ isFullscreen, toggleFullscreen, showTip, hideTip }">
       <!-- 1. 单行 40px 合并 IDE 顶栏 -->
       <header class="ts-header">
         <div class="ts-title-wrap">
@@ -408,7 +401,7 @@ function onUse() {
             class="eb-icon-btn is-bordered"
             :class="{ 'is-accent': isFullscreen }"
             :aria-label="isFullscreen ? '退出全屏' : '页内全屏'"
-            @click="isFullscreen = !isFullscreen"
+            @click="toggleFullscreen"
             @mouseenter="showTip($event, isFullscreen ? '退出全屏' : '页内全屏')"
             @mouseleave="hideTip"
           >
@@ -723,14 +716,8 @@ function onUse() {
           </span>
         </div>
       </footer>
-
-      <!-- 窗口弹窗内零依赖悬浮提示 -->
-      <div v-if="tip.visible" class="eb-float-tip" :style="tip.style">
-        <div v-if="tip.title" class="eb-float-tip-title">{{ tip.title }}</div>
-        <div>{{ tip.text }}</div>
-      </div>
-    </div>
-  </div>
+    </template>
+  </StageModalShell>
 </template>
 
 <style scoped>
@@ -752,12 +739,8 @@ function onUse() {
   }
 }
 
-/* 高于 SwitchTemplateDialog，确保从模板库弹窗内点「预览模板」时自然叠在上方 */
-.tpl-structure-layer {
-  z-index: 1220;
-}
-
-.tpl-structure-card {
+/* 高于普通业务弹窗 (--z-modal)，由 StageModalShell layer="submodal" (--z-submodal) 统一挂载层级 */
+:deep(.tpl-structure-card) {
   width: min(1060px, calc(var(--stage-w, 1280px) - 64px));
   height: calc(var(--stage-h, 720px) * 0.88);
 }

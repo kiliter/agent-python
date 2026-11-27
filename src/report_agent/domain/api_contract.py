@@ -13,7 +13,7 @@ import json
 import re
 from datetime import datetime
 from typing import Any, Literal
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 import yaml
 from jsonschema import Draft202012Validator
@@ -100,8 +100,11 @@ class RecordsSpec(_Base):
         return val
 
 
+_UNLIMITED_PREVIEW_ROWS = 1_000_000
+
+
 class SummarySpec(_Base):
-    """call_api 返回给模型的摘要大小（maxPreviewChars 为 -1 时表示不截断全文保留）。#Created By AiCoding(codex)"""
+    """call_api 返回给模型的摘要大小（maxPreviewChars / previewRows 为 -1 时表示不截断全量保留）。#Created By AiCoding(codex)"""
 
     maxPreviewChars: int = 60
     previewRows: int | None = None
@@ -109,8 +112,15 @@ class SummarySpec(_Base):
     @field_validator("maxPreviewChars")
     @classmethod
     def _validate_max_preview_chars(cls, val: int) -> int:
-        if val != -1 and val < 1:
+        if isinstance(val, bool) or (val != -1 and val < 1):
             raise ValueError("maxPreviewChars 须为正整数或 -1（-1 表示不限制预览字数）")
+        return val
+
+    @field_validator("previewRows")
+    @classmethod
+    def _validate_preview_rows(cls, val: int | None) -> int | None:
+        if isinstance(val, bool) or (val is not None and val != -1 and val < 1):
+            raise ValueError("previewRows 须为正整数或 -1（-1 表示不限制预览行数）")
         return val
 
 
@@ -213,12 +223,14 @@ class ApiContract(_Base):
 
     @model_validator(mode="after")
     def _check_connector_request_shape(self) -> ApiContract:
-        """统一网关契约保持 request 为字典对象，常规 HTTP 允许按 bodyType 使用对象/数组/文本/空值。#Created By AiCoding(codex)"""
+        """统一网关契约保持 request 为字典对象；常规 HTTP 未显式配置 records.path 时默认置为空根路径。#Created By AiCoding(codex)"""
         if self.connector != "http":
             if self.request is None:
                 self.request = {}
             elif not isinstance(self.request, dict):
                 raise ValueError("统一网关接口契约的 request 必须是键值映射对象")
+        elif "path" not in self.response.records.model_fields_set:
+            self.response.records.path = ""
         return self
 
     @property
@@ -291,7 +303,10 @@ class ApiContract(_Base):
                 if _has_empty_json_keys(self.request):
                     errors.append("request 中包含空的 JSON 键名")
 
-        errors.extend(_validate_headers_dict(self.headers))
+        errors.extend(_validate_headers_dict(self.headers, allow_placeholders=True))
+        for idx, rule in enumerate(self.response.noData):
+            if rule.equals is None and (rule.contains is None or rule.contains == ""):
+                errors.append(f"response.noData[{idx}] 不可同时省略 equals 与 contains（至少填写一项）")
         props_raw = self.input.get("properties") if isinstance(self.input, dict) else None
         declared = set(props_raw.keys()) if isinstance(props_raw, dict) else set()
         # #Created By AiCoding(codex) 以 $ 开头的名称是内置占位符：不需要（也不允许）在 input 中声明
@@ -355,22 +370,46 @@ class ApiContract(_Base):
         return out
 
     def build_url(self, args: dict[str, Any] | None = None, *, keep_unresolved: bool = False) -> str:
-        """渲染常规 HTTP 目标 URL 并合并 query 查询参数，拦截非法协议与控制字符。#Created By AiCoding(codex)"""
+        """渲染常规 HTTP 目标 URL 并合并 query 查询参数，拦截非法协议、端口、主机占位符及路径注入。#Created By AiCoding(codex)"""
         raw_tpl = self.url or ""
         if _has_url_ctrl_chars(raw_tpl):
             raise ValueError("HTTP 请求 URL 包含非法换行或控制字符")
         raw_url = raw_tpl.strip()
         if not raw_url:
             raise ValueError("HTTP 接口 url 不能为空")
-        rendered_raw = str(_substitute(raw_url, _with_builtins(args), keep_unresolved=keep_unresolved))
-        if _has_url_ctrl_chars(rendered_raw):
-            raise ValueError("HTTP 请求 URL 包含非法换行或控制字符")
-        rendered_url = rendered_raw.strip()
-        if not rendered_url.lower().startswith(("http://", "https://")):
+        if not raw_url.lower().startswith(("http://", "https://")):
             raise ValueError("HTTP 请求 URL 必须以 http:// 或 https:// 开头")
+        if _url_authority_has_placeholder(raw_url):
+            raise ValueError("HTTP 请求 URL 不允许在主机或端口部分使用参数占位符")
+        tpl_parsed = urlsplit(raw_url)
+        if not tpl_parsed.hostname:
+            raise ValueError("HTTP 请求 URL 缺少合法主机名")
+        try:
+            _ = tpl_parsed.port
+        except ValueError as exc:
+            raise ValueError("HTTP 请求 URL 端口不合法") from exc
+
+        merged_args = _with_builtins(args)
+        rendered_path = _substitute_url_path(tpl_parsed.path, merged_args, keep_unresolved=keep_unresolved)
+        rendered_inline_query = _substitute_url_component(tpl_parsed.query, merged_args, keep_unresolved=keep_unresolved)
+        rendered_fragment = _substitute_url_component(tpl_parsed.fragment, merged_args, keep_unresolved=keep_unresolved)
+        rendered_url = urlunsplit((
+            tpl_parsed.scheme,
+            tpl_parsed.netloc,
+            rendered_path,
+            rendered_inline_query,
+            rendered_fragment,
+        ))
+        if _has_url_ctrl_chars(rendered_url):
+            raise ValueError("HTTP 请求 URL 包含非法换行或控制字符")
         parsed = urlsplit(rendered_url)
         if not parsed.hostname:
             raise ValueError("HTTP 请求 URL 缺少合法主机名")
+        try:
+            _ = parsed.port
+        except ValueError as exc:
+            raise ValueError("HTTP 请求 URL 端口不合法") from exc
+
         query_map = self.build_query(args, keep_unresolved=keep_unresolved)
         if not query_map:
             return rendered_url
@@ -392,12 +431,12 @@ class ApiContract(_Base):
         return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, merged_query, parsed.fragment))
 
     def build_headers(self, args: dict[str, Any] | None = None, *, keep_unresolved: bool = False) -> dict[str, str]:
-        """渲染并校验自定义安全请求头（拦截 CRLF 注入与受保护请求头覆盖）。"""
+        """渲染并校验自定义安全请求头（拦截 CRLF 注入、非 ASCII 字符与受保护请求头覆盖）。"""
         if not self.headers:
             return {}
         rendered_raw = _substitute(self.headers, _with_builtins(args), keep_unresolved=keep_unresolved)
-        rendered = {str(k).strip(): ("" if v is None else str(v)) for k, v in rendered_raw.items()}
-        errs = _validate_headers_dict(rendered)
+        rendered = {str(k).strip(): _query_scalar_str(v) if v is not None else "" for k, v in rendered_raw.items()}
+        errs = _validate_headers_dict(rendered, allow_placeholders=keep_unresolved)
         if errs:
             raise ValueError("；".join(errs))
         return rendered
@@ -416,7 +455,12 @@ class ApiContract(_Base):
         return "；".join(parts) or "无参数"
 
     def preview_rows(self, default: int) -> int:
-        return self.response.summary.previewRows or default
+        configured = self.response.summary.previewRows
+        if configured is None:
+            return default
+        if configured == -1:
+            return _UNLIMITED_PREVIEW_ROWS
+        return configured
 
 
 def _collect_placeholders(node: Any) -> set[str]:
@@ -452,7 +496,7 @@ def _substitute(node: Any, args: dict[str, Any], *, keep_unresolved: bool = Fals
             val = args.get(key)
             if keep_unresolved and (key not in args or val is None or val == ""):
                 return m.group(0)
-            return "" if val is None else str(val)
+            return "" if val is None else _query_scalar_str(val)
 
         return _PLACEHOLDER_RE.sub(_repl, node)
     if isinstance(node, dict):
@@ -477,8 +521,8 @@ def _has_empty_json_keys(node: Any) -> bool:
     return False
 
 
-def _validate_headers_dict(headers: dict[str, str]) -> list[str]:
-    """校验自定义 HTTP 头（禁止空键、控制字符/CRLF 注入以及覆盖受保护头）。"""
+def _validate_headers_dict(headers: dict[str, str], *, allow_placeholders: bool = False) -> list[str]:
+    """校验自定义 HTTP 头（禁止空键、控制字符/CRLF 注入、非可见 ASCII 以及覆盖受保护头）。#Created By AiCoding(codex)"""
     errs: list[str] = []
     for raw_k, raw_v in (headers or {}).items():
         k = str(raw_k)
@@ -492,8 +536,12 @@ def _validate_headers_dict(headers: dict[str, str]) -> list[str]:
             errs.append(f"headers 请求头 {k!r} 含有非法换行或控制字符")
             continue
         k_stripped = k.strip()
-        if not _HEADER_NAME_RE.match(k_stripped):
-            errs.append(f"headers 请求头名称 {k!r} 格式不合法")
+        if not k_stripped.isascii() or not _HEADER_NAME_RE.fullmatch(k_stripped):
+            errs.append(f"headers 请求头名称 {k!r} 格式不合法（仅允许可见 ASCII token 字符）")
+            continue
+        val_check = _PLACEHOLDER_RE.sub("", v) if allow_placeholders else v
+        if any(ord(ch) > 126 for ch in val_check):
+            errs.append(f"headers 请求头 {k_stripped!r} 的值含有非 ASCII 字符")
             continue
         if k_stripped.lower() in _PROTECTED_HEADERS:
             errs.append(f"headers 不允许覆盖受保护请求头 {k_stripped!r}")
@@ -551,8 +599,62 @@ def _has_url_ctrl_chars(url: str) -> bool:
     return any(ch in ("\r", "\n", "\x00") or ord(ch) < 32 or ord(ch) == 127 for ch in url)
 
 
+def _url_authority_has_placeholder(url: str) -> bool:
+    """检查 URL 的 scheme://authority（主机/端口/用户信息）部分是否包含动态参数占位符。#Created By AiCoding(codex)"""
+    if "://" not in url:
+        return bool(_PLACEHOLDER_RE.search(url))
+    scheme, after = url.split("://", 1)
+    if _PLACEHOLDER_RE.search(scheme):
+        return True
+    end = len(after)
+    for sep in ("/", "?", "#"):
+        pos = after.find(sep)
+        if pos != -1 and pos < end:
+            end = pos
+    return bool(_PLACEHOLDER_RE.search(after[:end]))
+
+
+def _substitute_url_path(path: str, args: dict[str, Any], *, keep_unresolved: bool = False) -> str:
+    """安全替换 URL 路径中的 ${参数}，对参数值执行严格百分号编码以拦截 ? / # / 空格 / ../ 路径注入。#Created By AiCoding(codex)"""
+    if not path:
+        return ""
+
+    def _repl(m: re.Match[str]) -> str:
+        key = m.group(1)
+        val = args.get(key)
+        if keep_unresolved and (key not in args or val is None or val == ""):
+            return m.group(0)
+        if val is None:
+            return ""
+        encoded = quote(_query_scalar_str(val), safe="")
+        if encoded == ".":
+            return "%2E"
+        if encoded == "..":
+            return "%2E%2E"
+        return encoded
+
+    return _PLACEHOLDER_RE.sub(_repl, path)
+
+
+def _substitute_url_component(comp: str, args: dict[str, Any], *, keep_unresolved: bool = False) -> str:
+    """安全替换内联 URL query/fragment 中的 ${参数}，防止 & 或 # 截断注入。#Created By AiCoding(codex)"""
+    if not comp:
+        return ""
+
+    def _repl(m: re.Match[str]) -> str:
+        key = m.group(1)
+        val = args.get(key)
+        if keep_unresolved and (key not in args or val is None or val == ""):
+            return m.group(0)
+        if val is None:
+            return ""
+        return quote(_query_scalar_str(val), safe="")
+
+    return _PLACEHOLDER_RE.sub(_repl, comp)
+
+
 def _validate_http_url_template(url: str) -> list[str]:
-    """静态校验常规 HTTP 接口的 URL 模板（支持路径/查询参数含 ${参数} 占位符）。#Created By AiCoding(codex)"""
+    """静态校验常规 HTTP 接口的 URL 模板（支持路径/查询参数含 ${参数} 占位符，禁止动态主机与非法端口）。#Created By AiCoding(codex)"""
     raw = url or ""
     if _has_url_ctrl_chars(raw):
         return ["HTTP 接口 url 包含非法换行或控制字符"]
@@ -561,11 +663,16 @@ def _validate_http_url_template(url: str) -> list[str]:
         return ["HTTP 接口 url 不能为空"]
     if not clean.lower().startswith(("http://", "https://")):
         return ["HTTP 接口 url 必须以 http:// 或 https:// 开头"]
-    # 校验主机名时将占位符临时替换为安全字面量，避免 urlsplit 把 ${host} 当成非法字符
+    if _url_authority_has_placeholder(clean):
+        return ["HTTP 接口 url 不允许在主机或端口部分使用参数占位符"]
     probe = _PLACEHOLDER_RE.sub("placeholder", clean)
     parsed = urlsplit(probe)
     if not parsed.hostname:
         return ["HTTP 接口 url 缺少合法主机名"]
+    try:
+        _ = parsed.port
+    except ValueError:
+        return ["HTTP 接口 url 端口不合法"]
     return []
 
 

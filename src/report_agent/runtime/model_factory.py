@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import Any
 
 from openai import AsyncOpenAI
+from pydantic_ai import NativeOutput, PromptedOutput, ToolOutput
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
@@ -52,3 +54,33 @@ def build_model_settings(settings: Settings) -> dict[str, Any]:
     if settings.llm_parallel_tool_calls is not None:
         ms["parallel_tool_calls"] = settings.llm_parallel_tool_calls
     return ms
+
+
+def build_output_spec(
+    model_cls: type[Any],
+    *,
+    name: str,
+    description: str,
+    settings: Settings,
+) -> Any:
+    """按运行配置统一构造结构化输出规格（tool / native / json_object / prompted）。#Created By AiCoding(codex)"""
+    mode = settings.agent_output_mode
+    if mode == "native":
+        return NativeOutput(model_cls, name=name, strict=settings.agent_native_strict)
+    if mode in ("json_object", "prompted"):
+        return PromptedOutput(model_cls, name=name)
+    return ToolOutput(model_cls, name=name, description=description)
+
+
+async def aclose_model(model: Any) -> None:
+    """异步安全关闭 OpenAIChatModel 内建的 AsyncOpenAI 客户端连接池（自动忽略测试桩模型）。#Created By AiCoding(codex)"""
+    if not isinstance(model, OpenAIChatModel):
+        return
+    client = getattr(model, "client", None)
+    if client is None:
+        provider = getattr(model, "_provider", None)
+        client = getattr(provider, "client", None)
+    close_fn = getattr(client, "close", None)
+    if callable(close_fn):
+        with suppress(Exception):
+            await close_fn()

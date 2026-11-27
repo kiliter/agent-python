@@ -99,7 +99,6 @@ const ALLOWED_TAGS = new Set<string>([
 ])
 
 const GLOBAL_ALLOWED_ATTRS = new Set<string>([
-  'class',
   'title',
   'dir',
   'lang',
@@ -111,6 +110,9 @@ const GLOBAL_ALLOWED_ATTRS = new Set<string>([
 const TAG_ALLOWED_ATTRS: Record<string, ReadonlySet<string>> = {
   a: new Set(['href', 'target', 'rel']),
   img: new Set(['src', 'alt', 'width', 'height', 'loading']),
+  code: new Set(['class']),
+  pre: new Set(['class']),
+  span: new Set(['class']),
   th: new Set(['colspan', 'rowspan', 'align']),
   td: new Set(['colspan', 'rowspan', 'align']),
   col: new Set(['span']),
@@ -124,6 +126,7 @@ const TAG_ALLOWED_ATTRS: Record<string, ReadonlySet<string>> = {
 }
 
 const SAFE_REL_TOKENS = new Set<string>(['noopener', 'noreferrer', 'nofollow', 'ugc'])
+const SAFE_HIGHLIGHT_CLASS_RE = /^(language-|hljs-)[a-z0-9_-]+$/i
 
 /** HTML 实体转义（含双引号与单引号，可安全拼入属性与正文） */
 export function escapeHtml(value: unknown): string {
@@ -156,7 +159,7 @@ export function sanitizeUrl(
     return options.allowFragment !== false ? trimmed : null
   }
 
-  if (compact.startsWith('//') || compact.startsWith('\\\\')) {
+  if (/^[\\/]{2}/.test(compact) || compact.startsWith('\\')) {
     return null
   }
 
@@ -272,6 +275,16 @@ function sanitizeNode(node: Node, doc: Document): void {
     } else if ((tag === 'th' || tag === 'td') && name === 'align') {
       const a = attr.value.trim().toLowerCase()
       if (a !== 'left' && a !== 'center' && a !== 'right') {
+        el.removeAttribute(attr.name)
+      }
+    } else if (name === 'class') {
+      const safeClasses = attr.value
+        .split(/\s+/)
+        .map(tok => tok.trim())
+        .filter(tok => tok.length > 0 && SAFE_HIGHLIGHT_CLASS_RE.test(tok))
+      if (safeClasses.length > 0) {
+        el.setAttribute('class', safeClasses.join(' '))
+      } else {
         el.removeAttribute(attr.name)
       }
     }

@@ -640,7 +640,7 @@ export interface RegressionRunPayload {
 }
 
 export interface ReleaseChange {
-  kind: 'template' | 'skill' | 'api' | 'system-prompt'
+  kind: 'template' | 'skill' | 'api' | 'system-prompt' | 'composite-template'
   key: string
   action: string
   title: string
@@ -659,7 +659,7 @@ export interface ReleaseRevision {
 }
 
 export interface ReleaseDiffItem {
-  kind: 'template' | 'skill' | 'api' | 'system-prompt'
+  kind: 'template' | 'skill' | 'api' | 'system-prompt' | 'composite-template'
   key: string
   label: string
   change: 'added' | 'modified' | 'removed'
@@ -685,6 +685,7 @@ export interface CompositeTemplateState {
   baseRev: string | null
   draft: DraftMeta | null
   defaultText?: string
+  usingBuiltinDefault?: boolean
   version?: string
   versionText?: string
 }
@@ -692,6 +693,7 @@ export interface CompositeTemplateState {
 export interface CompositeTemplatePreviewResult {
   ok: boolean
   error: string | null
+  errors?: string[]
   rendered: string
 }
 

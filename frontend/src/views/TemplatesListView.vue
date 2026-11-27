@@ -3,6 +3,7 @@
 import { computed, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { usePlatformStore } from '@/stores/platform'
+import { parseDurationToMs } from '@/utils/duration'
 import type { TemplateItem } from '@/types/platform'
 import StatusTag from '@/components/StatusTag.vue'
 
@@ -32,18 +33,15 @@ function parseFoundRatio(raw: string | undefined | null): { found: number; total
   return { found, total }
 }
 
-/** 解析运行耗时文本为秒数（支持 ms / s / 秒 / 分秒） */
+/** 解析运行耗时文本为秒数（复用全局 duration 解析工具，兼容中文分/秒后缀） */
 function parseDurationSec(raw: string | undefined | null): number | null {
   if (!raw) return null
   const s = raw.trim()
   if (!s || s === '—' || s === '-') return null
-  const msMatch = s.match(/^(\d+(?:\.\d+)?)\s*ms$/i)
-  if (msMatch) return Number(msMatch[1]) / 1000
-  const minSecMatch = s.match(/^(\d+)\s*(?:m|min|分)\s*(\d+(?:\.\d+)?)\s*(?:s|sec|秒)?$/i)
-  if (minSecMatch) return Number(minSecMatch[1]) * 60 + Number(minSecMatch[2])
-  const secMatch = s.match(/^(\d+(?:\.\d+)?)\s*(?:s|sec|秒)?$/i)
-  if (secMatch) return Number(secMatch[1])
-  return null
+  const normalized = s.replace(/分钟?|分/g, 'm ').replace(/秒/g, 's')
+  const ms = parseDurationToMs(normalized)
+  if (ms > 0) return ms / 1000
+  return /^0(?:\.0+)?\s*(?:ms|s)?$/i.test(normalized) ? 0 : null
 }
 
 const statusCounts = computed(() => {
@@ -285,9 +283,17 @@ const filteredTemplates = computed(() =>
   })
 )
 
+const totalPages = computed(() => Math.max(1, Math.ceil(filteredTemplates.value.length / pageSize)))
+
 const pagedTemplates = computed(() => {
   const start = (currentPage.value - 1) * pageSize
   return filteredTemplates.value.slice(start, start + pageSize)
+})
+
+watch(totalPages, maxPage => {
+  if (currentPage.value > maxPage) {
+    currentPage.value = Math.max(1, maxPage)
+  }
 })
 
 watch(

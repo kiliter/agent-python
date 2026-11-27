@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -13,23 +14,57 @@ from pathlib import Path
 from typing import Any
 
 from ..domain.api_contract import ApiContract
-from .base import ApiCallResult, decode_xml, parse_xml, xml_to_json_data
+from ..domain.sanitize import sanitize_sensitive_text
+from .base import (
+    ApiCallResult,
+    decode_xml,
+    parse_gateway_json_response,
+    parse_gateway_response,
+    parse_xml,
+    xml_to_json_data,
+)
 from .http_client import parse_http_response, prepare_http_request
-from .unified_xml import (build_masked_request_json, build_request_xml, mask_xml, parse_gateway_json_response,
-                          parse_gateway_response)
+from .unified_xml import build_masked_request_json, build_request_xml, mask_xml
 
 _SAFE_MOCK_NAME_RE = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
 _SAFE_MOCK_ROUTE_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+_PHONE_11_RE = re.compile(r"^1\d{10}$")
+_PREFERRED_PHONE_KEYS = (
+    "手机号码",
+    "客户号码",
+    "联系号码",
+    "号码",
+    "mobile",
+    "mobileNo",
+    "userMobile",
+    "user_mobile",
+    "phone",
+    "phoneNo",
+    "msisdn",
+    "billId",
+    "bill_id",
+    "route_value",
+)
+_PHONE_KEY_HINTS = ("手机", "号码", "电话", "mobile", "phone", "msisdn", "billid", "bill_id", "route")
 
 
 def _extract_http_mock_route(args: dict[str, Any]) -> str:
-    """从常规 HTTP 入参中提取可用于定位专属 Mock 样例的安全路由值（优先纯数字/常见手机号参数）。#Created By AiCoding(codex)"""
+    """从入参中提取可用于定位专属 Mock 样例的安全路由值（优先手机号参数与 11 位手机号值）。#Created By AiCoding(codex)"""
     if not isinstance(args, dict):
         return ""
-    for preferred in ("手机号码", "mobile", "phone", "userMobile", "route_value"):
+    for preferred in _PREFERRED_PHONE_KEYS:
         val = str(args.get(preferred) or "").strip()
         if val and _SAFE_MOCK_ROUTE_RE.match(val):
             return val
+    for k, raw in args.items():
+        low_k = str(k).lower()
+        val = str(raw or "").strip()
+        if val and any(h in low_k for h in _PHONE_KEY_HINTS) and _SAFE_MOCK_ROUTE_RE.match(val):
+            return val
+    for val in args.values():
+        s = str(val or "").strip()
+        if s and s.isascii() and _PHONE_11_RE.match(s):
+            return s
     for val in args.values():
         s = str(val or "").strip()
         if s and s.isascii() and s.isdigit() and len(s) <= 32:
@@ -91,6 +126,9 @@ class MockGatewayClient:
         return None
 
     async def invoke(self, contract: ApiContract, args: dict[str, Any]) -> ApiCallResult:
+        return await asyncio.to_thread(self._invoke_sync, contract, args)
+
+    def _invoke_sync(self, contract: ApiContract, args: dict[str, Any]) -> ApiCallResult:
         start = time.monotonic()
         if contract.is_http:
             return self._invoke_http_mock(contract, args, start)
@@ -102,11 +140,15 @@ class MockGatewayClient:
             else:
                 preview = mask_xml(build_request_xml(contract.processCode, request, "mock", "mock", self.style))
         except ValueError as exc:
-            return ApiCallResult(ok=False, error=f"请求报文组装失败：{exc}")
+            return ApiCallResult(ok=False, error=sanitize_sensitive_text(f"请求报文组装失败：{exc}"))
         if not _SAFE_MOCK_NAME_RE.match(contract.name or ""):
             return ApiCallResult(ok=False, error=f"非法的接口名称：{contract.name!r}", request_preview=preview)
         roots = self._search_roots()
         route = str(request.get("route_value") or "").strip()
+        if not route:
+            fallback_route = _extract_http_mock_route(args)
+            if fallback_route.isascii() and _PHONE_11_RE.match(fallback_route):
+                route = fallback_route
         valid_route = bool(route and route.isascii() and route.isdigit())
 
         if contract.is_json:
@@ -116,7 +158,11 @@ class MockGatewayClient:
                 try:
                     raw_bytes = json_hit.read_bytes()
                 except OSError as exc:
-                    return ApiCallResult(ok=False, error=f"读取样例响应失败：{exc}", request_preview=preview)
+                    return ApiCallResult(
+                        ok=False,
+                        error=sanitize_sensitive_text(f"读取样例响应失败：{exc}"),
+                        request_preview=preview,
+                    )
                 text = decode_xml(raw_bytes, None)
                 cost = int((time.monotonic() - start) * 1000)
                 return parse_gateway_json_response(contract, text, 200, cost, preview)
@@ -127,13 +173,21 @@ class MockGatewayClient:
                 try:
                     raw_bytes = xml_hit.read_bytes()
                 except OSError as exc:
-                    return ApiCallResult(ok=False, error=f"读取样例响应失败：{exc}", request_preview=preview)
+                    return ApiCallResult(
+                        ok=False,
+                        error=sanitize_sensitive_text(f"读取样例响应失败：{exc}"),
+                        request_preview=preview,
+                    )
                 xml_text = decode_xml(raw_bytes, None)
                 try:
                     root_el = parse_xml(xml_text)
                     json_text = json.dumps(xml_to_json_data(root_el), ensure_ascii=False, indent=2)
                 except Exception as exc:  # noqa: BLE001
-                    return ApiCallResult(ok=False, error=f"样例 XML 转换 JSON 失败：{exc}", request_preview=preview)
+                    return ApiCallResult(
+                        ok=False,
+                        error=sanitize_sensitive_text(f"样例 XML 转换 JSON 失败：{exc}"),
+                        request_preview=preview,
+                    )
                 cost = int((time.monotonic() - start) * 1000)
                 return parse_gateway_json_response(contract, json_text, 200, cost, preview)
 
@@ -146,7 +200,11 @@ class MockGatewayClient:
             try:
                 raw_bytes = xml_hit.read_bytes()
             except OSError as exc:
-                return ApiCallResult(ok=False, error=f"读取样例响应失败：{exc}", request_preview=preview)
+                return ApiCallResult(
+                    ok=False,
+                    error=sanitize_sensitive_text(f"读取样例响应失败：{exc}"),
+                    request_preview=preview,
+                )
             text = decode_xml(raw_bytes, None)
             return parse_gateway_response(contract, text, 200, int((time.monotonic() - start) * 1000), preview)
         return ApiCallResult(ok=False, error=f"mock 模式下没有找到样例响应 {contract.name}.xml", request_preview=preview)
@@ -156,7 +214,7 @@ class MockGatewayClient:
         try:
             prepared = prepare_http_request(contract, args)
         except ValueError as exc:
-            return ApiCallResult(ok=False, error=f"HTTP 请求组装失败：{exc}")
+            return ApiCallResult(ok=False, error=sanitize_sensitive_text(f"HTTP 请求组装失败：{exc}"))
         if not _SAFE_MOCK_NAME_RE.match(contract.name or ""):
             return ApiCallResult(ok=False, error=f"非法的接口名称：{contract.name!r}",
                                  request_preview=prepared.preview)
@@ -177,7 +235,11 @@ class MockGatewayClient:
         try:
             raw_bytes = hit.read_bytes()
         except OSError as exc:
-            return ApiCallResult(ok=False, error=f"读取样例响应失败：{exc}", request_preview=prepared.preview)
+            return ApiCallResult(
+                ok=False,
+                error=sanitize_sensitive_text(f"读取样例响应失败：{exc}"),
+                request_preview=prepared.preview,
+            )
         ext_ct = {".json": "application/json", ".xml": "application/xml", ".txt": "text/plain"}.get(
             hit.suffix.lower(), ""
         )

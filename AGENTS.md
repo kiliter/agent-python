@@ -23,7 +23,7 @@ Python 3.13（`>=3.12,<3.14`，容器 `python:3.13-slim` + `uv:0.7`）· FastAPI
 
 ```bash
 # 安装依赖（含开发与测试依赖）
-uv sync --extra dev
+uv sync --group dev
 
 # 初始化数据目录（导入内置 seed 资源并发布初始版本 r1，幂等）
 uv run report-agent init

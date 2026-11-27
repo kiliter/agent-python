@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
+import json
 import logging
 import re
 import secrets
@@ -16,8 +17,9 @@ import time
 from typing import Any, Literal
 
 from ..domain.resources import ResourceSet
+from ..domain.sanitize import sanitize_sensitive_text
 from ..store.cases import AUTO_CASE_SCOPE, CaseDef, CaseStore, parse_case_scope, scope_key
-from ..store.fsutil import append_jsonl, now_iso, read_json, read_jsonl, write_json
+from ..store.fsutil import append_jsonl, atomic_write_text, dumps_jsonl, now_iso, read_json, read_jsonl, write_json
 from ..store.layout import REV_RE, SAFE_ID_RE, DataLayout, InvalidResource, ensure_within
 from ..store.releases import ReleaseNotFound, ReleaseStore
 from ..store.service import ResourceService
@@ -29,6 +31,7 @@ log = logging.getLogger(__name__)
 
 RegressionMode = Literal["single", "compare"]
 _WS_RE = re.compile(r"\s+")
+_LEGACY_LIST_COUNT_RE = re.compile(r"^\[(\d+) 行\]$")
 _KEEP_BATCHES = 50
 
 
@@ -42,15 +45,32 @@ def _norm_compare(val: str | None) -> str:
     return _WS_RE.sub(" ", (val or "").strip())
 
 
+def format_case_expected_value(field_type: str, raw_val: Any) -> str:
+    """将字段运行值格式化为回归基线可比对/持久化的确定性字符串（列表字段输出确定性 JSON）。#Created By AiCoding(codex)"""
+    if field_type == "list" or isinstance(raw_val, list):
+        if not isinstance(raw_val, list):
+            return ""
+        if not raw_val:
+            return "[]"
+        return json.dumps(raw_val, ensure_ascii=False, separators=(",", ":"))
+    return scalar_to_str(raw_val).strip()
+
+
 def _field_val_text(f: dict[str, Any]) -> str:
     """从运行结果字段字典中提取稳定可比对的字符串值。"""
     st = str(f.get("status") or "not_found")
     if st != "found":
         return ""
-    raw = f.get("value")
-    if isinstance(raw, list):
-        return f"[{len(raw)} 行]" if raw else "[]"
-    return scalar_to_str(raw).strip()
+    return format_case_expected_value(str(f.get("type") or ""), f.get("value"))
+
+
+def _matches_expected(field_dict: dict[str, Any] | None, val_text: str, exp: str) -> bool:
+    """比对字段实际值与期望基线值，自动兼容历史 `[N 行]` 列表行数基线格式。#Created By AiCoding(codex)"""
+    m = _LEGACY_LIST_COUNT_RE.match(exp.strip())
+    if m is not None and field_dict is not None:
+        if str(field_dict.get("status") or "") == "found" and isinstance(field_dict.get("value"), list):
+            return len(field_dict["value"]) == int(m.group(1))
+    return _norm_compare(val_text) == _norm_compare(exp)
 
 
 def _field_ev_text(f: dict[str, Any]) -> str:
@@ -149,6 +169,7 @@ class RegressionStore:
         if len(entries) <= self.keep:
             return
         old = entries[: len(entries) - self.keep]
+        kept = entries[-self.keep :]
         for item in old:
             bid = str(item.get("batchId") or "")
             if bid and SAFE_ID_RE.match(bid):
@@ -158,6 +179,7 @@ class RegressionStore:
                         bp.unlink()
                 except (InvalidResource, OSError):
                     pass
+        atomic_write_text(self._index_path, "".join(dumps_jsonl(item) + "\n" for item in kept))
 
     def list(self, limit: int = 30) -> list[dict[str, Any]]:
         with self.lock:
@@ -290,7 +312,8 @@ class RegressionRunner:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
-            log.warning("回归执行异常 case=%s target=%s：%s", case.id, target_name, exc)
+            safe_err = sanitize_sensitive_text(f"执行异常：{type(exc).__name__}: {exc}")
+            log.warning("回归执行异常 case=%s target=%s：%s", case.id, target_name, safe_err)
             return {
                 "status": "FAILED",
                 "templateId": tid,
@@ -299,7 +322,7 @@ class RegressionRunner:
                 "found": 0,
                 "total": 0,
                 "durationMs": int((time.monotonic() - t0) * 1000),
-                "error": f"执行异常：{type(exc).__name__}: {exc}",
+                "error": safe_err,
                 "routing": None,
                 "fields": {},
                 "report": "",
@@ -409,7 +432,7 @@ class RegressionRunner:
 
             if mode == "compare" and res_b is not None:
                 ab_diff = _norm_compare(va) != _norm_compare(vb)
-                exp_diff = bool(exp) and (_norm_compare(va) != _norm_compare(exp) or _norm_compare(vb) != _norm_compare(exp))
+                exp_diff = bool(exp) and (not _matches_expected(fa, va, exp) or not _matches_expected(fb, vb, exp))
                 if ab_diff:
                     version_diff_count += 1
                 if exp_diff:
@@ -437,7 +460,7 @@ class RegressionRunner:
                         "kind": "field_diff",
                     })
             else:
-                if exp and _norm_compare(va) != _norm_compare(exp):
+                if exp and not _matches_expected(fa, va, exp):
                     expected_mismatch_count += 1
                     diffs.append({
                         "scope": sc,
@@ -522,9 +545,15 @@ class RegressionRunner:
             snap_b = (rev_b, rs_b)
 
         resolved_items: list[tuple[int | None, CaseDef]] = []
+        seen_targets: set[tuple[str, str]] = set()
         for item in req.cases:
             tid = parse_case_scope(item.scope)
-            found = self.cases.get(tid, item.case_id)
+            cid = (item.case_id or "").strip()
+            dedup_key = (scope_key(tid), cid)
+            if dedup_key in seen_targets:
+                continue
+            seen_targets.add(dedup_key)
+            found = self.cases.get(tid, cid)
             if found is None:
                 continue
             resolved_items.append((tid, found))
@@ -676,5 +705,6 @@ __all__ = [
     "RegressionRunRequest",
     "RegressionRunner",
     "RegressionStore",
+    "format_case_expected_value",
     "new_batch_id",
 ]

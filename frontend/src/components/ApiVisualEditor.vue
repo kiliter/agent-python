@@ -37,7 +37,7 @@ type HttpBodyType = 'json' | 'form' | 'text' | 'none'
 type HttpResponseFormat = 'auto' | 'json' | 'xml' | 'text'
 type RecordsMode = 'auto' | 'object' | 'list' | 'scalar' | 'none'
 type ParamValueType = 'string' | 'integer' | 'number' | 'boolean'
-type ContentFieldType = 'string' | 'number' | 'boolean' | 'json'
+type ContentFieldType = 'string' | 'number' | 'boolean' | 'null' | 'json'
 type VisualSectionTab = 'input' | 'request' | 'response' | 'policy'
 
 interface InputParamRow {
@@ -241,6 +241,8 @@ const activeQueryRowUid = ref<string | null>(null)
 const yamlParseError = ref<string | null>(null)
 const contentJsonText = ref('{\n}')
 const contentJsonError = ref<string | null>(null)
+const timeoutMsText = ref('10000')
+const maxPreviewCharsText = ref('60')
 
 const remoteValidating = ref(false)
 const remoteValidation = ref<ValidateApiResp | null>(null)
@@ -313,6 +315,76 @@ const isHttpConnector = computed(() => form.connector === 'http')
 
 let lastEmittedYaml = ''
 let syncingFromProps = false
+let baseYamlDoc: YAML.Document | null = null
+
+function resetFormState(defaultName = '') {
+  form.name = defaultName
+  form.title = ''
+  form.description = ''
+  form.connector = 'unified-gateway-xml'
+  form.processCode = defaultName
+  form.method = 'POST'
+  form.url = ''
+  form.bodyType = 'json'
+  form.hadQueryKey = false
+  form.queryRows = []
+  form.textBody = ''
+  form.timeoutMs = 10000
+  timeoutMsText.value = '10000'
+  form.maxAttempts = 1
+  form.idempotent = true
+  form.inputAdditionalProperties = false
+  form.inputExtra = {}
+  form.params = []
+  form.hadHeadersKey = false
+  form.headers = []
+  for (const ek of ENVELOPE_KEYS) {
+    form.envelope[ek] = ''
+  }
+  form.envelopePresentKeys = new Set<EnvelopeKey>()
+  form.requestExtra = {}
+  form.contentRows = []
+  form.responseFormat = 'auto'
+  form.hadResponseFormatKey = false
+  form.successEnabled = true
+  form.successPath = 'operation_out.response.resp_code'
+  form.successEquals = '0000'
+  form.successMissingAs = 'success'
+  form.noDataRules = []
+  form.recordsMode = 'auto'
+  form.hadRecordsModeKey = false
+  form.recordsPath = 'operation_out.content'
+  form.recordsFlatten = false
+  form.recordsExtra = {}
+  form.columns = []
+  form.maxPreviewChars = 60
+  maxPreviewCharsText.value = '60'
+  form.previewRowsText = ''
+  form.responseExtra = {}
+  form.leadingCommentBlock = ''
+  form.rootExtra = {}
+}
+
+/** 切换 apiName 时全量重置编辑器表单、子模式与浮层状态，防止跨接口残留 */
+function resetVisualEditorState() {
+  activeTab.value = 'input'
+  contentSubMode.value = 'table'
+  activeEnvelopeField.value = 'route_value'
+  activeContentRowUid.value = null
+  activeQueryRowUid.value = null
+  yamlParseError.value = null
+  contentJsonText.value = '{\n}'
+  contentJsonError.value = null
+  remoteValidating.value = false
+  remoteValidation.value = null
+  validationPopoverOpen.value = false
+  sampleExtractorOpen.value = false
+  sampleRawInput.value = ''
+  sampleParseHint.value = null
+  lastEmittedYaml = ''
+  baseYamlDoc = null
+  resetFormState(props.apiName || '')
+}
 
 function isPlainObject(val: unknown): val is Record<string, unknown> {
   return typeof val === 'object' && val !== null && !Array.isArray(val)
@@ -354,7 +426,7 @@ function flattenContentObject(obj: Record<string, unknown>, prefix = ''): Conten
     } else if (typeof val === 'string') {
       rows.push({ uid: nextUid('cf'), path: fullPath, valueType: 'string', value: val })
     } else if (val === null || val === undefined) {
-      rows.push({ uid: nextUid('cf'), path: fullPath, valueType: 'string', value: '' })
+      rows.push({ uid: nextUid('cf'), path: fullPath, valueType: 'null', value: 'null' })
     } else {
       rows.push({ uid: nextUid('cf'), path: fullPath, valueType: 'json', value: JSON.stringify(val) })
     }
@@ -373,7 +445,9 @@ function buildContentObjectFromRows(rows: ContentFieldRow[]): Record<string, unk
 
     let parsedVal: unknown = row.value
     const hasPlaceholder = row.value.includes('${')
-    if (!hasPlaceholder) {
+    if (row.valueType === 'null') {
+      parsedVal = null
+    } else if (!hasPlaceholder) {
       if (row.valueType === 'number') {
         const n = Number(row.value.trim())
         parsedVal = row.value.trim() !== '' && Number.isFinite(n) ? n : 0
@@ -401,24 +475,32 @@ function buildContentObjectFromRows(rows: ContentFieldRow[]): Record<string, unk
   return result
 }
 
-/** 从外部 YAML 文本解析同步至表单状态（遇到语法错误时绝不覆盖原文本） */
+/** 从外部 YAML 文本解析同步至表单状态（使用 YAML.parseDocument 保留文档节点与注释；语法错误时绝不覆盖原文本） */
 function parseYamlIntoForm(rawYaml: string) {
   const text = rawYaml ?? ''
   if (!text.trim()) {
     yamlParseError.value = null
-    form.name = props.apiName || ''
-    form.processCode = props.apiName || ''
-    form.recordsMode = 'auto'
-    form.hadRecordsModeKey = false
-    form.recordsPath = 'operation_out.content'
-    form.recordsFlatten = false
-    form.recordsExtra = {}
+    baseYamlDoc = null
+    syncingFromProps = true
+    try {
+      resetFormState(props.apiName || '')
+      contentJsonText.value = '{\n}'
+      contentJsonError.value = null
+    } finally {
+      syncingFromProps = false
+    }
     return
   }
 
+  let parsedDoc: YAML.Document
   let parsed: unknown
   try {
-    parsed = YAML.parse(text)
+    parsedDoc = YAML.parseDocument(text)
+    if (parsedDoc.errors.length > 0) {
+      yamlParseError.value = parsedDoc.errors[0]!.message
+      return
+    }
+    parsed = parsedDoc.toJS()
   } catch (err) {
     yamlParseError.value = err instanceof Error ? err.message : String(err)
     return
@@ -430,6 +512,7 @@ function parseYamlIntoForm(rawYaml: string) {
   }
 
   yamlParseError.value = null
+  baseYamlDoc = parsedDoc
   const doc = (parsed || {}) as Record<string, unknown>
 
   syncingFromProps = true
@@ -474,6 +557,7 @@ function parseYamlIntoForm(rawYaml: string) {
     }))
     form.timeoutMs =
       typeof doc.timeoutMs === 'number' && Number.isFinite(doc.timeoutMs) ? doc.timeoutMs : 10000
+    timeoutMsText.value = String(form.timeoutMs)
 
     const retryObj = isPlainObject(doc.retry) ? doc.retry : {}
     form.maxAttempts =
@@ -666,11 +750,16 @@ function parseYamlIntoForm(rawYaml: string) {
       label: cv === null || cv === undefined ? '' : String(cv),
     }))
 
-    const rawSummary = isPlainObject(rawResp.summary) ? rawResp.summary : {}
+    const rawSummary = isPlainObject(doc.response) && isPlainObject((doc.response as Record<string, unknown>).summary)
+      ? ((doc.response as Record<string, unknown>).summary as Record<string, unknown>)
+      : isPlainObject(rawResp.summary)
+        ? rawResp.summary
+        : {}
     form.maxPreviewChars =
       typeof rawSummary.maxPreviewChars === 'number' && Number.isFinite(rawSummary.maxPreviewChars)
         ? rawSummary.maxPreviewChars
         : 60
+    maxPreviewCharsText.value = String(form.maxPreviewChars)
     form.previewRowsText =
       typeof rawSummary.previewRows === 'number' && Number.isFinite(rawSummary.previewRows)
         ? String(rawSummary.previewRows)
@@ -886,13 +975,39 @@ function emitSerializedYaml() {
     out[k] = v
   }
 
-  const serializedBody = YAML.stringify(out, {
-    indent: 2,
-    lineWidth: 0,
-  })
-  const finalYaml = form.leadingCommentBlock
-    ? `${form.leadingCommentBlock}${serializedBody}`
-    : serializedBody
+  let finalYaml: string
+  if (baseYamlDoc && YAML.isMap(baseYamlDoc.contents)) {
+    const docCopy = baseYamlDoc.clone()
+    if (YAML.isMap(docCopy.contents)) {
+      const existingKeys: string[] = []
+      for (const pair of docCopy.contents.items) {
+        if (YAML.isScalar(pair.key) && typeof pair.key.value === 'string') {
+          existingKeys.push(pair.key.value)
+        }
+      }
+      for (const ek of existingKeys) {
+        if (!(ek in out)) {
+          docCopy.delete(ek)
+        }
+      }
+      for (const [k, v] of Object.entries(out)) {
+        docCopy.set(k, docCopy.createNode(v))
+      }
+    }
+    baseYamlDoc = docCopy
+    finalYaml = docCopy.toString({
+      indent: 2,
+      lineWidth: 0,
+    })
+  } else {
+    const serializedBody = YAML.stringify(out, {
+      indent: 2,
+      lineWidth: 0,
+    })
+    finalYaml = form.leadingCommentBlock
+      ? `${form.leadingCommentBlock}${serializedBody}`
+      : serializedBody
+  }
 
   lastEmittedYaml = finalYaml
   remoteValidation.value = null
@@ -1297,10 +1412,57 @@ function setConnector(next: ConnectorKind) {
   emitSerializedYaml()
 }
 
+function isTopLevelJsonArrayRequest(): boolean {
+  if (form.connector !== 'http' || form.bodyType !== 'json') return false
+  try {
+    return Array.isArray(JSON.parse(contentJsonText.value || ''))
+  } catch {
+    return contentJsonText.value.trim().startsWith('[')
+  }
+}
+
+function commitTimeoutMs() {
+  const raw = Number(timeoutMsText.value.trim())
+  const clamped =
+    timeoutMsText.value.trim() !== '' && Number.isFinite(raw)
+      ? Math.max(100, Math.min(120000, Math.round(raw)))
+      : 10000
+  form.timeoutMs = clamped
+  timeoutMsText.value = String(clamped)
+  emitSerializedYaml()
+}
+
+function commitMaxPreviewChars() {
+  const trimmed = maxPreviewCharsText.value.trim()
+  const raw = Number(trimmed)
+  const normalized =
+    trimmed !== '' && Number.isFinite(raw) && Math.round(raw) === -1
+      ? -1
+      : trimmed !== '' && Number.isFinite(raw) && Math.round(raw) >= 1
+        ? Math.round(raw)
+        : 60
+  form.maxPreviewChars = normalized
+  maxPreviewCharsText.value = String(normalized)
+  emitSerializedYaml()
+}
+
+function onContentRowTypeChange(cRow: ContentFieldRow) {
+  if (cRow.valueType === 'null') {
+    cRow.value = 'null'
+  } else if (cRow.valueType === 'boolean' && !cRow.value.includes('${')) {
+    if (cRow.value !== 'true' && cRow.value !== 'false') {
+      cRow.value = 'true'
+    }
+  } else if (cRow.valueType === 'string' && cRow.value === 'null') {
+    cRow.value = ''
+  }
+  emitSerializedYaml()
+}
+
 function setHttpBodyType(next: HttpBodyType) {
   if (form.bodyType === next) return
   form.bodyType = next
-  if (next === 'json') {
+  if (next === 'json' && !isTopLevelJsonArrayRequest()) {
     const obj = buildContentObjectFromRows(form.contentRows)
     contentJsonText.value = JSON.stringify(obj, null, 2)
     contentJsonError.value = null
@@ -1444,16 +1606,21 @@ function removeContentFieldRow(idx: number) {
 function insertVarIntoContent(paramName: string) {
   const token = wrapPlaceholder(paramName)
   if (contentSubMode.value === 'json') {
+    let parsed: unknown
     try {
-      const obj = isPlainObject(JSON.parse(contentJsonText.value))
-        ? (JSON.parse(contentJsonText.value) as Record<string, unknown>)
-        : {}
-      obj[paramName] = token
-      contentJsonText.value = JSON.stringify(obj, null, 2)
-      onContentJsonInput(contentJsonText.value)
+      parsed = JSON.parse(contentJsonText.value)
     } catch {
       store.showToast('请先修复 JSON 模板语法后再快捷插入变量', 'warning')
+      return
     }
+    if (Array.isArray(parsed)) {
+      void store.copyText(token, `顶层 JSON 数组不可自动覆写为对象，已复制 ${token}，请粘贴至数组元素中`)
+      return
+    }
+    const obj = isPlainObject(parsed) ? (parsed as Record<string, unknown>) : {}
+    obj[paramName] = token
+    contentJsonText.value = JSON.stringify(obj, null, 2)
+    onContentJsonInput(contentJsonText.value)
     return
   }
 
@@ -1477,7 +1644,17 @@ function insertVarIntoContent(paramName: string) {
 
 function switchContentSubMode(nextMode: 'table' | 'json') {
   if (contentSubMode.value === nextMode) return
-  if (nextMode === 'json') {
+  if (nextMode === 'table') {
+    if (contentJsonError.value) {
+      store.showToast('当前 JSON 模板存在语法错误，请先修复后再切换至可视化字段表', 'warning')
+      return
+    }
+    if (isTopLevelJsonArrayRequest()) {
+      store.showToast('当前请求体顶层为 JSON 数组 []，不支持切换为键值字段表，请在 JSON 模板中编辑', 'warning')
+      return
+    }
+  }
+  if (nextMode === 'json' && !isTopLevelJsonArrayRequest()) {
     const obj = buildContentObjectFromRows(form.contentRows)
     contentJsonText.value = JSON.stringify(obj, null, 2)
     contentJsonError.value = null
@@ -2106,8 +2283,8 @@ watch(
   () => props.apiName,
   () => {
     validateReqSeq += 1
-    remoteValidating.value = false
-    remoteValidation.value = null
+    resetVisualEditorState()
+    parseYamlIntoForm(props.yamlText)
   },
 )
 
@@ -2153,6 +2330,10 @@ function onSplitYamlUpdate(nextYaml: string) {
 function handleRootKeydown(e: KeyboardEvent) {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
     e.preventDefault()
+    if (!yamlParseError.value) {
+      if (activeTab.value === 'policy') commitTimeoutMs()
+      if (activeTab.value === 'response') commitMaxPreviewChars()
+    }
     emit('save')
   }
 }
@@ -2892,16 +3073,26 @@ defineExpose({
                           />
                         </td>
                         <td v-if="!(isHttpConnector && form.bodyType === 'form')">
-                          <select v-model="cRow.valueType" class="ave-cell-select mono" @change="emitSerializedYaml">
+                          <select v-model="cRow.valueType" class="ave-cell-select mono" @change="onContentRowTypeChange(cRow)">
                             <option value="string">string</option>
                             <option value="number">number</option>
                             <option value="boolean">boolean</option>
+                            <option value="null">null</option>
                             <option value="json">array/obj</option>
                           </select>
                         </td>
                         <td>
+                          <input
+                            v-if="!(isHttpConnector && form.bodyType === 'form') && cRow.valueType === 'null'"
+                            value="null"
+                            type="text"
+                            class="ave-cell-input mono"
+                            readonly
+                            disabled
+                            title="JSON / YAML 空值 null"
+                          />
                           <select
-                            v-if="!(isHttpConnector && form.bodyType === 'form') && cRow.valueType === 'boolean' && !cRow.value.includes('${')"
+                            v-else-if="!(isHttpConnector && form.bodyType === 'form') && cRow.valueType === 'boolean' && !cRow.value.includes('${')"
                             v-model="cRow.value"
                             class="ave-cell-select mono"
                             @change="emitSerializedYaml"
@@ -2935,6 +3126,7 @@ defineExpose({
                   </div>
                   <CodeMirrorEditor
                     :model-value="contentJsonText"
+                    :doc-key="`${props.apiName}:json`"
                     lang="json"
                     min-height="170px"
                     max-height="280px"
@@ -3275,12 +3467,13 @@ defineExpose({
                     <span class="ave-lbl-hint">（-1 不限制）</span>
                   </label>
                   <input
-                    v-model.number="form.maxPreviewChars"
+                    v-model="maxPreviewCharsText"
                     type="number"
                     min="-1"
                     class="ave-input mono"
                     placeholder="-1 表示不限制，默认 60"
-                    @input="emitSerializedYaml"
+                    @change="commitMaxPreviewChars"
+                    @blur="commitMaxPreviewChars"
                   />
                 </div>
                 <div>
@@ -3369,13 +3562,14 @@ defineExpose({
                   <label class="ave-lbl">网关响应超时阈值 timeoutMs (100~120000 ms)</label>
                   <div class="ave-inline-input-group">
                     <input
-                      v-model.number="form.timeoutMs"
+                      v-model="timeoutMsText"
                       type="number"
                       min="100"
                       max="120000"
                       step="500"
                       class="ave-input mono"
-                      @input="emitSerializedYaml"
+                      @change="commitTimeoutMs"
+                      @blur="commitTimeoutMs"
                     />
                     <button
                       v-for="ms in [3000, 10000, 30000]"
@@ -3385,6 +3579,7 @@ defineExpose({
                       :class="{ active: form.timeoutMs === ms }"
                       @click="
                         form.timeoutMs = ms;
+                        timeoutMsText = String(ms);
                         emitSerializedYaml()
                       "
                     >
@@ -3457,6 +3652,7 @@ defineExpose({
       <div class="ave-yaml-editor-host">
         <CodeMirrorEditor
           :model-value="props.yamlText"
+          :doc-key="props.apiName"
           lang="yaml"
           fill
           @update:model-value="onSplitYamlUpdate"

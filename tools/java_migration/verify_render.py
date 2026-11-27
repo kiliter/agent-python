@@ -24,7 +24,6 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
-import os
 import re
 import subprocess
 import sys
@@ -32,11 +31,19 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from jinja2 import nodes
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(HERE))
 
-from report_agent.domain.jinja_env import render_body  # noqa: E402
+from _java_env import (  # noqa: E402
+    JAVA_TPL_DIR,
+    compile_java_harness,
+    resolve_java_classpath,
+)
+from report_agent.domain.jinja_env import parse_body, render_body  # noqa: E402
 from report_agent.domain.resources import load_resource_dir  # noqa: E402
 from report_agent.domain.template import FieldDef, Template  # noqa: E402
 
@@ -45,10 +52,6 @@ try:  # 生产渲染上下文构造（平台改造后提供）
 except ImportError:  # pragma: no cover
     from report_agent.runtime.runner import build_render_context  # type: ignore  # noqa: E402
 
-JAVA_AGENT = Path(os.environ.get("JAVA_AGENT_HOME", "/Users/zhangjialin/IdeaProjects/agent"))
-JAVA_TPL_DIR = JAVA_AGENT / "pdf-agent-parse/src/main/resources/template/md"
-JAVA_CLASSES = JAVA_AGENT / "pdf-agent-parse/target/classes"
-JAVA_LIB = JAVA_AGENT / "release/windows/pdf-agent-parse-windows/lib"
 HARNESS_DIR = HERE / "harness"
 _RULE_KEY_RE = re.compile(r"服务争议点\d+\s*[:：]\s*([^\r\n]+)")
 _JAVA_PLACEHOLDER_RE = re.compile(r"\{\{ (\S+?) \}\}")
@@ -95,10 +98,20 @@ def scenarios(tpl: Template) -> list[tuple[str, dict[str, dict[str, Any]]]]:
     fields = tpl.definition.fields
     enums = [f for f in fields if f.type == "enum"]
     lists = [f for f in fields if f.type == "list"]
+    tree = parse_body(tpl.body)
+    has_digit_fields = {
+        t.node.name
+        for t in tree.find_all(nodes.Test)
+        if t.name == "hasDigit" and isinstance(t.node, nodes.Name)
+    }
     cond_scalars = [
         f for f in fields
         if f.type not in ("enum", "list")
-        and ((not f.visible and f.whenMissing == "empty") or f'!= "{{{{{f.name}}}}}"' in tpl.body)
+        and (
+            (not f.visible and f.whenMissing == "empty")
+            or f'!= "{{{{{f.name}}}}}"' in tpl.body
+            or f.name in has_digit_fields
+        )
     ]
 
     def base(variant: int, list_rows: int = 3) -> dict[str, dict[str, Any]]:
@@ -195,13 +208,11 @@ def _apply_intentional_fixes(tpl: Template, report: dict[str, dict[str, Any]], c
 # ---------------------------------------------------------------------------
 
 def _java_cp() -> str:
-    build = HARNESS_DIR / "build"
-    cp = f"{JAVA_CLASSES}{os.pathsep}{JAVA_LIB}/*"
-    if not (build / "PebbleRenderHarness.class").exists():
-        build.mkdir(exist_ok=True)
-        subprocess.run(["javac", "-encoding", "UTF-8", "-cp", cp, "-d", str(build),
-                        str(HARNESS_DIR / "PebbleRenderHarness.java")], check=True)
-    return f"{build}{os.pathsep}{cp}"
+    """解析 Java classpath 并在 PebbleRenderHarness.java 更新时自动重编 .class。"""
+    cp = resolve_java_classpath(require_javac=True, require_pebble=True)
+    if cp is None:
+        raise RuntimeError("缺少 JDK、Java 编译产物或 Pebble 依赖 Jar，无法运行 PebbleRenderHarness")
+    return compile_java_harness(HARNESS_DIR / "PebbleRenderHarness.java", HARNESS_DIR / "build", cp)
 
 
 def render_java(cases: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:

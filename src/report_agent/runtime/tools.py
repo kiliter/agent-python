@@ -11,7 +11,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import json
 import logging
@@ -21,6 +20,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai import ModelRetry, RunContext, Tool, ToolDefinition
 
+from ..domain.sanitize import sanitize_sensitive_text
 from ..domain.skill import Skill, SkillParseError, extract_doc_title, normalize_skill_doc_path
 from ..gateway.base import ApiCallResult
 from .deps import RunDeps
@@ -117,7 +117,7 @@ def _render_skill_block(deps: RunDeps, skill_id: str) -> str:
     return "\n\n".join(parts) + "\n"
 
 
-def _collect_doc_requests(doc: str, docs: list[str] | None) -> list[str]:
+def collect_doc_requests(doc: str, docs: list[str] | None) -> list[str]:
     """收集并去重模型请求的原始子文档路径参数。#Created By AiCoding(codex)"""
     raw_docs: list[str] = []
     if doc and str(doc).strip():
@@ -127,6 +127,9 @@ def _collect_doc_requests(doc: str, docs: list[str] | None) -> list[str]:
             if item is not None and str(item).strip():
                 raw_docs.append(str(item).strip())
     return list(dict.fromkeys(raw_docs))
+
+
+_collect_doc_requests = collect_doc_requests
 
 
 # ============================================================================ load_skill
@@ -288,14 +291,30 @@ def _format_api_success_payload(contract: Any, result: ApiResult, default_previe
     }
 
 
-def _record_cached_api_hit(
+def _record_reused_api_result(
     ctx: RunContext[RunDeps],
     name: str,
     clean_args: dict[str, Any],
     contract: Any,
     hit: ApiResult,
 ) -> dict[str, Any]:
-    """记录并组装幂等缓存或在途复用命中的 call_api 返回值。#Created By AiCoding(codex)"""
+    """记录并组装幂等缓存或同批在途并发复用命中的 call_api 返回值（兼容 ok=True 与 ok=False）。#Created By AiCoding(codex)"""
+    if not hit.ok:
+        base_err = {
+            "resultId": hit.result_id,
+            "ok": False,
+            "error": hit.error,
+            "note": "接口调用失败，请如实按找不到处理并写明原因，不要猜测数据",
+        }
+        call_id = _record(
+            ctx,
+            "call_api",
+            {"name": name, "args": clean_args},
+            base_err,
+            ok=False,
+            summary={**base_err, "costMs": 0},
+        )
+        return {"callId": call_id, **base_err}
     payload = _format_api_success_payload(contract, hit, ctx.deps.settings.agent_preview_rows)
     call_id = _record(
         ctx,
@@ -329,59 +348,35 @@ async def call_api(ctx: RunContext[RunDeps], name: str, args: dict[str, Any]) ->
                               {"ok": False, "error": msg, "note": "接口参数不合法，请按找不到处理"})
 
     ws = deps.workspace
-    cache_key: tuple[str, str] | None = None
-    if contract.idempotent:
-        cache_key = (name, json.dumps(clean_args, sort_keys=True, ensure_ascii=False, default=str))
-        seen_inflight: set[int] = set()
-        while True:
-            cached = ws._idempotent_cache.get(cache_key)
-            if cached is not None:
-                return _record_cached_api_hit(ctx, name, clean_args, contract, cached)
-            inflight = ws._idempotent_inflight.get(cache_key)
-            if inflight is None or id(inflight) in seen_inflight:
-                break
-            seen_inflight.add(id(inflight))
-            try:
-                shared = await asyncio.shield(inflight)
-            except asyncio.CancelledError:
-                # 若当前任务自身已被取消则向上抛出；若是前序并发调用单独被取消，则由当前存活任务接手执行
-                cur_task = asyncio.current_task()
-                if cur_task is None or cur_task.cancelling() > 0:
-                    raise
-                continue
-            if shared.ok:
-                return _record_cached_api_hit(ctx, name, clean_args, contract, shared)
 
-    fut: asyncio.Future[ApiResult] | None = None
-    if cache_key is not None and cache_key not in ws._idempotent_inflight:
-        fut = asyncio.get_running_loop().create_future()
-        ws._idempotent_inflight[cache_key] = fut
-
-    try:
+    async def _invoke_once() -> ApiResult:
         t0 = time.monotonic()
         try:
             res = await deps.gateway.invoke(contract, clean_args)
-        except Exception as exc:  # noqa: BLE001 - 网关意外异常转为结构化错误记录
-            log.warning("网关调用未预期异常 api=%s：%s", name, exc)
-            res = ApiCallResult(ok=False, error=f"网关调用异常：{type(exc).__name__} {exc}".strip(),
-                                cost_ms=int((time.monotonic() - t0) * 1000))
-        result = ApiResult(
+        except Exception as exc:  # noqa: BLE001 - 网关意外异常转为结构化脱敏错误记录
+            safe_err = sanitize_sensitive_text(f"网关调用异常：{type(exc).__name__} {exc}".strip())
+            log.warning("网关调用未预期异常 api=%s：%s", name, safe_err)
+            res = ApiCallResult(
+                ok=False,
+                error=safe_err,
+                cost_ms=int((time.monotonic() - t0) * 1000),
+            )
+        err_msg = sanitize_sensitive_text(res.error) if (not res.ok and res.error) else res.error
+        created = ApiResult(
             result_id=ws.next_result_id(), api=name, title=contract.title, args=clean_args, ok=res.ok,
-            error=res.error, columns=dict(contract.response.records.columns), records=res.records,
+            error=err_msg, columns=dict(contract.response.records.columns), records=res.records,
             cost_ms=res.cost_ms, raw=res.raw, request_preview=res.request_preview, no_data=res.no_data,
         )
-        ws.add_result(result)
-        if cache_key is not None and result.ok:
-            ws._idempotent_cache[cache_key] = result
-        if fut is not None and not fut.done():
-            fut.set_result(result)
-    except BaseException:
-        if fut is not None and not fut.done():
-            fut.cancel()
-        raise
-    finally:
-        if fut is not None and cache_key is not None and ws._idempotent_inflight.get(cache_key) is fut:
-            ws._idempotent_inflight.pop(cache_key, None)
+        ws.add_result(created)
+        return created
+
+    if contract.idempotent:
+        cache_key = (name, json.dumps(clean_args, sort_keys=True, ensure_ascii=False, default=str))
+        result, reused = await ws._api_singleflight.do(cache_key, _invoke_once)
+        if reused:
+            return _record_reused_api_result(ctx, name, clean_args, contract, result)
+    else:
+        result = await _invoke_once()
 
     if not result.ok:
         base_err = {
@@ -569,15 +564,21 @@ async def query_result(
     multi_mode = bool(resultIds)
     rids = list(dict.fromkeys(str(r).strip() for r in (resultIds or []))) if multi_mode else []
 
-    if isinstance(limit, bool):
-        msg = "limit 必须是正整数"
-        bad_args: dict[str, Any] = {"resultIds": rids} if multi_mode else {"resultId": resultId}
-        bad_args["limit"] = limit
-        fallback = {**({"resultIds": rids} if multi_mode else {"resultId": resultId}), "ok": False, "error": msg, "total": 0, "rows": []}
-        return _fail_or_retry(ctx, "query_result", bad_args, msg, fallback)
     max_limit = _setting_int(getattr(deps, "settings", None), "agent_query_max_limit", 100)
     default_limit = min(_setting_int(getattr(deps, "settings", None), "agent_query_default_limit", 20), max_limit)
-    limit = max(1, min(int(limit if limit is not None else default_limit), max_limit))
+    if limit is not None and (isinstance(limit, bool) or limit <= 0):
+        msg = f"limit 必须是正整数（最大允许 {max_limit}）"
+        bad_args: dict[str, Any] = {"resultIds": rids} if multi_mode else {"resultId": resultId}
+        bad_args["limit"] = limit
+        fallback = {
+            **({"resultIds": rids} if multi_mode else {"resultId": resultId}),
+            "ok": False,
+            "error": msg,
+            "total": 0,
+            "rows": [],
+        }
+        return _fail_or_retry(ctx, "query_result", bad_args, msg, fallback)
+    limit = min(int(limit if limit is not None else default_limit), max_limit)
 
     args: dict[str, Any] = {
         "where": [c.model_dump(exclude_none=True) for c in where_list],

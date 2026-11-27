@@ -90,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
         from .api.auth import UserStore
         from .store.layout import DataLayout
 
-        password = args.password or getpass.getpass("密码：")
+        password = args.password if args.password is not None else getpass.getpass("密码：")
         if len(password) < 8:
             print("密码至少 8 位", file=sys.stderr)
             return 2

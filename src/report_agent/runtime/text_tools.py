@@ -35,8 +35,8 @@ _DATE_COMPACT_OPT_TIME_SCAN_RE = re.compile(
 _YM_CN_SCAN_RE = re.compile(r"(?<![A-Za-z0-9])(19\d{2}|20\d{2})\s*年\s*(\d{1,2})\s*月(?!\s*\d)")
 _YM_SEP_SCAN_RE = re.compile(r"(?<![A-Za-z0-9])(19\d{2}|20\d{2})([-/.])(\d{1,2})(?![-\d/.])")
 _YM_COMPACT_SCAN_RE = re.compile(r"(?<![A-Za-z0-9])(19\d{2}|20\d{2})(0[1-9]|1[0-2])(?![A-Za-z0-9])")
-_DATE_RULE4_MD_RE = re.compile(r"(?<!\d)(?<!年)(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]")
-_TRAILING_DIGIT_OR_YEAR_RE = re.compile(r"(?:\d|年)\s*$")
+_DATE_RULE4_MD_RE = re.compile(r"(?<!\d)(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]")
+_TRAILING_NUMERIC_YEAR_RE = re.compile(r"\d[^\S\r\n]*年[^\S\r\n]*$")
 _LEADING_YEAR_RE = re.compile(r"^(19\d{2}|20\d{2})(?!\d)")
 _INDEPENDENT_YEAR_RE = re.compile(r"(?<![A-Za-z0-9])(19\d{2}|20\d{2})(?!\d)")
 
@@ -124,7 +124,8 @@ def parse_date(value: str, pattern: str) -> datetime:
     if not m:
         raise ValueError(f"“{value}” 不符合格式 {pattern}")
     g = m.groupdict()
-    return datetime(int(g.get("y") or 1970), int(g.get("mo") or 1), int(g.get("d") or 1),
+    # 无年份格式（如 MM月dd日）以闰年 2000 为默认基准年，兼容“02月29日”合法闰日解析
+    return datetime(int(g.get("y") or 2000), int(g.get("mo") or 1), int(g.get("d") or 1),
                     int(g.get("h") or 0), int(g.get("mi") or 0), int(g.get("s") or 0))
 
 
@@ -280,7 +281,7 @@ def extract_dates(
             start, end = m.span()
             if any(not (end <= cs or start >= ce) for cs, ce in covered_spans):
                 continue
-            if _TRAILING_DIGIT_OR_YEAR_RE.search(source, 0, start):
+            if _TRAILING_NUMERIC_YEAR_RE.search(source, 0, start):
                 continue
             dt = _try_make_date(year_fallback, int(m.group(1)), int(m.group(2)))
             if dt is not None:

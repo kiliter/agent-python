@@ -25,6 +25,7 @@ import {
   Trash2,
 } from 'lucide-vue-next'
 import { usePlatformStore } from '@/stores/platform'
+import { formatDurationMs } from '@/utils/duration'
 import type { GlobalRegressionCase, RegressionCaseResult } from '@/types/platform'
 
 const store = usePlatformStore()
@@ -183,6 +184,7 @@ async function handleRunSingleCase(c: GlobalRegressionCase) {
 }
 
 async function handleSwitchBatch(batchId: string) {
+  if (store.isRegressionRunning) return
   selectedBatchId.value = batchId
   await store.loadRegressionBatch(batchId)
 }
@@ -278,6 +280,7 @@ function openCreateCaseDialog() {
 }
 
 function openEditCaseDialog(c: GlobalRegressionCase) {
+  if (store.isRegressionRunning) return
   editorIsNew.value = false
   editorOriginalScope.value = c.scope
   editorForm.id = c.id
@@ -353,6 +356,7 @@ async function handleSaveCaseDialog() {
 }
 
 async function handleAdoptCaseBaseline(c: GlobalRegressionCase) {
+  if (store.isRegressionRunning) return
   const row = batchResultMap.value[caseKeyOf(c)]
   const runId = row?.runIdA || c.lastRunId
   if (!runId) {
@@ -367,6 +371,7 @@ async function handleAdoptCaseBaseline(c: GlobalRegressionCase) {
 }
 
 function handleDeleteCase(c: GlobalRegressionCase) {
+  if (store.isRegressionRunning) return
   ElMessageBox.confirm(`确认删除回归用例「${c.id} ${c.name}」吗？删除后不可恢复。`, '确认删除用例', {
     confirmButtonText: '确认删除',
     cancelButtonText: '取消',
@@ -385,11 +390,8 @@ function verdictBadgeClass(verdict: string): string {
   return 'st-idle'
 }
 
-function formatDurationMs(ms?: number | null): string {
-  const n = Number(ms || 0)
-  if (n <= 0) return '—'
-  if (n < 1000) return `${n}ms`
-  return `${(n / 1000).toFixed(1)}s`
+function formatRegDuration(ms?: number | null): string {
+  return formatDurationMs(ms, { emptyText: '—', zeroText: '—' })
 }
 
 onMounted(() => {
@@ -445,6 +447,7 @@ onActivated(() => {
           <select
             v-if="store.regressionBatches.length > 0"
             :value="selectedBatchId"
+            :disabled="store.isRegressionRunning"
             class="select reg-select-batch mono"
             aria-label="切换历史回归批次"
             @change="handleSwitchBatch(($event.target as HTMLSelectElement).value)"
@@ -554,7 +557,7 @@ onActivated(() => {
         <div class="reg-kpi-top">
           <span class="reg-kpi-label">执行失败 / 异常</span>
           <span class="mono reg-kpi-mini">
-            {{ activeBatch?.durationMs ? formatDurationMs(activeBatch.durationMs) : '—' }}
+            {{ activeBatch?.durationMs ? formatRegDuration(activeBatch.durationMs) : '—' }}
           </span>
         </div>
         <div class="reg-kpi-val-line">
@@ -746,7 +749,7 @@ onActivated(() => {
               <td class="mono" style="font-size: 12px; color: var(--text-secondary)">
                 <template v-if="batchResultMap[caseKeyOf(c)]">
                   <div>{{ batchResultMap[caseKeyOf(c)]!.foundA }}/{{ batchResultMap[caseKeyOf(c)]!.totalA }}</div>
-                  <div style="font-size: 11px">{{ formatDurationMs(batchResultMap[caseKeyOf(c)]!.durationMsA) }}</div>
+                  <div style="font-size: 11px">{{ formatRegDuration(batchResultMap[caseKeyOf(c)]!.durationMsA) }}</div>
                 </template>
                 <template v-else>—</template>
               </td>
@@ -776,6 +779,7 @@ onActivated(() => {
                     v-if="batchResultMap[caseKeyOf(c)]?.runIdA || c.lastRunId"
                     type="button"
                     class="btn btn-xs"
+                    :disabled="store.isRegressionRunning"
                     title="将最近一次运行结果采纳为期望基线（含期望模板）"
                     @click="handleAdoptCaseBaseline(c)"
                   >
@@ -785,6 +789,7 @@ onActivated(() => {
                   <button
                     type="button"
                     class="btn btn-xs"
+                    :disabled="store.isRegressionRunning"
                     title="编辑用例与期望模板"
                     @click="openEditCaseDialog(c)"
                   >
@@ -793,6 +798,7 @@ onActivated(() => {
                   <button
                     type="button"
                     class="btn btn-xs"
+                    :disabled="store.isRegressionRunning"
                     title="删除用例"
                     @click="handleDeleteCase(c)"
                   >

@@ -3,6 +3,7 @@
 import { computed } from 'vue'
 import { BookOpen, Compass } from 'lucide-vue-next'
 import { usePlatformStore } from '@/stores/platform'
+import { getApiResultColumns } from '@/utils/fieldFormat'
 import type { ApiResult, ProcessEvent } from '@/types/platform'
 import {
   asRecord,
@@ -71,13 +72,9 @@ function findApiResult(resultId: unknown): ApiResult | undefined {
   return id ? apiResultMap.value.get(id) : undefined
 }
 
-/** 接口结果表的列：优先接口定义列，否则取记录键并集（不含 row） */
+/** 接口结果表的列：优先接口定义列，否则取记录键并集（WeakMap 缓存） */
 function resultColumns(res: ApiResult): string[] {
-  const defined = Object.keys(res.columns ?? {})
-  if (defined.length) return defined
-  const set = new Set<string>()
-  ;(res.records ?? []).forEach(r => Object.keys(r).forEach(k => k !== 'row' && set.add(k)))
-  return [...set]
+  return getApiResultColumns(res)
 }
 
 /** 折叠键 */

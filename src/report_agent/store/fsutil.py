@@ -65,10 +65,13 @@ def atomic_write_bytes(path: Path, data: bytes, *, mode: int | None = None) -> N
     """原子写入二进制内容；指定 mode 时在写入前先收紧临时文件权限，杜绝权限裸露窗口。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    fd_owned = False
     try:
         if mode is not None:
             _chmod_safe(fd, mode)
-        with os.fdopen(fd, "wb") as fh:
+        fh = os.fdopen(fd, "wb")
+        fd_owned = True
+        with fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
@@ -79,6 +82,11 @@ def atomic_write_bytes(path: Path, data: bytes, *, mode: int | None = None) -> N
             _chmod_safe(path, mode)
         _fsync_dir(path.parent)
     except BaseException:
+        if not fd_owned:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         Path(tmp).unlink(missing_ok=True)
         raise
 
@@ -153,8 +161,8 @@ def append_jsonl(path: Path, data: dict[str, Any], *, mode: int | None = None) -
 
 
 def append_audit(path: Path, action: str, operator: str, detail: dict[str, Any]) -> None:
-    """追加一条统一格式的审计日志记录。"""
-    append_jsonl(path, {"time": now_iso(), "action": action, "operator": operator, **detail})
+    """追加一条统一格式的审计日志记录（主审计字段后置覆盖，防止 detail 伪造篡改）。"""
+    append_jsonl(path, {**detail, "time": now_iso(), "action": action, "operator": operator})
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -223,6 +231,24 @@ def trees_equal(dir_a: Path | None, dir_b: Path | None, ignore: set[str] | None 
     return True
 
 
+def unlink_or_rmtree(path: Path, *, ignore_errors: bool = False) -> bool:
+    """安全删除文件、软链接（含悬空或指向目录的软链）或真实目录；目标不存在返回 False。"""
+    if path.is_symlink() or not path.is_dir():
+        if not os.path.lexists(path):
+            return False
+        try:
+            path.unlink()
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError:
+            if ignore_errors:
+                return False
+            raise
+    shutil.rmtree(path, ignore_errors=ignore_errors)
+    return True
+
+
 def replace_dir_contents(dst: Path, src: Path, keep: set[str] | None = None) -> None:
     """用 src 目录的内容替换 dst 目录的内容（保留 keep 中列出的顶层条目，如 .git）。"""
     keep = keep or set()
@@ -230,10 +256,7 @@ def replace_dir_contents(dst: Path, src: Path, keep: set[str] | None = None) -> 
     for child in dst.iterdir():
         if child.name in keep:
             continue
-        if child.is_dir() and not child.is_symlink():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
+        unlink_or_rmtree(child)
     for child in src.iterdir():
         if child.name in keep:
             continue

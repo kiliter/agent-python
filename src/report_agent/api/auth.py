@@ -396,12 +396,11 @@ class LoginGuard:
             self._fails[ukey] = (count + 1, now + self.lock_s)
 
     def success(self, username: str, *, client_ip: str | None = None) -> None:
+        """登录成功后仅清理当前账号失败计数，保留 IP 级失败计数以防单合法账号周期性洗白喷洒。#Created By AiCoding(codex)"""
+        _ = client_ip
         ukey = _bound_guard_key(username)
-        ip_key = _bound_guard_key(client_ip) if client_ip else None
         with self._lock:
             self._fails.pop(ukey, None)
-            if ip_key:
-                self._ip_fails.pop(ip_key, None)
 
 
 def token_from_request(request: Request) -> str | None:

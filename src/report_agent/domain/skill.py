@@ -175,12 +175,16 @@ def resolve_skill_doc_link(target: str, current_doc: str = SKILL_FILE) -> str | 
     return resolved
 
 
+def strip_code_blocks(text: str) -> str:
+    """剥离 Markdown 围栏代码块与行内代码片段，保留原有换行结构供链接和标题静态扫描复用。#Created By AiCoding(codex)"""
+    normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    stripped = _FENCED_CODE_RE.sub(lambda m: m.group(1), normalized)
+    return _INLINE_CODE_RE.sub("", stripped)
+
+
 def extract_md_doc_links(markdown: str, current_doc: str = SKILL_FILE) -> list[tuple[str, str]]:
     """提取 Markdown 正文中的相对 .md 链接（忽略围栏代码块与行内代码），返回 [(原始目标, 解析后路径)]。#Created By AiCoding(codex)"""
-    text = (markdown or "").replace("\r\n", "\n").replace("\r", "\n")
-    # 剥离代码块与行内代码，避免示例路径触发断链误报
-    stripped = _FENCED_CODE_RE.sub(lambda m: m.group(1), text)
-    stripped = _INLINE_CODE_RE.sub("", stripped)
+    stripped = strip_code_blocks(markdown)
     out: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for m in _MD_LINK_RE.finditer(stripped):
@@ -196,7 +200,7 @@ def extract_md_doc_links(markdown: str, current_doc: str = SKILL_FILE) -> list[t
 
 
 def validate_skill_docs_map(docs: dict[str, str] | None) -> dict[str, str]:
-    """校验并规范化子文档映射表，返回按路径升序排列的新字典。#Created By AiCoding(codex)"""
+    """校验并规范化子文档映射表（含大小写不敏感路径冲突检查），返回按路径升序排列的新字典。#Created By AiCoding(codex)"""
     if not docs:
         return {}
     if not isinstance(docs, dict):
@@ -204,16 +208,22 @@ def validate_skill_docs_map(docs: dict[str, str] | None) -> dict[str, str]:
     if len(docs) > MAX_SKILL_DOCS:
         raise SkillParseError(f"单个 Skill 最多支持 {MAX_SKILL_DOCS} 篇子文档（当前 {len(docs)} 篇）")
     clean: dict[str, str] = {}
+    seen_lower: dict[str, str] = {}
     for raw_path, content in docs.items():
         norm_path = normalize_skill_doc_path(raw_path)
-        if norm_path in clean:
-            raise SkillParseError(f"子文档路径「{norm_path}」重复")
+        low_path = norm_path.lower()
+        if low_path in seen_lower:
+            prev = seen_lower[low_path]
+            if prev == norm_path:
+                raise SkillParseError(f"子文档路径「{norm_path}」重复")
+            raise SkillParseError(f"子文档路径「{norm_path}」与「{prev}」存在大小写冲突")
         if not isinstance(content, str):
             raise SkillParseError(f"子文档「{norm_path}」内容必须是文本字符串")
         if len(content) > MAX_SKILL_DOC_CHARS:
             raise SkillParseError(
                 f"子文档「{norm_path}」长度 {len(content)} 字符，超过上限 {MAX_SKILL_DOC_CHARS} 字符"
             )
+        seen_lower[low_path] = norm_path
         clean[norm_path] = content
     return dict(sorted(clean.items()))
 
@@ -318,6 +328,8 @@ def load_skill_dir(path: Path, root_resolved: Path | None = None) -> Skill:
             if rel_posix == SKILL_FILE:
                 continue
             norm_path = normalize_skill_doc_path(rel_posix)
+            if norm_path.lower() in {k.lower() for k in raw_docs}:
+                raise SkillParseError(f"子文档路径「{norm_path}」存在大小写重名冲突")
             raw_docs[norm_path] = entry_path.read_text(encoding="utf-8")
 
     return parse_skill_markdown(main_md, docs=raw_docs)

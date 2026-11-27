@@ -337,9 +337,28 @@ function removeRow(idx: number) {
   if (!rows.value.length) rows.value.push({ key: '', value: '' })
 }
 
-/** 单业务 ↔ 多业务切换时双向无损迁移「业务名称」，避免丢失或留空 */
+function serializeRowsToJson(list: InputRow[]): string {
+  const obj: Record<string, string> = {}
+  list.forEach(r => {
+    if (r.key.trim()) obj[r.key.trim()] = r.value
+  })
+  return JSON.stringify(obj, null, 2)
+}
+
+/** 单业务 ↔ 多业务切换时双向无损迁移「业务名称」，并在 JSON 模式下同步刷新 jsonText */
 watch(orderMode, (mode, prev) => {
   if (mode === prev) return
+  let syncedJsonOk = true
+  if (inputMode.value === 'json') {
+    const parsedFromJson = parseJsonInputs()
+    if (parsedFromJson) {
+      const list = Object.entries(parsedFromJson).map(([key, value]) => ({ key, value }))
+      rows.value = list.length ? list : [{ key: '', value: '' }]
+    } else {
+      syncedJsonOk = false
+    }
+  }
+
   if (mode === 'composite') {
     const busiRowIdx = rows.value.findIndex(r => r.key.trim() === '业务名称')
     const firstBusi = busiRowIdx >= 0 ? rows.value[busiRowIdx]!.value.trim() : ''
@@ -387,6 +406,10 @@ watch(orderMode, (mode, prev) => {
       rows.value.splice(busiRowIdx, 1)
       if (!rows.value.length) rows.value.push({ key: '手机号码', value: '' })
     }
+    if (inputMode.value === 'json' && syncedJsonOk) {
+      jsonText.value = serializeRowsToJson(rows.value)
+      jsonError.value = ''
+    }
     return
   }
 
@@ -398,6 +421,10 @@ watch(orderMode, (mode, prev) => {
     const insertAt = mobileIdx >= 0 ? mobileIdx + 1 : 0
     rows.value.splice(insertAt, 0, { key: '业务名称', value: firstItemBusi })
   }
+  if (inputMode.value === 'json' && syncedJsonOk) {
+    jsonText.value = serializeRowsToJson(rows.value)
+    jsonError.value = ''
+  }
 })
 
 const hasConflictingSingleBusiKey = computed(
@@ -407,6 +434,10 @@ const hasConflictingSingleBusiKey = computed(
 function stripSingleBusiKeyFromCommon() {
   rows.value = rows.value.filter(r => r.key.trim() !== '业务名称')
   if (!rows.value.length) rows.value.push({ key: '手机号码', value: '' })
+  if (inputMode.value === 'json') {
+    jsonText.value = serializeRowsToJson(rows.value)
+    jsonError.value = ''
+  }
   ElMessage.success('已移除公共入参中的「业务名称」，避免与下方多业务列表重复')
 }
 
@@ -532,22 +563,25 @@ function collectInputs(): Record<string, string> | null {
   return parseJsonInputs()
 }
 
-watch(inputMode, (mode, prev) => {
-  if (mode === 'json' && prev === 'rows') {
-    const obj: Record<string, string> = {}
-    rows.value.forEach(r => {
-      if (r.key.trim()) obj[r.key.trim()] = r.value
-    })
-    jsonText.value = JSON.stringify(obj, null, 2)
+/** 切换入参编辑模式：JSON 存在语法错误时阻止切换至键值列表并提示修正，防止静默丢弃修改 */
+function switchInputMode(nextMode: 'rows' | 'json') {
+  if (nextMode === inputMode.value) return
+  if (nextMode === 'json') {
+    jsonText.value = serializeRowsToJson(rows.value)
     jsonError.value = ''
-  } else if (mode === 'rows' && prev === 'json') {
-    const obj = parseJsonInputs()
-    if (obj) {
-      const list = Object.entries(obj).map(([key, value]) => ({ key, value }))
-      rows.value = list.length ? list : [{ key: '', value: '' }]
-    }
+    inputMode.value = 'json'
+    return
   }
-})
+  const obj = parseJsonInputs()
+  if (!obj) {
+    ElMessage.warning(jsonError.value || '结构化入参 JSON 存在语法错误，请修正后再切换为键值列表')
+    return
+  }
+  const list = Object.entries(obj).map(([key, value]) => ({ key, value }))
+  rows.value = list.length ? list : [{ key: '', value: '' }]
+  jsonError.value = ''
+  inputMode.value = 'rows'
+}
 
 function newOrderId() {
   form.orderId = `SIM${Date.now().toString().slice(-8)}`
@@ -950,7 +984,11 @@ function jumpToRunRecord(runId: string) {
                     移除冗余「业务名称」
                   </el-button>
                   <span class="label-spacer"></span>
-                  <el-radio-group v-model="inputMode" size="small">
+                  <el-radio-group
+                    :model-value="inputMode"
+                    size="small"
+                    @update:model-value="(val: string | number | boolean | undefined) => switchInputMode(val === 'json' ? 'json' : 'rows')"
+                  >
                     <el-radio-button value="rows">键值列表</el-radio-button>
                     <el-radio-button value="json">JSON 源码</el-radio-button>
                   </el-radio-group>

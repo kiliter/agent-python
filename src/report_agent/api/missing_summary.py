@@ -10,16 +10,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
 
-from pydantic_ai import Agent
+from pydantic_ai import Agent, UsageLimits
 
+from ..domain.sanitize import sanitize_sensitive_text
 from ..store.fsutil import fmt_time, now_iso
 
 # ============================================================================ 归因分类定义
 _CATEGORY_META: dict[str, dict[str, Any]] = {
+    "run_failed": {
+        "label": "运行中断未完成核查",
+        "severity": "danger",
+        "order": 0,
+    },
     "api_error": {
         "label": "外部接口调用失败",
         "severity": "danger",
@@ -176,6 +183,8 @@ def _classify_field(
     empty_apis: list[dict[str, Any]],
     val_issues: dict[str, str],
     other_missing_names: set[str],
+    allow_condition_skip: bool = True,
+    run_error: str = "",
 ) -> tuple[str, list[str], str]:
     """将单个非找到字段归入确定性原因分类，返回 (category, related_apis, brief_reason)。"""
     name = str(field.get("name") or "")
@@ -184,12 +193,13 @@ def _classify_field(
     val_failed = bool(field.get("validationFailed", False))
     reasoning = str(field.get("reasoning") or "").strip()
 
-    # 1. 条件分支未命中跳过（不展示在报告中，也不属于校验失败）
-    if visible and not shown and not val_failed:
-        brief = _clip(reasoning) if reasoning else "模板展示条件未命中，该字段未出现在报告中。"
-        return "condition_skipped", [], brief
-    if not shown and not val_failed and reasoning and _CONDITION_SKIP_RE.search(reasoning):
-        return "condition_skipped", [], _clip(reasoning)
+    # 1. 条件分支未命中跳过（仅在运行已正常/部分成稿时生效；整单 FAILED 无报告时严禁误归为无害跳过）
+    if allow_condition_skip:
+        if visible and not shown and not val_failed:
+            brief = _clip(reasoning) if reasoning else "模板展示条件未命中，该字段未出现在报告中。"
+            return "condition_skipped", [], brief
+        if not shown and not val_failed and reasoning and _CONDITION_SKIP_RE.search(reasoning):
+            return "condition_skipped", [], _clip(reasoning)
 
     # 2. 证据校验未通过降级
     if val_failed:
@@ -228,7 +238,11 @@ def _classify_field(
     if reasoning and _NOT_IN_SOURCE_RE.search(reasoning):
         return "not_in_source", [], _clip(reasoning)
 
-    # 7. 兜底
+    # 7. 整单运行失败未成稿时的中断归因或通用兜底
+    if not allow_condition_skip:
+        err_hint = f"（{_clip(run_error, 90)}）" if run_error else ""
+        brief = _clip(reasoning) if reasoning else f"整单运行中断失败{err_hint}，未能完成核查与成稿。"
+        return "run_failed", [], brief
     if not reasoning:
         return "other", [], "模型未填写具体未找到说明。"
     return "other", [], _clip(reasoning)
@@ -255,9 +269,13 @@ def _build_group_summary(
     *,
     failed_apis: list[dict[str, Any]],
     empty_apis: list[dict[str, Any]],
+    run_error: str = "",
 ) -> str:
     n = len(fields)
     names_preview = "、".join(f["name"] for f in fields[:4]) + (" 等" if n > 4 else "")
+    if code == "run_failed":
+        err_desc = f"（{_clip(run_error, 80)}）" if run_error else ""
+        return f"{n} 个字段（{names_preview}）因整单运行中断失败{err_desc}，未能完成核查与报告渲染。"
     if code == "api_error":
         api_desc = "；".join(f"{a['api']}（{a['error']}）" for a in failed_apis[:2])
         return f"{n} 个字段（{names_preview}）受外部接口报错影响：{api_desc}" if api_desc else f"{n} 个字段受外部接口调用失败影响。"
@@ -369,6 +387,10 @@ def build_missing_summary(run: dict[str, Any]) -> dict[str, Any]:
     failed_apis, empty_apis = _extract_api_signals(api_results)
     val_issues = _extract_validation_issues(validation_rounds)
     other_missing_names = {str(f["name"]) for f in non_found}
+    run_status = str(run.get("status") or "").strip().upper()
+    has_report = bool(str(run.get("report") or "").strip())
+    run_aborted = run_status == "FAILED" and not has_report
+    run_error = sanitize_sensitive_text(run.get("error"), fallback="", max_chars=200) if run.get("error") else ""
 
     grouped: dict[str, list[dict[str, Any]]] = {}
     shown_missing_count = 0
@@ -383,6 +405,7 @@ def build_missing_summary(run: dict[str, Any]) -> dict[str, Any]:
         shown = bool(f.get("shown", False))
         when_missing = _normalize_when_missing(f.get("whenMissing"))
         has_default = when_missing == "value"
+        has_default_fallback = bool(shown and has_default)
         val_failed = bool(f.get("validationFailed", False))
         retried = bool(f.get("retried", False))
 
@@ -392,11 +415,13 @@ def build_missing_summary(run: dict[str, Any]) -> dict[str, Any]:
             empty_apis=empty_apis,
             val_issues=val_issues,
             other_missing_names=other_missing_names,
+            allow_condition_skip=not run_aborted,
+            run_error=run_error,
         )
 
         if code == "condition_skipped":
             skipped_count += 1
-        elif has_default:
+        elif has_default_fallback:
             default_fallback_count += 1
         elif shown:
             shown_missing_count += 1
@@ -413,7 +438,7 @@ def build_missing_summary(run: dict[str, Any]) -> dict[str, Any]:
             "visible": visible,
             "shown": shown,
             "whenMissing": when_missing,
-            "hasDefaultFallback": has_default,
+            "hasDefaultFallback": has_default_fallback,
             "validationFailed": val_failed,
             "retried": retried,
             "category": code,
@@ -434,12 +459,24 @@ def build_missing_summary(run: dict[str, Any]) -> dict[str, Any]:
             "label": meta["label"],
             "severity": meta["severity"],
             "count": len(flist),
-            "summary": _build_group_summary(code, flist, failed_apis=failed_apis, empty_apis=empty_apis),
+            "summary": _build_group_summary(
+                code, flist, failed_apis=failed_apis, empty_apis=empty_apis, run_error=run_error
+            ),
             "fields": flist,
         })
 
     # 提炼高层根因标签（供顶部一眼扫清问题）
     root_causes: list[dict[str, Any]] = []
+    if "run_failed" in grouped:
+        rfields = [x["name"] for x in grouped["run_failed"]]
+        root_causes.append({
+            "code": "run_failed",
+            "severity": "danger",
+            "title": "整单运行失败未成稿",
+            "detail": run_error or f"运行中断未生成有效报告，共 {len(rfields)} 个字段未完成核查",
+            "affectedCount": len(rfields),
+            "affectedFields": rfields,
+        })
     for a in failed_apis:
         affected = api_error_fields.get(a["api"], [])
         times = f"（调用 {a['count']} 次均失败）" if a["count"] > 1 else ""
@@ -451,9 +488,10 @@ def build_missing_summary(run: dict[str, Any]) -> dict[str, Any]:
             "affectedCount": len(affected),
             "affectedFields": affected,
         })
+    has_explicit_error = bool(failed_apis) or ("validation_failed" in grouped) or run_aborted
     for a in empty_apis:
         affected = api_empty_fields.get(a["api"], [])
-        if affected or any(g["code"] in ("api_no_data", "api_error") for g in groups):
+        if affected or not has_explicit_error:
             root_causes.append({
                 "code": "api_no_data",
                 "severity": "warning",
@@ -555,11 +593,26 @@ def _build_ai_prompt_payload(run: dict[str, Any], det_summary: dict[str, Any]) -
                 "reasoning": _clip(f.get("reasoning") or f.get("briefReason") or "", 320),
             })
 
+    raw_val_rounds = run.get("validationRounds") if isinstance(run.get("validationRounds"), list) else []
+    compact_val_rounds: list[list[dict[str, str]]] = []
+    for rnd in raw_val_rounds[-3:]:
+        if not isinstance(rnd, list):
+            continue
+        rnd_items: list[dict[str, str]] = []
+        for it in rnd[:15]:
+            if isinstance(it, dict):
+                rnd_items.append({
+                    "field": str(it.get("field") or ""),
+                    "message": _clip(str(it.get("message") or ""), 200),
+                })
+        if rnd_items:
+            compact_val_rounds.append(rnd_items)
+
     payload = {
         "runId": run.get("runId"),
         "template": f"#{run.get('templateId')} {run.get('templateName') or ''}".strip(),
         "status": run.get("status"),
-        "runError": _clip(str(run.get("error") or ""), 200) if run.get("error") else None,
+        "runError": _clip(sanitize_sensitive_text(run.get("error"), fallback=""), 200) if run.get("error") else None,
         "hasInputDocument": bool(str(run.get("document") or "").strip()),
         "stats": {
             "totalFields": det_summary["totalFields"],
@@ -570,7 +623,7 @@ def _build_ai_prompt_payload(run: dict[str, Any], det_summary: dict[str, Any]) -
             "skippedCount": det_summary["skippedCount"],
         },
         "apiResults": api_briefs,
-        "validationRounds": run.get("validationRounds") or [],
+        "validationRounds": compact_val_rounds,
         "nonFoundFields": non_found_fields,
     }
     return "请根据以下单次运行事实，生成「非找到字段」原因摘要总结：\n\n" + json.dumps(payload, ensure_ascii=False, indent=2)
@@ -588,7 +641,7 @@ async def generate_ai_missing_summary(
     det_summary = build_missing_summary(run)
     user_prompt = _build_ai_prompt_payload(run, det_summary)
 
-    # 总结任务不需要工具、温度略低保证客观克制，限制 max_tokens 控速防冗长
+    # 总结任务不需要工具、温度略低保证客观克制，限制 max_tokens、请求轮次与超时防失控
     settings: dict[str, Any] = dict(model_settings or {})
     settings.pop("parallel_tool_calls", None)
     settings["temperature"] = min(float(settings.get("temperature", 0.2)), 0.2)
@@ -596,7 +649,12 @@ async def generate_ai_missing_summary(
     settings["max_tokens"] = min(int(cur_max), 800) if cur_max else 800
 
     agent: Agent[None, str] = Agent(model, instructions=_AI_SYSTEM_PROMPT)
-    res = await agent.run(user_prompt, model_settings=settings)
+    async with asyncio.timeout(60.0):
+        res = await agent.run(
+            user_prompt,
+            model_settings=settings,
+            usage_limits=UsageLimits(request_limit=2),
+        )
     text = str(res.output or "").strip()
     if not text:
         raise ValueError("大模型返回空的摘要内容")

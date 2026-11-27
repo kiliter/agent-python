@@ -261,8 +261,8 @@ async function selectCmdkItem(item: CmdkItem) {
     return
   }
   if (item.kind === 'skill' && item.skillId) {
-    await store.openSkillDetail(item.skillId)
-    if (store.currentNav === 'skills') {
+    const ok = await store.openSkillDetail(item.skillId)
+    if (ok && store.currentNav === 'skills') {
       tabsStore.syncFromRouteNav('skills')
     }
     return
@@ -383,13 +383,17 @@ function onGlobalKeydown(e: KeyboardEvent) {
     e.preventDefault()
     if (cmdkOpen.value || store.activeModal || store.activeDrawer || tabsStore.isChatIframeActive) return
     if (store.currentNav === 'workbench') {
-      store.handleSaveDraft()
+      void store.handleSaveDraft()
     } else if (store.currentNav === 'skills' && store.skillsSubView === 'detail') {
-      store.saveSkillDraft()
+      void store.saveSkillDraft()
     } else if (store.currentNav === 'apis' && store.apisSubView === 'detail') {
-      store.saveApiDraft()
+      void store.saveApiDraft()
     } else if (store.currentNav === 'settings') {
-      store.saveSysPromptDraft()
+      if (store.settingsSubView === 'workspace') {
+        void store.saveSysPromptDraft()
+      } else if (store.settingsSubView === 'composite-template') {
+        void store.saveCompositeTemplateDraft()
+      }
     }
   }
 }
@@ -515,6 +519,9 @@ function handleUserMenuCommand(cmd: string) {
   <!-- 登录页独立全屏渲染 -->
   <LoginView v-if="store.currentNav === 'login'" />
 
+  <!-- 首次探活鉴权静默占位（避免未登录首次打开闪现后台主骨架或误弹过期提示） -->
+  <div v-else-if="store.authBootstrapping" class="auth-boot-screen" aria-busy="true"></div>
+
   <!-- 管理端主应用骨架 -->
   <div v-else class="app-shell" :class="{ 'is-focus-fullscreen': store.isFocusFullscreen }">
     <!-- 左侧权威主导航（可折叠，中国移动政企规范术语 3 组共 7 项，F2 品牌标志） -->
@@ -590,7 +597,7 @@ function handleUserMenuCommand(cmd: string) {
             </template>
             <template v-else-if="store.currentNav === 'skills'">
               <template v-if="store.skillsSubView === 'detail'">
-                <span class="breadcrumb-link" @click="store.skillsSubView = 'list'">技能</span>
+                <span class="breadcrumb-link" @click="navigateFromShell('skills')">技能</span>
                 <span class="breadcrumb-sep">/</span>
                 <span class="breadcrumb-current">{{ store.currentSkill.name }}</span>
               </template>
@@ -598,7 +605,7 @@ function handleUserMenuCommand(cmd: string) {
             </template>
             <template v-else-if="store.currentNav === 'apis'">
               <template v-if="store.apisSubView === 'detail'">
-                <span class="breadcrumb-link" @click="store.apisSubView = 'list'">API</span>
+                <span class="breadcrumb-link" @click="navigateFromShell('apis')">API</span>
                 <span class="breadcrumb-sep">/</span>
                 <span class="breadcrumb-current mono">{{ store.selectedApiName }}</span>
               </template>
@@ -606,7 +613,7 @@ function handleUserMenuCommand(cmd: string) {
             </template>
             <template v-else-if="store.currentNav === 'runs'">
               <template v-if="store.runsSubView === 'detail'">
-                <span class="breadcrumb-link" @click="store.runsSubView = 'list'">运行记录</span>
+                <span class="breadcrumb-link" @click="navigateFromShell('runs')">运行记录</span>
                 <span class="breadcrumb-sep">/</span>
                 <span class="breadcrumb-current mono">{{ store.selectedRunId }}</span>
               </template>
@@ -811,6 +818,12 @@ function handleUserMenuCommand(cmd: string) {
 </template>
 
 <style>
+.auth-boot-screen {
+  width: 100vw;
+  height: 100vh;
+  background-color: var(--bg-canvas, var(--bg-subtle, #f8fafc));
+}
+
 .main-content.is-chat-iframe-active {
   padding: 0;
 }

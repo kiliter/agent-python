@@ -5,11 +5,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from pydantic import SecretStr
 
@@ -23,7 +25,7 @@ from .gateway.base import GatewayClient
 from .gateway.mock import MockGatewayClient
 from .gateway.reloadable import ReloadableGatewayClient
 from .gateway.unified_xml import UnifiedGatewayXmlClient
-from .runtime.model_factory import build_model, build_model_settings
+from .runtime.model_factory import aclose_model, build_model, build_model_settings
 from .runtime.regression import RegressionStore
 from .runtime.runner import AgentRunner
 from .store.cases import CaseStore
@@ -53,6 +55,20 @@ def _gateway_signature(s: Settings) -> tuple:
     )
 
 
+def _llm_signature(s: Settings) -> tuple:
+    """提取决定 OpenAIChatModel / AsyncOpenAI 客户端实例构造的配置签名。#Created By AiCoding(codex)"""
+    return (
+        s.llm_base_url,
+        s.llm_api_key.get_secret_value() or "EMPTY",
+        s.llm_model,
+        s.llm_timeout_s,
+        s.llm_http_retries,
+        s.agent_output_mode,
+        s.llm_strict_tools,
+        s.llm_tool_choice_required,
+    )
+
+
 @dataclass
 class Container:
     settings: Settings
@@ -73,9 +89,63 @@ class Container:
     env_settings: Settings | None = None
     external_model: bool = False
     external_gateway: bool = False
+    _closing_model_tasks: set[asyncio.Task[None]] = field(default_factory=set, repr=False)
+    _retired_models: list[Any] = field(default_factory=list, repr=False)
+
+    def _retire_model_safely(self, old_model: Any) -> None:
+        """在当前或主事件循环上异步安全关闭退役模型连接池；无活跃循环时同步排空关闭。#Created By AiCoding(codex)"""
+        if old_model is None:
+            return
+
+        def _spawn_on(loop: asyncio.AbstractEventLoop) -> None:
+            task = loop.create_task(aclose_model(old_model))
+            with self.lock:
+                self._closing_model_tasks.add(task)
+            task.add_done_callback(lambda t: self._discard_model_task(t))
+
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is not None and not running.is_closed():
+            _spawn_on(running)
+            return
+
+        runner_loop = getattr(getattr(self.runner, "_sem", None), "_loop", None)
+        if runner_loop is not None and not runner_loop.is_closed() and runner_loop.is_running():
+            try:
+                runner_loop.call_soon_threadsafe(_spawn_on, runner_loop)
+                return
+            except RuntimeError:
+                pass
+
+        try:
+            asyncio.run(aclose_model(old_model))
+        except RuntimeError:
+            with self.lock:
+                self._retired_models.append(old_model)
+
+    def _discard_model_task(self, task: asyncio.Task[None]) -> None:
+        with self.lock:
+            self._closing_model_tasks.discard(task)
+
+    async def aclose_models(self) -> None:
+        """等待全部退役模型关闭任务完成，并安全关闭当前活跃模型连接池。#Created By AiCoding(codex)"""
+        with self.lock:
+            tasks = list(self._closing_model_tasks)
+            pending_models = list(self._retired_models)
+            self._retired_models.clear()
+            cur_model = self.runner.model if not self.external_model else None
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        for m in pending_models:
+            await aclose_model(m)
+        if cur_model is not None:
+            await aclose_model(cur_model)
 
     def apply_runtime_config(self) -> Settings:
         """将 runtime_config 当前生效快照热更新至内存中的网关、模型与运行器，无需重启进程。"""
+        old_model_to_close: Any = None
         with self.lock:
             if self.runtime_config is None:
                 return self.settings
@@ -83,19 +153,25 @@ class Container:
             prev_settings = self.settings
             effective = self.runtime_config.to_effective_settings(base)
             gw_changed = _gateway_signature(effective) != _gateway_signature(prev_settings)
-            if gw_changed:
+            if gw_changed and not self.external_gateway:
                 new_gw = build_gateway(effective, self.layout)
-                self.external_gateway = False
                 if isinstance(self.gateway, ReloadableGatewayClient):
                     self.gateway.swap(new_gw)
                 else:
                     self.gateway = ReloadableGatewayClient(new_gw)
                     self.runner.gateway = self.gateway
+            llm_changed = _llm_signature(effective) != _llm_signature(prev_settings)
+            rebuild_model = llm_changed and not self.external_model
+            prev_model = self.runner.model if rebuild_model else None
             self.settings = effective
             if hasattr(self, "releases") and self.releases is not None:
                 self.releases.keep = effective.releases_keep
-            self.runner.reload_config(effective, rebuild_model=not self.external_model)
-            return effective
+            self.runner.reload_config(effective, rebuild_model=rebuild_model)
+            if prev_model is not None and prev_model is not self.runner.model:
+                old_model_to_close = prev_model
+        if old_model_to_close is not None:
+            self._retire_model_safely(old_model_to_close)
+        return effective
 
 
 def build_gateway(settings: Settings, layout: DataLayout) -> GatewayClient:

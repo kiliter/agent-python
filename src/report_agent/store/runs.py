@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import math
 import os
@@ -22,13 +23,13 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .fsutil import append_jsonl, read_json, read_jsonl, write_json
+from .fsutil import append_jsonl, read_json, read_jsonl, unlink_or_rmtree, write_json
 from .layout import DataLayout, InvalidResource, ensure_within
 
 log = logging.getLogger(__name__)
 
 _ALPHABET = string.ascii_lowercase + string.digits
-RUN_ID_RE = re.compile(r"^(\d{8})[A-Za-z0-9_\-]{1,56}$")
+RUN_ID_RE = re.compile(r"^([0-9]{8})[A-Za-z0-9_\-]{1,56}$")
 
 
 def new_run_id() -> str:
@@ -42,6 +43,14 @@ def _day_dir(root: Path, d: date) -> Path:
     return root / f"{d.year:04d}" / f"{d.month:02d}" / f"{d.day:02d}"
 
 
+def _is_ascii_digit_dir(p: Path, *, exact_len: int | None = None) -> bool:
+    """校验目录非软链接且名称为纯 ASCII 数字，防止软链逃逸与 Unicode 数字导致 int() 崩溃。"""
+    name = p.name
+    if exact_len is not None and len(name) != exact_len:
+        return False
+    return not p.is_symlink() and p.is_dir() and name.isascii() and name.isdigit()
+
+
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
         return max(0, int(value))
@@ -49,11 +58,15 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
-def _percentile(sorted_vals: list[int], q: float) -> int:
+def percentile(sorted_vals: list[int], q: float) -> int:
+    """计算已升序排列整数列表的分位数（如 q=0.95）。"""
     if not sorted_vals:
         return 0
     idx = max(0, min(len(sorted_vals) - 1, math.ceil(len(sorted_vals) * q) - 1))
     return sorted_vals[idx]
+
+
+_percentile = percentile
 
 
 def _parse_run_day(run_id: str) -> date | None:
@@ -356,7 +369,7 @@ class RunStore:
                 log.exception("退出排空运行记录失败 runId=%s", rem[0].get("runId"))
 
     async def stop(self) -> None:
-        """停止前把队列中剩余的记录写完，并重置状态使后续投递退回同步落盘。"""
+        """停止前在工作线程把队列中剩余记录排空落盘，并重置状态使后续投递退回同步落盘。"""
         queue, task = self._queue, self._task
         self._queue = None
         self._task = None
@@ -365,7 +378,7 @@ class RunStore:
                 await queue.put(None)
             with suppress(asyncio.CancelledError):
                 await task
-            self._drain_queue(queue)
+            await asyncio.to_thread(self._drain_queue, queue)
 
     def submit(self, summary: dict[str, Any], detail: dict[str, Any]) -> None:
         """投递一条运行记录。未启动后台写入（如单元测试、命令行、已停止后）时同步写入。"""
@@ -395,7 +408,11 @@ class RunStore:
                             self._pending.pop(run_id, None)
                     log.exception("写入运行记录失败 runId=%s", item[0].get("runId"))
         finally:
-            self._drain_queue(queue)
+            if not queue.empty():
+                try:
+                    await asyncio.shield(asyncio.to_thread(self._drain_queue, queue))
+                except (asyncio.CancelledError, RuntimeError):
+                    self._drain_queue(queue)
 
     def _run_path(self, run_id: str) -> tuple[date, Path, Path] | None:
         day = _parse_run_day(run_id)
@@ -416,13 +433,20 @@ class RunStore:
                 raise InvalidResource(f"运行编号「{run_id}」格式不合法")
             _, d, json_path = loc
             with self._write_lock:
+                # 若异步排队期间 update_detail 合并了新字段，优先取 _pending 中最新快照落盘，杜绝更新丢失
+                with self._cache_lock:
+                    pend = self._pending.get(run_id)
+                if pend is not None:
+                    summary, detail = pend
                 inc_dir = not self._orphan_recovered
                 pre_sig = self._stat_day_sig(d, include_dir_mtime=inc_dir)
                 write_json(json_path, detail)
                 append_jsonl(d / "index.jsonl", summary)
                 norm = _normalize_summary(summary)
                 post_sig = self._stat_day_sig(d, include_dir_mtime=inc_dir)
+                # 在同一个 _write_lock 临界区内移除 _pending，彻底消除写盘后与 update_detail 之间的锁外窗口
                 with self._cache_lock:
+                    self._pending.pop(run_id, None)
                     cached = self._day_cache.get(d)
                     if cached is not None and cached[0] == pre_sig and norm is not None:
                         prev_items = cached[1]
@@ -449,17 +473,17 @@ class RunStore:
             return []
         found: list[tuple[date, Path]] = []
         for ydir in self.root.iterdir():
-            if not ydir.is_dir() or not ydir.name.isdigit() or len(ydir.name) != 4:
+            if not _is_ascii_digit_dir(ydir, exact_len=4):
                 continue
             year = int(ydir.name)
             if year < date_from.year or year > date_to.year:
                 continue
             for mdir in ydir.iterdir():
-                if not mdir.is_dir() or not mdir.name.isdigit():
+                if not _is_ascii_digit_dir(mdir):
                     continue
                 month = int(mdir.name)
                 for ddir in mdir.iterdir():
-                    if not ddir.is_dir() or not ddir.name.isdigit():
+                    if not _is_ascii_digit_dir(ddir):
                         continue
                     try:
                         d = date(year, month, int(ddir.name))
@@ -471,14 +495,14 @@ class RunStore:
         return found
 
     def _read_day_summaries(self, ddir: Path) -> list[dict[str, Any]]:
-        """读取单日全部运行摘要（命中 (mtime_ns, size) 内存缓存时免磁盘解析与目录扫描）。"""
+        """读取单日全部运行摘要（命中 (mtime_ns, size) 内存缓存时免磁盘解析，返回浅拷贝防缓存污染）。"""
         inc_dir = not self._orphan_recovered
         sig = self._stat_day_sig(ddir, include_dir_mtime=inc_dir)
         with self._cache_lock:
             cached = self._day_cache.get(ddir)
             if cached is not None and cached[0] == sig:
                 self._day_cache.move_to_end(ddir)
-                return cached[1]
+                return list(cached[1])
 
         by_id: dict[str, dict[str, Any]] = {}
         for raw in read_jsonl(ddir / "index.jsonl"):
@@ -491,7 +515,7 @@ class RunStore:
         items.sort(key=lambda x: x["runId"])
         if self._stat_day_sig(ddir, include_dir_mtime=inc_dir) == sig:
             self._store_day_cache(ddir, sig, items)
-        return items
+        return list(items)
 
     def get(self, run_id: str) -> dict[str, Any] | None:
         """按运行编号读取完整记录；优先命中异步待落盘队列，详情文件损坏时尝试从当日索引摘要降级恢复。"""
@@ -576,12 +600,13 @@ class RunStore:
         return result
 
     def stats_7d(self) -> dict[str, Any]:
-        """最近 7 天的统计（缓存 60 秒）：模板运行次数/成功率/耗时、Skill 加载次数、接口调用情况。"""
-        if self._stats_cache and time.monotonic() - self._stats_cache[0] < 60:
-            return self._stats_cache[1]
+        """最近 7 天的统计（缓存 60 秒，返回深拷贝防止外部调用方篡改缓存）：模板运行次数/成功率/耗时、Skill 加载与接口调用。"""
+        cached = self._stats_cache
+        if cached and time.monotonic() - cached[0] < 60:
+            return copy.deepcopy(cached[1])
         stats = self.window_stats(days=7)
         self._stats_cache = (time.monotonic(), stats)
-        return stats
+        return copy.deepcopy(stats)
 
     def window_stats(self, days: int = 7, today: date | None = None) -> dict[str, Any]:
         """统计最近 days 天内的运行成功率、耗时分布、模板/Skill/接口调用与按日趋势。"""
@@ -708,29 +733,46 @@ class RunStore:
         }
 
     def cleanup(self, keep_days: int) -> int:
-        """删除超过保留天数的日期目录，并顺带清理已变空的月份与年份目录。"""
+        """删除超过保留天数的日期目录（锁内摘缓存并原子改名，锁外异步/慢速 rmtree，严格忽略软链接）。"""
         if keep_days <= 0 or not self.root.exists():
             return 0
         cutoff = date.today() - timedelta(days=keep_days)
         removed = 0
         for ydir in list(self.root.iterdir()):
-            if not ydir.is_dir() or not ydir.name.isdigit():
+            if not _is_ascii_digit_dir(ydir, exact_len=4):
                 continue
+            year = int(ydir.name)
             for mdir in list(ydir.iterdir()):
-                if not mdir.is_dir() or not mdir.name.isdigit():
+                if not _is_ascii_digit_dir(mdir):
                     continue
+                month = int(mdir.name)
+                for stale_trash in list(mdir.glob(".cleanup-*")):
+                    unlink_or_rmtree(stale_trash, ignore_errors=True)
                 for ddir in list(mdir.iterdir()):
-                    if not ddir.is_dir() or not ddir.name.isdigit():
+                    if not _is_ascii_digit_dir(ddir):
                         continue
                     try:
-                        d = date(int(ydir.name), int(mdir.name), int(ddir.name))
+                        d = date(year, month, int(ddir.name))
                     except ValueError:
                         continue
                     if d < cutoff:
-                        shutil.rmtree(ddir, ignore_errors=True)
-                        with self._cache_lock:
-                            self._day_cache.pop(ddir, None)
-                        removed += 1
+                        trash: Path | None = None
+                        with self._write_lock:
+                            if _is_ascii_digit_dir(ddir):
+                                with self._cache_lock:
+                                    self._day_cache.pop(ddir, None)
+                                candidate = mdir / f".cleanup-{ddir.name}-{os.getpid()}-{secrets.token_hex(4)}"
+                                try:
+                                    os.replace(ddir, candidate)
+                                    trash = candidate
+                                    removed += 1
+                                except FileNotFoundError:
+                                    pass
+                                except OSError:
+                                    shutil.rmtree(ddir, ignore_errors=True)
+                                    removed += 1
+                        if trash is not None:
+                            shutil.rmtree(trash, ignore_errors=True)
                 with suppress(OSError):
                     mdir.rmdir()
             with suppress(OSError):

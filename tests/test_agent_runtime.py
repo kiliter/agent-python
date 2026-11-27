@@ -134,7 +134,8 @@ async def test_tool_restrictions(container, case_c01):
     out = await container.runner.run(RunRequest(1001, case_c01["inputs"], case_c01["documentText"]))
     assert seen["enum"] == ["business-sms-check", "document-match"]
     assert seen["api_enum"] == ["querySMSSendInfo"]
-    assert out["status"] in ("PARTIAL", "SUCCESS", "FAILED")
+    assert out["status"] == "PARTIAL"
+    assert any(c["tool"] == "load_skill" and not c["ok"] for c in out["toolCalls"])
 
 
 def test_evidence_whitespace_scalar_types_and_invalid_refs():

@@ -4,11 +4,12 @@
   全部数据实时对接 usePlatformStore 与后端 /api/v1，不含任何写死演示数据
 -->
 <script setup lang="ts">
-import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { analyzeJinjaBody } from '@/utils/jinjaBody'
 import { buildFullDiffRows } from '@/utils/textDiff'
-import { Annotation, Compartment, EditorState, type Range } from '@codemirror/state'
+import { buildFieldInsertSnippet, cloneAdoptedTemplateField } from '@/utils/fieldFormat'
+import { Annotation, Compartment, EditorState, Transaction, type Range } from '@codemirror/state'
 import {
   EditorView,
   Decoration,
@@ -46,7 +47,7 @@ import {
 import { usePlatformStore } from '@/stores/platform'
 import { errorMessage, platformApi } from '@/api/platformApi'
 import { resolveEvidenceInspectorTab } from '@/utils/reportSegments'
-import type { TemplateDetail, TemplateField } from '@/types/platform'
+import type { TemplateDetail, TemplateField, ValidationIssue } from '@/types/platform'
 import ReportPreviewContent from '@/components/ReportPreviewContent.vue'
 
 const store = usePlatformStore()
@@ -190,6 +191,7 @@ async function handleSaveClick() {
 
 async function handlePublishClick() {
   closeAllMenus()
+  if (!(await store.flushPendingInspectorEdits('publish'))) return
   await store.validateCurrentTemplate()
   store.openModal('publish')
 }
@@ -522,8 +524,8 @@ function adoptOtherField(name: string) {
   if (store.templateFields.some(f => f.name === name)) return
   const other = store.otherTemplateFields.find(f => f.name === name)
   if (!other) return
-  const { fromTemplate: _from, ...rest } = other
-  store.templateFields.push({ ...rest, bodyUsageCount: 0, refByFields: [] })
+  store.templateFields.push(cloneAdoptedTemplateField(other))
+  store.recomputeFieldBodyUsage()
   store.markCurrentTemplateDirty()
 }
 
@@ -544,18 +546,28 @@ function replaceAcRange(insertStr: string) {
 function applyCandidate(candidate: Candidate) {
   if (!view) return
   if (candidate.isOther) adoptOtherField(candidate.name)
-  replaceAcRange(`{{${candidate.name}}}`)
-  store.selectIdeFieldByName(candidate.name)
-  store.showToast(
-    candidate.isOther
-      ? `已插入跨模板字段 {{${candidate.name}}} 并复制字段定义`
-      : `已填充字段 {{${candidate.name}}}`,
-  )
+  const fieldDef = store.templateFields.find(f => f.name === candidate.name) || candidate
+  const snippet = buildFieldInsertSnippet(fieldDef)
+  replaceAcRange(snippet)
+  void store.selectIdeFieldByName(candidate.name)
+  if (fieldDef.type === '列表') {
+    store.showToast(
+      candidate.isOther
+        ? `已引入跨模板列表字段并插入 {% for item in ${candidate.name} %}`
+        : `已插入列表字段循环 {% for item in ${candidate.name} %}`,
+    )
+  } else {
+    store.showToast(
+      candidate.isOther
+        ? `已插入跨模板字段 {{${candidate.name}}} 并复制字段定义`
+        : `已填充字段 {{${candidate.name}}}`,
+    )
+  }
 }
 
 function applyNewFieldName(name: string) {
   replaceAcRange(`{{${name}}}`)
-  store.selectIdeFieldByName(name)
+  void store.selectIdeFieldByName(name)
   store.showToast(`已插入 {{${name}}}，请在右侧检查器补充字段规则`, 'info')
 }
 
@@ -593,17 +605,40 @@ function insertSnippetAtCursor(snippet: string) {
 function handlePickInsertField(name: string, isOther: boolean) {
   closeAllMenus()
   if (isOther) adoptOtherField(name)
-  insertSnippetAtCursor(`{{${name}}}`)
-  store.selectIdeFieldByName(name)
-  store.showToast(
-    isOther ? `已引入并插入跨模板字段 {{${name}}}` : `已插入字段 {{${name}}}`,
-  )
+  const fieldDef = store.templateFields.find(f => f.name === name)
+  const snippet = fieldDef ? buildFieldInsertSnippet(fieldDef) : `{{${name}}}`
+  insertSnippetAtCursor(snippet)
+  void store.selectIdeFieldByName(name)
+  if (fieldDef?.type === '列表') {
+    store.showToast(
+      isOther
+        ? `已引入并插入跨模板列表循环 {% for item in ${name} %}`
+        : `已插入列表字段循环 {% for item in ${name} %}`,
+    )
+  } else {
+    store.showToast(
+      isOther ? `已引入并插入跨模板字段 {{${name}}}` : `已插入字段 {{${name}}}`,
+    )
+  }
 }
 
 function handlePickUndefinedToDefine(name: string) {
   closeAllMenus()
-  store.selectIdeFieldByName(name)
+  void store.selectIdeFieldByName(name)
   locateFieldInEditor(name)
+}
+
+/** 校验条目点击：优先跳转到具体报错行号，同时联动右侧属性面板选中关联字段 */
+function handleValidationIssueClick(issue: ValidationIssue) {
+  closeAllMenus()
+  if (issue.field) {
+    void store.selectIdeFieldByName(issue.field)
+  }
+  if (issue.line != null && issue.line >= 1) {
+    locateLineInEditor(issue.line)
+  } else if (issue.field) {
+    locateFieldInEditor(issue.field)
+  }
 }
 
 interface CondOption {
@@ -732,7 +767,15 @@ watch(
   },
 )
 
-// 正文被外部修改（切换模板、字段重命名、放弃草稿）时同步至编辑器
+watch(
+  () => store.ideLocateLineRequest?.seq,
+  seq => {
+    if (!seq || !store.ideLocateLineRequest?.line) return
+    locateLineInEditor(store.ideLocateLineRequest.line)
+  },
+)
+
+// 正文被外部修改（字段重命名、程序化覆盖）时同步至编辑器，附加 addToHistory(false) 避免污染撤销栈
 watch(
   () => store.bodyText,
   text => {
@@ -741,7 +784,11 @@ watch(
     if ((text || '') !== current) {
       view.dispatch({
         changes: { from: 0, to: current.length, insert: text || '' },
-        annotations: [externalSyncAnnotation.of(true), suppressAcAnnotation.of(true)],
+        annotations: [
+          externalSyncAnnotation.of(true),
+          suppressAcAnnotation.of(true),
+          Transaction.addToHistory.of(false),
+        ],
       })
       syncCursorPos(view)
     }
@@ -1119,7 +1166,23 @@ const skillDiffSummary = computed<SimpleItemChange[]>(() => {
   return list
 })
 
-// ============================================================ 全局点击外部与局部 Esc 拦截
+// ============================================================ 全局点击外部、局部 Esc 拦截与 <KeepAlive> 生命周期清理
+let windowListenersBound = false
+
+function bindStageWindowListeners() {
+  if (windowListenersBound) return
+  window.addEventListener('mousedown', onWindowMouseDown)
+  window.addEventListener('keydown', onWindowKeydownCapture, true)
+  windowListenersBound = true
+}
+
+function unbindStageWindowListeners() {
+  if (!windowListenersBound) return
+  window.removeEventListener('mousedown', onWindowMouseDown)
+  window.removeEventListener('keydown', onWindowKeydownCapture, true)
+  windowListenersBound = false
+}
+
 function onWindowMouseDown(e: MouseEvent) {
   const target = e.target as HTMLElement | null
   if (!target) return
@@ -1143,119 +1206,148 @@ function onWindowKeydownCapture(e: KeyboardEvent) {
   }
 }
 
+function createStageEditorState(doc: string): EditorState {
+  return EditorState.create({
+    doc,
+    extensions: [
+      lineNumbers(),
+      highlightActiveLineGutter(),
+      highlightActiveLine(),
+      history(),
+      EditorView.lineWrapping,
+      themeCompartment.of(getEditorThemeExtension(store.theme === 'dark')),
+      jinjaHighlightPlugin,
+      EditorView.domEventHandlers({
+        keydown(event) {
+          if (!acVisible.value) return false
+          const list = acCandidates.value
+          if (event.key === 'ArrowDown') {
+            event.preventDefault()
+            if (list.length > 0) {
+              acSelectedIndex.value = (acSelectedIndex.value + 1) % list.length
+              scrollActiveAcItemIntoView()
+            }
+            return true
+          }
+          if (event.key === 'ArrowUp') {
+            event.preventDefault()
+            if (list.length > 0) {
+              acSelectedIndex.value = (acSelectedIndex.value - 1 + list.length) % list.length
+              scrollActiveAcItemIntoView()
+            }
+            return true
+          }
+          if (event.key === 'Enter' && !event.isComposing) {
+            event.preventDefault()
+            const target = list[acSelectedIndex.value]
+            if (target) {
+              applyCandidate(target)
+            } else if (acQuery.value.trim()) {
+              applyNewFieldName(acQuery.value.trim())
+            }
+            return true
+          }
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            event.stopPropagation()
+            acVisible.value = false
+            return true
+          }
+          return false
+        },
+        mousedown(event) {
+          const target = event.target as HTMLElement | null
+          if (target?.closest('.jinja-var')) {
+            acVisible.value = false
+          }
+          return false
+        },
+        click(event, v) {
+          if (!v.state.selection.main.empty) return false
+          const target = event.target as HTMLElement | null
+          const varEl = target?.closest('.jinja-var') as HTMLElement | null
+          if (varEl) {
+            const fname = varEl.getAttribute('data-field')
+            if (fname) {
+              acVisible.value = false
+              void store.selectIdeFieldByName(fname)
+            }
+          }
+          return false
+        },
+        blur() {
+          acVisible.value = false
+          return false
+        },
+      }),
+      keymap.of([
+        {
+          key: 'Mod-s',
+          preventDefault: true,
+          run: () => {
+            acVisible.value = false
+            void store.handleSaveDraft()
+            return true
+          },
+        },
+        ...defaultKeymap,
+        ...historyKeymap,
+      ]),
+      EditorView.updateListener.of(update => {
+        const external = update.transactions.some(tr => Boolean(tr.annotation(externalSyncAnnotation)))
+        const suppressed = update.transactions.some(tr => Boolean(tr.annotation(suppressAcAnnotation)))
+        if (update.docChanged || update.selectionSet) {
+          syncCursorPos(update.view)
+        }
+        if (update.docChanged) {
+          if (external) return
+          store.bodyText = update.state.doc.toString()
+          store.markCurrentTemplateDirty()
+          if (!suppressed) {
+            checkAutocompleteTrigger(update.view, true)
+          }
+        } else if (update.selectionSet && !suppressed) {
+          checkAutocompleteTrigger(update.view, false)
+        }
+      }),
+    ],
+  })
+}
+
+function resetStageEditorState(doc: string) {
+  if (!view) return
+  acVisible.value = false
+  closeAllMenus()
+  view.setState(createStageEditorState(doc))
+  syncCursorPos(view)
+}
+
+// 切换模板、加载新模板详情或放弃未保存更改时，重建 EditorState 彻底清空跨模板 ⌘Z 撤销栈
+watch(
+  () =>
+    [
+      store.currentTemplateId,
+      store.templateDetail?.id,
+      store.inspectorResetSeq,
+    ] as const,
+  (nextKeys, prevKeys) => {
+    if (!view || !prevKeys) return
+    if (
+      nextKeys[0] !== prevKeys[0] ||
+      nextKeys[1] !== prevKeys[1] ||
+      nextKeys[2] !== prevKeys[2]
+    ) {
+      resetStageEditorState(store.bodyText || '')
+    }
+  },
+)
+
 onMounted(() => {
-  window.addEventListener('mousedown', onWindowMouseDown)
-  window.addEventListener('keydown', onWindowKeydownCapture, true)
+  bindStageWindowListeners()
 
   if (editorHostRef.value) {
-    const state = EditorState.create({
-      doc: store.bodyText || '',
-      extensions: [
-        lineNumbers(),
-        highlightActiveLineGutter(),
-        highlightActiveLine(),
-        history(),
-        EditorView.lineWrapping,
-        themeCompartment.of(getEditorThemeExtension(store.theme === 'dark')),
-        jinjaHighlightPlugin,
-        EditorView.domEventHandlers({
-          keydown(event) {
-            if (!acVisible.value) return false
-            const list = acCandidates.value
-            if (event.key === 'ArrowDown') {
-              event.preventDefault()
-              if (list.length > 0) {
-                acSelectedIndex.value = (acSelectedIndex.value + 1) % list.length
-                scrollActiveAcItemIntoView()
-              }
-              return true
-            }
-            if (event.key === 'ArrowUp') {
-              event.preventDefault()
-              if (list.length > 0) {
-                acSelectedIndex.value = (acSelectedIndex.value - 1 + list.length) % list.length
-                scrollActiveAcItemIntoView()
-              }
-              return true
-            }
-            if (event.key === 'Enter' && !event.isComposing) {
-              event.preventDefault()
-              const target = list[acSelectedIndex.value]
-              if (target) {
-                applyCandidate(target)
-              } else if (acQuery.value.trim()) {
-                applyNewFieldName(acQuery.value.trim())
-              }
-              return true
-            }
-            if (event.key === 'Escape') {
-              event.preventDefault()
-              event.stopPropagation()
-              acVisible.value = false
-              return true
-            }
-            return false
-          },
-          mousedown(event) {
-            const target = event.target as HTMLElement | null
-            if (target?.closest('.jinja-var')) {
-              acVisible.value = false
-            }
-            return false
-          },
-          click(event, v) {
-            if (!v.state.selection.main.empty) return false
-            const target = event.target as HTMLElement | null
-            const varEl = target?.closest('.jinja-var') as HTMLElement | null
-            if (varEl) {
-              const fname = varEl.getAttribute('data-field')
-              if (fname) {
-                acVisible.value = false
-                store.selectIdeFieldByName(fname)
-              }
-            }
-            return false
-          },
-          blur() {
-            acVisible.value = false
-            return false
-          },
-        }),
-        keymap.of([
-          {
-            key: 'Mod-s',
-            preventDefault: true,
-            run: () => {
-              acVisible.value = false
-              void store.handleSaveDraft()
-              return true
-            },
-          },
-          ...defaultKeymap,
-          ...historyKeymap,
-        ]),
-        EditorView.updateListener.of(update => {
-          const external = update.transactions.some(tr => Boolean(tr.annotation(externalSyncAnnotation)))
-          const suppressed = update.transactions.some(tr => Boolean(tr.annotation(suppressAcAnnotation)))
-          if (update.docChanged || update.selectionSet) {
-            syncCursorPos(update.view)
-          }
-          if (update.docChanged) {
-            if (external) return
-            store.bodyText = update.state.doc.toString()
-            store.markCurrentTemplateDirty()
-            if (!suppressed) {
-              checkAutocompleteTrigger(update.view, true)
-            }
-          } else if (update.selectionSet && !suppressed) {
-            checkAutocompleteTrigger(update.view, false)
-          }
-        }),
-      ],
-    })
-
     view = new EditorView({
-      state,
+      state: createStageEditorState(store.bodyText || ''),
       parent: editorHostRef.value,
     })
     syncCursorPos(view)
@@ -1264,10 +1356,27 @@ onMounted(() => {
   scheduleStaticPreview(0)
 })
 
+onActivated(() => {
+  bindStageWindowListeners()
+  void nextTick(() => view?.requestMeasure())
+})
+
+onDeactivated(() => {
+  unbindStageWindowListeners()
+  acVisible.value = false
+  closeAllMenus()
+  if (previewTimer) {
+    clearTimeout(previewTimer)
+    previewTimer = null
+  }
+})
+
 onBeforeUnmount(() => {
-  window.removeEventListener('mousedown', onWindowMouseDown)
-  window.removeEventListener('keydown', onWindowKeydownCapture, true)
-  if (previewTimer) clearTimeout(previewTimer)
+  unbindStageWindowListeners()
+  if (previewTimer) {
+    clearTimeout(previewTimer)
+    previewTimer = null
+  }
   if (view) {
     view.destroy()
     view = null
@@ -1471,7 +1580,7 @@ onBeforeUnmount(() => {
                 v-for="(err, idx) in store.templateValidation?.errors || []"
                 :key="'v-err-' + idx"
                 class="val-issue-row is-err"
-                @click="err.field ? handlePickUndefinedToDefine(err.field) : locateLineInEditor(err.line)"
+                @click="handleValidationIssueClick(err)"
               >
                 <AlertTriangle :size="13" />
                 <div class="val-issue-body">
@@ -1486,7 +1595,7 @@ onBeforeUnmount(() => {
                 v-for="(warn, idx) in store.templateValidation?.warnings || []"
                 :key="'v-warn-' + idx"
                 class="val-issue-row is-warn"
-                @click="warn.field ? handlePickUndefinedToDefine(warn.field) : locateLineInEditor(warn.line)"
+                @click="handleValidationIssueClick(warn)"
               >
                 <AlertTriangle :size="13" />
                 <div class="val-issue-body">

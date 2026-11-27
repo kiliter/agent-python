@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import shutil
 import sys
@@ -24,12 +23,14 @@ import yaml
 from jinja2 import Environment, nodes
 
 HERE = Path(__file__).resolve().parent
-JAVA_AGENT = Path(os.environ.get("JAVA_AGENT_HOME", "/Users/zhangjialin/IdeaProjects/agent"))
-JAVA_RES = JAVA_AGENT / "pdf-agent-parse/src/main/resources"
-TPL_DIR = JAVA_RES / "template/md"
-RULE_DIR = JAVA_RES / "agent/rule"
-SKILL_DIR = JAVA_RES / "agent/skills"
-FIELD_MAPPINGS = JAVA_RES / "agent/config/field-mappings.yml"
+sys.path.insert(0, str(HERE))
+
+from _java_env import (  # noqa: E402
+    JAVA_FIELD_MAPPINGS as FIELD_MAPPINGS,
+    JAVA_RULE_DIR as RULE_DIR,
+    JAVA_SKILL_DIR as SKILL_DIR,
+    JAVA_TPL_DIR as TPL_DIR,
+)
 
 _RULE_KEY_RE = re.compile(r"服务争议点\d+\s*[:：]\s*([^\r\n]+)")
 _RULE_VAR_RE = re.compile(r"\{\{(.*?)\}\}", re.DOTALL)
@@ -166,15 +167,29 @@ class BodyInfo:
         self.loops: dict[str, list[str]] = {}
         loop_targets: set[str] = set()
         for f in tree.find_all(nodes.For):
+            if not isinstance(f.target, nodes.Name):
+                continue
             loop_targets.add(f.target.name)
-            attrs: list[str] = []
-            for g in f.find_all(nodes.Getattr):
-                if isinstance(g.node, nodes.Name) and g.node.name == f.target.name and g.attr not in attrs:
-                    attrs.append(g.attr)
-            self.loops[f.iter.name] = attrs
-            if isinstance(f.iter, nodes.Name) and f.iter.name not in self.printed and f.iter.name not in loop_targets:
-                if any(True for _ in f.find_all(nodes.Output)):
-                    self.printed.append(f.iter.name)
+            if isinstance(f.iter, nodes.Name):
+                # 保序合并同名列表在多个 for 循环中访问的全部列（避免模板 119 双循环互相覆盖）
+                attrs = self.loops.setdefault(f.iter.name, [])
+                for sub in f.find_all((nodes.Getattr, nodes.Getitem)):
+                    col: str | None = None
+                    if isinstance(sub, nodes.Getattr) and isinstance(sub.node, nodes.Name) and sub.node.name == f.target.name:
+                        col = sub.attr
+                    elif (
+                        isinstance(sub, nodes.Getitem)
+                        and isinstance(sub.node, nodes.Name)
+                        and sub.node.name == f.target.name
+                        and isinstance(sub.arg, nodes.Const)
+                        and isinstance(sub.arg.value, str)
+                    ):
+                        col = sub.arg.value
+                    if col and col not in attrs:
+                        attrs.append(col)
+                if f.iter.name not in self.printed and f.iter.name not in loop_targets:
+                    if any(True for _ in f.find_all(nodes.Output)):
+                        self.printed.append(f.iter.name)
         for out in tree.find_all(nodes.Output):
             for n in out.find_all(nodes.Name):
                 if n.name not in self.printed and n.name not in loop_targets:

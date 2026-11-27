@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any
 
@@ -17,6 +18,7 @@ from ..domain.jinja_env import BodySyntaxError, parse_body
 from ..domain.resources import ResourceSet, _RESERVED_FIELD_NAMES
 from ..domain.skill import Skill
 from ..domain.template import ColumnDef, FieldDef, InputDef, Template
+from ..gateway.http_client import mask_http_headers, mask_http_url
 from ..store.fsutil import fmt_time
 from ..store.service import ResourceState
 
@@ -43,6 +45,28 @@ def safe_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def serialize_expected_value(val: Any) -> str:
+    """统一序列化回归用例期望值：非空 list/dict 用紧凑 JSON，空列表为 '[]'，标量保持原语义。#Created By AiCoding(codex)"""
+    if val is None:
+        return ""
+    if isinstance(val, list):
+        return "[]" if not val else json.dumps(val, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(val, dict):
+        return json.dumps(val, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(val, bool):
+        return str(val)
+    if isinstance(val, float):
+        return str(val) if math.isfinite(val) else ""
+    return str(val).strip()
+
+
+def non_empty_expected_count(expected_values: dict[str, Any] | None) -> int:
+    """统计回归用例 expectedValues 中非空期望值项数。#Created By AiCoding(codex)"""
+    if not isinstance(expected_values, dict):
+        return 0
+    return sum(1 for v in expected_values.values() if v is not None and str(v).strip() != "")
 
 
 _FALLBACK_TOKEN_RE = re.compile(
@@ -257,9 +281,9 @@ def api_item(api: ApiContract, state: ResourceState, refs: list[str], stats: dic
         "format": fmt_label,
         "type": type_label,
         "method": api.method if is_http else None,
-        "url": api.url if is_http else "",
+        "url": mask_http_url(api.url, keep_unresolved=True) if is_http else "",
         "bodyType": api.bodyType if is_http else None,
-        "headers": dict(getattr(api, "headers", None) or {}),
+        "headers": mask_http_headers(dict(getattr(api, "headers", None) or {})),
         "idempotent": api.idempotent,
         "processCode": api.processCode, **status_fields(state), "refs": refs, "calls7d": f"{n:,}",
         "failRate": f"{fail * 100 / n:.2f}%" if n else "0.00%", "avgMs": f"{avg} ms" if avg is not None else "—",

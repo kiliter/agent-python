@@ -7,9 +7,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..domain.sanitize import sanitize_sensitive_text
 from ..domain.template import FieldDef, TemplateDef
 from .dto import document_lines, field_to_dto, run_record, safe_int, sms_records
 from .missing_summary import build_missing_summary
+
+
+def _safe_err(raw: Any) -> Any:
+    if raw is None or raw == "":
+        return raw
+    return sanitize_sensitive_text(raw, fallback="运行失败")
 
 
 def _source(f: dict[str, Any]) -> str:
@@ -69,10 +76,10 @@ def detail_view(o: dict[str, Any], with_messages: bool = False) -> dict[str, Any
         "rev": o.get("rev") or "—", "entry": o.get("entry") or "上游调用", "status": o.get("status") or "FAILED",
         "mobile": inputs.get("手机号码", ""), "busiName": inputs.get("业务名称", ""),
         "found": found_count, "total": total_count, "durationMs": duration_ms, "rounds": rounds,
-        "error": o.get("error"), "retries": len(val_rounds), "batchNo": o.get("batchNo") or extra.get("batchNo"),
+        "error": _safe_err(o.get("error")), "retries": len(val_rounds), "batchNo": o.get("batchNo") or extra.get("batchNo"),
     }
     view = {
-        "runId": summary["runId"], "status": summary["status"], "error": o.get("error"), "rev": summary["rev"],
+        "runId": summary["runId"], "status": summary["status"], "error": summary["error"], "rev": summary["rev"],
         "target": o.get("target") or "online", "entry": summary["entry"], "operator": o.get("operator") or "",
         "record": run_record(summary),
         "durationSec": round(duration_ms / 1000, 1), "rounds": rounds,
@@ -101,7 +108,7 @@ def report_view(o: dict[str, Any]) -> dict[str, Any]:
         "runId": str(o.get("runId") or ""), "status": o.get("status") or "FAILED",
         "templateId": o.get("templateId"), "templateName": o.get("templateName") or "",
         "rev": o.get("rev") or "—",
-        "report": str(o.get("report") or ""), "error": o.get("error"),
+        "report": str(o.get("report") or ""), "error": _safe_err(o.get("error")),
         "fields": [
             {
                 "name": f["name"],

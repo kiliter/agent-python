@@ -12,15 +12,19 @@ import {
   ChevronUp,
   Layers,
   Loader2,
+  Maximize2,
+  Minimize2,
   Play,
   Plus,
+  RefreshCw,
   Sparkles,
   Trash2,
   X,
 } from 'lucide-vue-next'
-import type { SessionOrderItem, TemplateOption } from '../types'
+import type { ChatTarget, SessionOrderItem, TemplateOption } from '../types'
 import { chatErrorText, listTemplates, type CompositeRunItemPayload } from '../chatApi'
 import { stageToast } from '../stageToast'
+import StageModalShell from './StageModalShell.vue'
 
 interface EditableCompositeRow {
   uid: number
@@ -36,6 +40,8 @@ interface EditableCompositeRow {
 const props = defineProps<{
   visible: boolean
   sessionId: string
+  target?: ChatTarget
+  refreshKey?: number
   sessionInputs: Record<string, string>
   sessionItems: SessionOrderItem[]
   busy: boolean
@@ -134,16 +140,38 @@ function buildRowsFromSession() {
   }
 }
 
-async function loadTemplates() {
+let reqSeq = 0
+
+function syncRowTemplatesAfterRefresh(options: TemplateOption[]) {
+  const onlineIds = new Set(options.filter(t => !t.offline).map(t => t.templateId))
+  rows.value.forEach((row, idx) => {
+    if (row.templateId !== null && !onlineIds.has(row.templateId)) {
+      row.templateId = null
+    } else if (row.templateId === null && props.sessionItems?.[idx]?.templateId) {
+      const candidate = props.sessionItems[idx]!.templateId!
+      if (onlineIds.has(candidate)) {
+        row.templateId = candidate
+      }
+    }
+  })
+}
+
+async function loadTemplates(silent = false) {
   if (!props.sessionId) return
-  loadingTemplates.value = true
+  const seq = ++reqSeq
+  if (!silent) loadingTemplates.value = true
   try {
     const list = await listTemplates(props.sessionId, '')
-    templateOptions.value = Array.isArray(list) ? list : []
+    if (seq !== reqSeq) return
+    const nextList = Array.isArray(list) ? list : []
+    templateOptions.value = nextList
+    syncRowTemplatesAfterRefresh(nextList)
   } catch (err) {
-    stageToast.error(`加载在线模板列表失败：${chatErrorText(err)}`)
+    if (seq === reqSeq && !silent) {
+      stageToast.error(`加载在线模板列表失败：${chatErrorText(err)}`)
+    }
   } finally {
-    loadingTemplates.value = false
+    if (seq === reqSeq) loadingTemplates.value = false
   }
 }
 
@@ -160,12 +188,12 @@ const sessionDataSig = computed(() =>
 )
 
 watch(
-  () => props.visible,
-  async vis => {
-    if (!vis) return
-    if (!templateOptions.value.length) {
-      await loadTemplates()
-    }
+  () => [props.visible, props.sessionId, props.target ?? 'online'] as const,
+  async ([vis, sid, tgt], prev) => {
+    if (!vis || !sid) return
+    const needBlockingLoad =
+      !prev || prev[1] !== sid || prev[2] !== tgt || !templateOptions.value.length
+    await loadTemplates(!needBlockingLoad)
     const sig = sessionDataSig.value
     if (!rows.value.length || lastSyncedSig.value !== sig) {
       buildRowsFromSession()
@@ -173,6 +201,15 @@ watch(
     }
   },
   { immediate: true },
+)
+
+watch(
+  () => props.refreshKey,
+  (val, prev) => {
+    if (val !== prev && props.visible && props.sessionId) {
+      void loadTemplates(true)
+    }
+  },
 )
 
 watch(
@@ -252,15 +289,15 @@ function handleSubmit() {
 </script>
 
 <template>
-  <div
-    v-if="visible"
-    class="stage-modal-backdrop composite-layer"
-    role="dialog"
-    aria-modal="true"
+  <StageModalShell
+    :visible="visible"
     aria-label="多业务复合工单并发核查与汇总"
-    @click.self="emit('close')"
+    layer="modal"
+    backdrop-class="composite-layer"
+    card-class="composite-card"
+    @close="emit('close')"
   >
-    <div class="stage-modal-card composite-card">
+    <template #default="{ isFullscreen, toggleFullscreen, showTip, hideTip }">
       <!-- 1. 顶栏 -->
       <header class="cd-header">
         <div class="cd-title-group">
@@ -272,9 +309,34 @@ function handleSubmit() {
             </p>
           </div>
         </div>
-        <button type="button" class="eb-icon-btn" title="关闭 (ESC)" aria-label="关闭弹窗" @click="emit('close')">
-          <X :size="15" />
-        </button>
+        <div class="cd-head-actions">
+          <button
+            type="button"
+            class="eb-icon-btn is-bordered"
+            :disabled="loadingTemplates"
+            aria-label="刷新模板列表"
+            @click="loadTemplates(false)"
+            @mouseenter="showTip($event, '刷新模板列表')"
+            @mouseleave="hideTip"
+          >
+            <RefreshCw :size="13" :class="{ spin: loadingTemplates }" />
+          </button>
+          <button
+            type="button"
+            class="eb-icon-btn is-bordered"
+            :class="{ 'is-accent': isFullscreen }"
+            :aria-label="isFullscreen ? '退出全屏' : '页内全屏'"
+            @click="toggleFullscreen"
+            @mouseenter="showTip($event, isFullscreen ? '退出全屏' : '页内全屏')"
+            @mouseleave="hideTip"
+          >
+            <Minimize2 v-if="isFullscreen" :size="13" />
+            <Maximize2 v-else :size="13" />
+          </button>
+          <button type="button" class="eb-icon-btn" title="关闭 (ESC)" aria-label="关闭弹窗" @click="emit('close')">
+            <X :size="15" />
+          </button>
+        </div>
       </header>
 
       <!-- 2. 公共入参摘要条 -->
@@ -417,8 +479,8 @@ function handleSubmit() {
           </button>
         </div>
       </footer>
-    </div>
-  </div>
+    </template>
+  </StageModalShell>
 </template>
 
 <style scoped>
@@ -434,28 +496,17 @@ function handleSubmit() {
   }
 }
 
-.composite-layer {
-  position: absolute;
-  inset: 0;
-  z-index: 65;
-  background: rgba(15, 23, 42, 0.42);
-  backdrop-filter: blur(2px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
+:deep(.composite-card) {
+  width: min(920px, calc(var(--stage-w, 1280px) - 72px));
+  max-height: min(720px, 92%);
+  border-radius: 14px;
 }
 
-.composite-card {
-  width: min(920px, 100%);
-  max-height: min(720px, 92%);
-  background: #ffffff;
-  border: 1px solid var(--gpt-border);
-  border-radius: 14px;
-  box-shadow: 0 22px 54px rgba(15, 23, 42, 0.22);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
+.cd-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .cd-header {

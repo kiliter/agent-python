@@ -24,6 +24,7 @@ import type { ReportViewMode, RunMessage } from '../types'
 import { CONFIRMABLE_STATUS, STATUS_LABEL } from '../types'
 import { copyText, renderSafeMarkdown } from '../markdown'
 import { stageToast } from '../stageToast'
+import StageModalShell from './StageModalShell.vue'
 import VersionSelect from './VersionSelect.vue'
 
 const props = defineProps<{
@@ -46,15 +47,12 @@ const emit = defineEmits<{
 }>()
 
 const viewMode = ref<ReportViewMode>('preview')
-const isFullscreen = ref(false)
 
 watch(
   () => props.visible,
   vis => {
     if (vis) {
       viewMode.value = props.initialMode || 'preview'
-    } else {
-      isFullscreen.value = false
     }
   },
 )
@@ -124,18 +122,17 @@ async function onCopy() {
 </script>
 
 <template>
-  <div
-    v-if="visible && run"
-    class="stage-modal-backdrop preview-modal-layer"
-    :class="{ 'is-fullscreen': isFullscreen }"
-    role="dialog"
-    aria-modal="true"
+  <StageModalShell
+    :visible="visible && !!run"
     aria-label="报告预览与编辑"
-    @click.self="emit('close')"
+    layer="modal"
+    backdrop-class="preview-modal-layer"
+    card-class="preview-modal-card"
+    @close="emit('close')"
   >
-    <div class="stage-modal-card preview-modal-card" :class="{ 'is-fullscreen': isFullscreen }">
+    <template v-if="run" #default="{ isFullscreen, toggleFullscreen }">
       <!-- 1. 唯一单行 40px IDE 顶栏（不换行，零冗余工具条/警示行） -->
-      <header class="pm-header">
+      <header class="pm-header" :class="{ 'is-fullscreen': isFullscreen }">
         <div class="pm-title-wrap">
           <span v-if="run.isComposite" class="tpl-badge" style="background: #e0e7ff; color: #3730a3">复合汇总</span>
           <span v-else class="tpl-badge mono">#{{ run.templateId }}</span>
@@ -244,7 +241,7 @@ async function onCopy() {
             :class="{ 'is-accent': isFullscreen }"
             :data-tip="isFullscreen ? '退出页内全屏' : '页内全屏展开'"
             aria-label="切换页内全屏"
-            @click="isFullscreen = !isFullscreen"
+            @click="toggleFullscreen"
           >
             <Minimize2 v-if="isFullscreen" :size="13" />
             <Maximize2 v-else :size="13" />
@@ -315,7 +312,7 @@ async function onCopy() {
       </div>
 
       <!-- 3. 38px 紧凑底栏 -->
-      <footer class="pm-footer">
+      <footer class="pm-footer" :class="{ 'is-fullscreen': isFullscreen }">
         <span class="footer-hint">修改与行内卡片实时同步 · 确认后回传父页面并归档审计</span>
 
         <div class="pm-footer-right">
@@ -343,8 +340,8 @@ async function onCopy() {
           </span>
         </div>
       </footer>
-    </div>
-  </div>
+    </template>
+  </StageModalShell>
 </template>
 
 <style scoped>
@@ -355,11 +352,7 @@ async function onCopy() {
   display: inline-flex;
 }
 
-.preview-modal-layer {
-  z-index: 1160;
-}
-
-.preview-modal-card {
+:deep(.preview-modal-card) {
   width: min(1160px, calc(var(--stage-w, 1280px) - 48px));
   height: calc(var(--stage-h, 720px) * 0.9);
   overflow: visible;
@@ -381,7 +374,7 @@ async function onCopy() {
   position: relative;
   z-index: 30;
 }
-.preview-modal-card.is-fullscreen .pm-header {
+.pm-header.is-fullscreen {
   border-radius: 0;
 }
 
@@ -601,7 +594,7 @@ async function onCopy() {
   justify-content: space-between;
   gap: 10px;
 }
-.preview-modal-card.is-fullscreen .pm-footer {
+.pm-footer.is-fullscreen {
   border-radius: 0;
 }
 

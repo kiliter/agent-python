@@ -1,7 +1,7 @@
 <!-- #Created By AiCoding(codex) 基于开源 CodeMirror 6 的多语言代码编辑器组件（内置原生撤销/重做/语法高亮/行号/深浅色适配） -->
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
-import { EditorState, Compartment } from '@codemirror/state'
+import { EditorState, Compartment, Transaction } from '@codemirror/state'
 import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap, undo, redo } from '@codemirror/commands'
 import { syntaxHighlighting, defaultHighlightStyle, HighlightStyle } from '@codemirror/language'
@@ -21,6 +21,8 @@ const props = withDefaults(
     readonly?: boolean
     minHeight?: string
     maxHeight?: string
+    /** 资源唯一标识；切换不同资源时自动重建 EditorState 清空撤销历史栈 */
+    docKey?: string | number
   }>(),
   {
     lang: 'markdown',
@@ -30,6 +32,7 @@ const props = withDefaults(
     readonly: false,
     minHeight: undefined,
     maxHeight: undefined,
+    docKey: undefined,
   }
 )
 
@@ -93,12 +96,19 @@ function getLangExtension(l: string) {
   return []
 }
 
-onMounted(() => {
-  if (!containerRef.value) return
-  initialBaseline = props.baseline ?? props.modelValue
+/** 识别当前挂载的资源身份：未显式传入 docKey 时自动跟随 store 当前激活资源，防止跨资源 ⌘Z 串台 */
+const resolvedResourceKey = computed(() => {
+  if (props.docKey !== undefined) return String(props.docKey)
+  if (store.currentNav === 'skills') return `skills:${store.selectedSkillId}`
+  if (store.currentNav === 'apis') return `apis:${store.selectedApiName}`
+  if (store.currentNav === 'settings') return `settings:${store.settingsSubView}`
+  if (store.currentNav === 'workbench') return `workbench:${store.currentTemplateId}`
+  return `nav:${store.currentNav}`
+})
 
-  const state = EditorState.create({
-    doc: props.modelValue,
+function createEditorState(doc: string): EditorState {
+  return EditorState.create({
+    doc,
     extensions: [
       lineNumbers(),
       highlightActiveLineGutter(),
@@ -134,12 +144,48 @@ onMounted(() => {
       })
     ]
   })
+}
+
+/** 重建 EditorState 以彻底清空跨资源或重载基线后的旧撤销栈 */
+function rebuildEditorState(doc: string) {
+  if (!view) return
+  suppressChangeEmit = true
+  try {
+    view.setState(createEditorState(doc))
+  } finally {
+    suppressChangeEmit = false
+  }
+}
+
+onMounted(() => {
+  if (!containerRef.value) return
+  initialBaseline = props.baseline ?? props.modelValue
 
   view = new EditorView({
-    state,
+    state: createEditorState(props.modelValue),
     parent: containerRef.value
   })
 })
+
+watch(
+  resolvedResourceKey,
+  (nextKey, prevKey) => {
+    if (!view || nextKey === prevKey) return
+    initialBaseline = props.baseline ?? props.modelValue
+    rebuildEditorState(props.modelValue)
+  }
+)
+
+watch(
+  () => props.baseline,
+  nextBaseline => {
+    if (nextBaseline === undefined || nextBaseline === initialBaseline) return
+    initialBaseline = nextBaseline
+    if (view && props.modelValue === nextBaseline) {
+      rebuildEditorState(props.modelValue)
+    }
+  }
+)
 
 watch(
   () => props.modelValue,
@@ -150,7 +196,8 @@ watch(
       suppressChangeEmit = true
       try {
         view.dispatch({
-          changes: { from: 0, to: current.length, insert: newVal }
+          changes: { from: 0, to: current.length, insert: newVal },
+          annotations: Transaction.addToHistory.of(false)
         })
       } finally {
         suppressChangeEmit = false
@@ -224,7 +271,10 @@ function resetEdit(customText?: string, silent = false) {
   const current = view.state.doc.toString()
   suppressChangeEmit = true
   try {
-    if (current !== target) {
+    if (silent) {
+      initialBaseline = target
+      view.setState(createEditorState(target))
+    } else if (current !== target) {
       view.dispatch({
         changes: { from: 0, to: current.length, insert: target }
       })

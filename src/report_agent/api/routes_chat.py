@@ -59,6 +59,13 @@ def _chat(request: Request) -> ChatService:
     return svc
 
 
+def _verify_session_header(request: Request, sid: str) -> None:
+    """当请求携带非空 X-Chat-Session-Id 头时必须与路径 sid 一致，防止跨会话串线。#Created By AiCoding(codex)"""
+    hdr_sid = (request.headers.get("x-chat-session-id") or "").strip()
+    if hdr_sid and hdr_sid != (sid or "").strip():
+        raise ChatError(404, "SESSION_NOT_FOUND", "会话不存在")
+
+
 def _extract_expected_sid(request: Request, session_id_query: str | None = None) -> str | None:
     """从可选请求头 X-Chat-Session-Id 或查询参数 sessionId 提取预期会话 ID，防止跨会话越权。#Created By AiCoding(codex)"""
     hdr_sid = (request.headers.get("x-chat-session-id") or "").strip()
@@ -93,10 +100,10 @@ def _sse_chat_stream(
         finally:
             await queue.put(_EOF)
 
-    task = asyncio.create_task(pump(), name=task_name)
-
     async def gen():
+        task: asyncio.Task[None] | None = None
         try:
+            task = asyncio.create_task(pump(), name=task_name)
             yield ": connected\n\n"
             while True:
                 try:
@@ -114,12 +121,13 @@ def _sse_chat_stream(
                 if kind in terminal_kinds:
                     break
         finally:
-            if not task.done():
-                task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+            if task is not None:
+                if not task.done():
+                    task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers=SSE_HEADERS)
 
@@ -185,6 +193,7 @@ async def get_chat_session(
     caller: ChatCaller = Depends(require_chat_caller),
 ) -> dict[str, Any]:
     """读取指定聊天会话快照。"""
+    _verify_session_header(request, sid)
     return await _chat(request).get_session_view(sid, caller=caller)
 
 
@@ -195,6 +204,7 @@ async def compact_chat_session(
     caller: ChatCaller = Depends(require_chat_caller),
 ) -> dict[str, Any]:
     """手动触发对话上下文滚动压缩（保留最近原文消息，归档更早对话为记忆摘要）。"""
+    _verify_session_header(request, sid)
     return await _chat(request).compact_session(sid, caller=caller)
 
 
@@ -206,6 +216,7 @@ async def send_chat_message(
     caller: ChatCaller = Depends(require_chat_caller),
 ) -> StreamingResponse:
     """发送用户聊天消息或触发打开时自动推荐（SSE：status / message / error / done）。"""
+    _verify_session_header(request, sid)
     svc = _chat(request)
     await svc.precheck_message(sid, body.text, auto=body.auto, caller=caller)
     return _sse_chat_stream(
@@ -224,6 +235,7 @@ async def list_chat_templates(
     caller: ChatCaller = Depends(require_chat_caller),
 ) -> list[dict[str, Any]]:
     """获取换模板弹窗的模板列表（推荐模板排前，附带本会话最近运行状态）。"""
+    _verify_session_header(request, sid)
     return await _chat(request).list_templates(sid, q=q, caller=caller)
 
 
@@ -235,6 +247,7 @@ async def get_chat_template_preview(
     caller: ChatCaller = Depends(require_chat_caller),
 ) -> dict[str, Any]:
     """获取指定模板的结构详情、入参当前值、可见字段说明与样例填充预览。#Created By AiCoding(codex)"""
+    _verify_session_header(request, sid)
     return await _chat(request).get_template_preview(sid, template_id, caller=caller)
 
 
@@ -246,6 +259,7 @@ async def start_chat_run(
     caller: ChatCaller = Depends(require_chat_caller),
 ) -> dict[str, Any]:
     """发起指定模板填报运行（缺参时返回 ask_params 卡片，齐全时启动后台任务并返回 RUNNING 卡片）。"""
+    _verify_session_header(request, sid)
     msg, session = await _chat(request).start_run(
         sid,
         body.templateId,
@@ -263,6 +277,7 @@ async def start_chat_composite_run(
     caller: ChatCaller = Depends(require_chat_caller),
 ) -> dict[str, Any]:
     """发起多商品 × 多模板复合核查与汇总大模板拼装运行。#Created By AiCoding(codex)"""
+    _verify_session_header(request, sid)
     msg, session = await _chat(request).start_composite_run(
         sid,
         body.items,

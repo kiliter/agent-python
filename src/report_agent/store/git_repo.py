@@ -11,15 +11,25 @@ import io
 import logging
 import os
 import re
-import shutil
 import subprocess
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from .fsutil import unlink_or_rmtree
+
 log = logging.getLogger(__name__)
 
 _COMMIT_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
+_GIT_BAD_IDENT_RE = re.compile(r"[\x00-\x1f\x7f<>]")
+
+
+def _sanitize_git_ident(raw: str | None) -> str:
+    """剥离 Git 提交人名称中的控制字符与尖括号，全空白时回退为 'system'。"""
+    if not raw or not isinstance(raw, str):
+        return "system"
+    cleaned = _GIT_BAD_IDENT_RE.sub("", raw).strip()
+    return cleaned or "system"
 
 
 def _check_commit(commit: str) -> str:
@@ -82,11 +92,12 @@ class GitRepo:
     def commit_all(self, message: str, author: str) -> str:
         """提交工作区全部变更并返回提交号。"""
         self._run("add", "-A")
+        ident = _sanitize_git_ident(author)
         email = "report-agent@localhost"
         env = {
-            "GIT_AUTHOR_NAME": author or "system",
+            "GIT_AUTHOR_NAME": ident,
             "GIT_AUTHOR_EMAIL": email,
-            "GIT_COMMITTER_NAME": author or "system",
+            "GIT_COMMITTER_NAME": ident,
             "GIT_COMMITTER_EMAIL": email,
         }
         self._run("commit", "-q", "--allow-empty", "-F", "-", input_bytes=message.encode("utf-8"), env=env)
@@ -130,8 +141,8 @@ class GitRepo:
         """发布异常回滚时将工作区与 HEAD 恢复到指定提交。"""
         if commit is not None:
             _check_commit(commit)
-            self._run("reset", "--hard", commit, check=False)
-            self._run("clean", "-fd", check=False)
+            self._run("reset", "--hard", commit)
+            self._run("clean", "-fdx")
             return
         self._run("update-ref", "-d", "refs/heads/main", check=False)
         self._run("symbolic-ref", "HEAD", "refs/heads/main", check=False)
@@ -140,7 +151,4 @@ class GitRepo:
             for child in self.path.iterdir():
                 if child.name == ".git":
                     continue
-                if child.is_dir() and not child.is_symlink():
-                    shutil.rmtree(child, ignore_errors=True)
-                else:
-                    child.unlink(missing_ok=True)
+                unlink_or_rmtree(child, ignore_errors=True)

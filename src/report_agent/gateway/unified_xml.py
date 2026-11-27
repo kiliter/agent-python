@@ -21,8 +21,15 @@ from xml.sax.saxutils import escape
 import httpx
 
 from ..domain.api_contract import ApiContract
-from .base import (ApiCallResult, decode_xml, extract_json_records, extract_records, parse_json_body, parse_xml,
-                   sanitize_xml_text)
+from ..domain.sanitize import sanitize_sensitive_text
+from .base import (
+    ApiCallResult,
+    decode_xml,
+    merge_http_headers,
+    parse_gateway_json_response,
+    parse_gateway_response,
+    sanitize_xml_text,
+)
 from .http_client import build_http_request_preview, parse_http_response, prepare_http_request
 
 log = logging.getLogger(__name__)
@@ -75,8 +82,8 @@ def build_request_xml(process_code: str, request: dict[str, Any], app_id: str, a
     request = request if isinstance(request, dict) else {}
     fields: dict[str, Any] = {
         "process_code": process_code,
-        "app_id": request.get("app_id", app_id),
-        "access_token": request.get("access_token", access_token),
+        "app_id": request.get("app_id") or app_id or "",
+        "access_token": request.get("access_token") or access_token or "",
         **_DEFAULTS,
         "operator_id": None, "route_value": None, "request_seq": None, "request_time": None, "verify_code": None,
     }
@@ -143,8 +150,8 @@ def _build_request_json_obj(
         raw_req = raw_req["operation_in"]
     fields: dict[str, Any] = {
         "process_code": sanitize_xml_text(str(process_code)),
-        "app_id": sanitize_xml_text(str(raw_req.get("app_id", app_id))),
-        "access_token": sanitize_xml_text(str(raw_req.get("access_token", access_token))),
+        "app_id": sanitize_xml_text(str(raw_req.get("app_id") or app_id or "")),
+        "access_token": sanitize_xml_text(str(raw_req.get("access_token") or access_token or "")),
         **_DEFAULTS,
         "route_value": None,
         "operator_id": None,
@@ -230,17 +237,7 @@ def build_request_preview(contract: ApiContract, args: dict[str, Any] | None = N
     return mask_xml(build_request_xml(contract.processCode, preview_req, "preview", "preview", style))
 
 
-def _merge_http_headers(defaults: dict[str, str], custom: dict[str, str]) -> dict[str, str]:
-    """合并默认网关请求头与契约自定义安全请求头（忽略大小写去重）。"""
-    merged = dict(defaults)
-    lower_to_actual = {k.lower(): k for k in merged}
-    for k, v in (custom or {}).items():
-        existing = lower_to_actual.get(k.lower())
-        if existing:
-            merged.pop(existing, None)
-        merged[k] = v
-        lower_to_actual[k.lower()] = k
-    return merged
+_merge_http_headers = merge_http_headers
 
 
 def _classify_http_error(status: int) -> str:
@@ -307,21 +304,23 @@ class UnifiedGatewayXmlClient:
                 req_obj = _build_request_json_obj(contract.processCode, request, self.app_id, self.access_token)
                 payload = json.dumps(req_obj, ensure_ascii=False, indent=2)
                 preview = json.dumps(_mask_json_node(req_obj), ensure_ascii=False, indent=2)
-                headers = _merge_http_headers(
+                headers = merge_http_headers(
                     {"Content-Type": "application/json; charset=utf-8", "Accept": "application/json"},
                     custom_headers,
                 )
             else:
                 payload = build_request_xml(contract.processCode, request, self.app_id, self.access_token, self.style)
                 preview = mask_xml(payload)
-                headers = _merge_http_headers(
+                headers = merge_http_headers(
                     {"Content-Type": "application/xml", "Accept": "application/xml"},
                     custom_headers,
                 )
         except ValueError as exc:
-            return ApiCallResult(ok=False, error=f"请求报文组装失败：{exc}")
+            return ApiCallResult(ok=False, error=sanitize_sensitive_text(f"请求报文组装失败：{exc}"))
         attempts = contract.retry.maxAttempts if contract.idempotent else 1
-        timeout = httpx.Timeout(contract.timeoutMs / 1000, connect=self.connect_timeout_s)
+        total_timeout_s = contract.timeoutMs / 1000
+        eff_connect_s = min(self.connect_timeout_s, max(0.1, total_timeout_s))
+        timeout = httpx.Timeout(total_timeout_s, connect=eff_connect_s)
         payload_bytes = payload.encode("utf-8")
         start = time.monotonic()
         last_error = ""
@@ -332,31 +331,35 @@ class UnifiedGatewayXmlClient:
                         self.url, content=payload_bytes, timeout=timeout, headers=headers,
                     )
             except httpx.ConnectTimeout as exc:
-                last_error = f"网关连接超时（>{self.connect_timeout_s:g}s）：{type(exc).__name__} {exc}".strip()
-                log.warning("网关 %s 第 %d/%d 次调用连接超时：%s", contract.processCode, attempt, attempts, exc)
+                last_error = sanitize_sensitive_text(
+                    f"网关连接超时（>{eff_connect_s:g}s）：{type(exc).__name__} {exc}"
+                )
+                log.warning("网关 %s 第 %d/%d 次调用连接超时：%s", contract.processCode, attempt, attempts, last_error)
                 if attempt < attempts:
                     await asyncio.sleep(0.5 * 2 ** (attempt - 1))
                     continue
                 return ApiCallResult(ok=False, error=last_error, cost_ms=_ms(start), request_preview=preview,
                                      attempts=attempt)
             except httpx.TimeoutException as exc:
-                last_error = f"网关响应超时（>{contract.timeoutMs}ms）：{type(exc).__name__} {exc}".strip()
-                log.warning("网关 %s 第 %d/%d 次调用响应超时：%s", contract.processCode, attempt, attempts, exc)
+                last_error = sanitize_sensitive_text(
+                    f"网关响应超时（>{contract.timeoutMs}ms）：{type(exc).__name__} {exc}"
+                )
+                log.warning("网关 %s 第 %d/%d 次调用响应超时：%s", contract.processCode, attempt, attempts, last_error)
                 if attempt < attempts:
                     await asyncio.sleep(0.5 * 2 ** (attempt - 1))
                     continue
                 return ApiCallResult(ok=False, error=last_error, cost_ms=_ms(start), request_preview=preview,
                                      attempts=attempt)
             except httpx.TransportError as exc:
-                last_error = f"网关调用失败：{type(exc).__name__} {exc}".strip()
-                log.warning("网关 %s 第 %d/%d 次调用网络异常：%s", contract.processCode, attempt, attempts, exc)
+                last_error = sanitize_sensitive_text(f"网关调用失败：{type(exc).__name__} {exc}")
+                log.warning("网关 %s 第 %d/%d 次调用网络异常：%s", contract.processCode, attempt, attempts, last_error)
                 if attempt < attempts:
                     await asyncio.sleep(0.5 * 2 ** (attempt - 1))
                     continue
                 return ApiCallResult(ok=False, error=last_error, cost_ms=_ms(start), request_preview=preview,
                                      attempts=attempt)
-            except (httpx.HTTPError, RuntimeError) as exc:
-                last_error = f"网关请求异常：{type(exc).__name__} {exc}".strip()
+            except (httpx.HTTPError, httpx.InvalidURL, ValueError, RuntimeError) as exc:
+                last_error = sanitize_sensitive_text(f"网关请求异常：{type(exc).__name__} {exc}")
                 return ApiCallResult(ok=False, error=last_error, cost_ms=_ms(start), request_preview=preview,
                                      attempts=attempt)
             cost = _ms(start)
@@ -382,9 +385,11 @@ class UnifiedGatewayXmlClient:
         try:
             prepared = prepare_http_request(contract, args)
         except ValueError as exc:
-            return ApiCallResult(ok=False, error=f"HTTP 请求组装失败：{exc}")
+            return ApiCallResult(ok=False, error=sanitize_sensitive_text(f"HTTP 请求组装失败：{exc}"))
         attempts = contract.retry.maxAttempts if contract.idempotent else 1
-        timeout = httpx.Timeout(contract.timeoutMs / 1000, connect=self.connect_timeout_s)
+        total_timeout_s = contract.timeoutMs / 1000
+        eff_connect_s = min(self.connect_timeout_s, max(0.1, total_timeout_s))
+        timeout = httpx.Timeout(total_timeout_s, connect=eff_connect_s)
         start = time.monotonic()
         last_error = ""
         for attempt in range(1, attempts + 1):
@@ -398,31 +403,35 @@ class UnifiedGatewayXmlClient:
                         headers=prepared.headers,
                     )
             except httpx.ConnectTimeout as exc:
-                last_error = f"HTTP 连接超时（>{self.connect_timeout_s:g}s）：{type(exc).__name__} {exc}".strip()
-                log.warning("HTTP 接口 %s 第 %d/%d 次连接超时：%s", contract.name, attempt, attempts, exc)
+                last_error = sanitize_sensitive_text(
+                    f"HTTP 连接超时（>{eff_connect_s:g}s）：{type(exc).__name__} {exc}"
+                )
+                log.warning("HTTP 接口 %s 第 %d/%d 次连接超时：%s", contract.name, attempt, attempts, last_error)
                 if attempt < attempts:
                     await asyncio.sleep(0.5 * 2 ** (attempt - 1))
                     continue
                 return ApiCallResult(ok=False, error=last_error, cost_ms=_ms(start),
                                      request_preview=prepared.preview, attempts=attempt)
             except httpx.TimeoutException as exc:
-                last_error = f"HTTP 响应超时（>{contract.timeoutMs}ms）：{type(exc).__name__} {exc}".strip()
-                log.warning("HTTP 接口 %s 第 %d/%d 次响应超时：%s", contract.name, attempt, attempts, exc)
+                last_error = sanitize_sensitive_text(
+                    f"HTTP 响应超时（>{contract.timeoutMs}ms）：{type(exc).__name__} {exc}"
+                )
+                log.warning("HTTP 接口 %s 第 %d/%d 次响应超时：%s", contract.name, attempt, attempts, last_error)
                 if attempt < attempts:
                     await asyncio.sleep(0.5 * 2 ** (attempt - 1))
                     continue
                 return ApiCallResult(ok=False, error=last_error, cost_ms=_ms(start),
                                      request_preview=prepared.preview, attempts=attempt)
             except httpx.TransportError as exc:
-                last_error = f"HTTP 调用失败：{type(exc).__name__} {exc}".strip()
-                log.warning("HTTP 接口 %s 第 %d/%d 次网络异常：%s", contract.name, attempt, attempts, exc)
+                last_error = sanitize_sensitive_text(f"HTTP 调用失败：{type(exc).__name__} {exc}")
+                log.warning("HTTP 接口 %s 第 %d/%d 次网络异常：%s", contract.name, attempt, attempts, last_error)
                 if attempt < attempts:
                     await asyncio.sleep(0.5 * 2 ** (attempt - 1))
                     continue
                 return ApiCallResult(ok=False, error=last_error, cost_ms=_ms(start),
                                      request_preview=prepared.preview, attempts=attempt)
-            except (httpx.HTTPError, RuntimeError) as exc:
-                last_error = f"HTTP 请求异常：{type(exc).__name__} {exc}".strip()
+            except (httpx.HTTPError, httpx.InvalidURL, ValueError, RuntimeError) as exc:
+                last_error = sanitize_sensitive_text(f"HTTP 请求异常：{type(exc).__name__} {exc}")
                 return ApiCallResult(ok=False, error=last_error, cost_ms=_ms(start),
                                      request_preview=prepared.preview, attempts=attempt)
 
@@ -460,51 +469,6 @@ class UnifiedGatewayXmlClient:
             )
         return ApiCallResult(ok=False, error=last_error or "HTTP 调用失败", cost_ms=_ms(start),
                              request_preview=prepared.preview)
-
-
-def parse_gateway_response(contract: ApiContract, text: str, status: int | None, cost: int, preview: str,
-                           attempts: int = 1) -> ApiCallResult:
-    """解析网关 XML 响应文本。"""
-    try:
-        root = parse_xml(text)
-    except Exception as exc:  # noqa: BLE001 - XML 解析错误类型较多
-        return ApiCallResult(ok=False, error=f"响应不是合法的 XML：{exc}", http_status=status, cost_ms=cost,
-                             raw=text[:20000], request_preview=preview, attempts=attempts)
-    result = extract_records(contract, root)
-    result.http_status = status
-    result.cost_ms = cost
-    result.raw = text if len(text) <= 200000 else text[:200000]
-    result.request_preview = preview
-    result.attempts = attempts
-    return result
-
-
-def parse_gateway_json_response(contract: ApiContract, text: str, status: int | None, cost: int, preview: str,
-                                attempts: int = 1) -> ApiCallResult:
-    """解析网关 JSON 响应文本，并输出格式化 raw 报文。"""
-    try:
-        data = parse_json_body(text)
-    except (Exception, RecursionError) as exc:  # noqa: BLE001
-        return ApiCallResult(ok=False, error=f"响应不是合法的 JSON：{exc}", http_status=status, cost_ms=cost,
-                             raw=text[:20000], request_preview=preview, attempts=attempts)
-    try:
-        result = extract_json_records(contract, data)
-    except (Exception, RecursionError) as exc:  # noqa: BLE001
-        return ApiCallResult(ok=False, error=f"JSON 响应解析失败：{exc}", http_status=status, cost_ms=cost,
-                             raw=text[:20000], request_preview=preview, attempts=attempts)
-    result.http_status = status
-    result.cost_ms = cost
-    if len(text) <= 200_000:
-        try:
-            pretty = json.dumps(data, ensure_ascii=False, indent=2)
-        except (Exception, RecursionError):  # noqa: BLE001
-            pretty = text
-        result.raw = pretty if len(pretty) <= 200_000 else pretty[:200_000]
-    else:
-        result.raw = text[:200_000]
-    result.request_preview = preview
-    result.attempts = attempts
-    return result
 
 
 def _ms(start: float) -> int:

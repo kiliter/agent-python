@@ -44,6 +44,7 @@ class ReloadableGatewayClient:
         self._retired_inflight: list[_ClientSlot] = []
         self._pending_close: list[GatewayClient] = []
         self._closing_tasks: set[asyncio.Task[None]] = set()
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     @property
     def current(self) -> GatewayClient:
@@ -66,10 +67,42 @@ class ReloadableGatewayClient:
         task.add_done_callback(self._discard_task)
         return task
 
-    async def invoke(self, contract: ApiContract, args: dict[str, Any]) -> ApiCallResult:
+    def _start_retired_drain(self) -> None:
+        self._spawn_close_task(self.aclose_retired())
+
+    def _schedule_retired_drain(self) -> None:
+        """在当前协程循环或跨线程投递到已记录的主事件循环中异步排空退役客户端连接池。#Created By AiCoding(codex)"""
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is not None and not running.is_closed():
+            with self._lock:
+                self._loop = running
+            self._start_retired_drain()
+            return
         with self._lock:
+            loop = self._loop
+        if loop is not None and not loop.is_closed() and loop.is_running():
+            try:
+                loop.call_soon_threadsafe(self._start_retired_drain)
+            except RuntimeError:
+                pass
+
+    async def invoke(self, contract: ApiContract, args: dict[str, Any]) -> ApiCallResult:
+        try:
+            cur_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            cur_loop = None
+        drain_pending = False
+        with self._lock:
+            if cur_loop is not None and not cur_loop.is_closed():
+                self._loop = cur_loop
+                drain_pending = bool(self._pending_close)
             slot = self._slot
             slot.in_flight += 1
+        if drain_pending:
+            self._start_retired_drain()
         try:
             return await slot.client.invoke(contract, args)
         finally:
@@ -88,7 +121,7 @@ class ReloadableGatewayClient:
                     await asyncio.shield(task)
 
     def swap(self, new_client: GatewayClient) -> GatewayClient | None:
-        """原子替换为新的底层网关客户端，并安全退役旧客户端。"""
+        """原子替换为新的底层网关客户端，并安全退役旧客户端（支持后台同步工作线程跨线程投递清理）。"""
         immediate_close: GatewayClient | None = None
         with self._lock:
             if new_client is self._slot.client:
@@ -104,7 +137,7 @@ class ReloadableGatewayClient:
                 self._retired_inflight.append(old_slot)
 
         if immediate_close is not None:
-            self._spawn_close_task(self.aclose_retired())
+            self._schedule_retired_drain()
         return old_slot.client
 
     def _discard_task(self, task: asyncio.Task[None]) -> None:

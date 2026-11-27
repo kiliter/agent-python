@@ -8,10 +8,11 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 from jinja2 import TemplateError, TemplateSyntaxError
-from jinja2.sandbox import SandboxedEnvironment
+from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 COMPOSITE_TEMPLATE_FILE = "composite-template.md.j2"
 COMPOSITE_TEMPLATE_KEY = "composite-template"
@@ -38,7 +39,7 @@ DEFAULT_COMPOSITE_TEMPLATE = """{%- if order.平台流水号 or order.手机号�
 {%- endif -%}
 """
 
-_COMPOSITE_ENV = SandboxedEnvironment(
+_COMPOSITE_ENV = ImmutableSandboxedEnvironment(
     autoescape=False,
     trim_blocks=False,
     lstrip_blocks=False,
@@ -53,8 +54,21 @@ class CompositeTemplateError(ValueError):
         self.line = line
 
 
+def _validation_contexts() -> list[dict[str, Any]]:
+    """构造覆盖 SUCCESS / PARTIAL / FAILED 及空 order 头尾全分支的试渲染样例集。#Created By AiCoding(codex)"""
+    base_ctx = sample_composite_context()
+    failed_ctx = sample_composite_context(include_failed=True)
+    all_success_items = [copy.deepcopy(base_ctx["items"][0])]
+    empty_order_ctx = {
+        "order": {},
+        "items": all_success_items,
+        "summary": build_composite_summary(all_success_items),
+    }
+    return [base_ctx, failed_ctx, empty_order_ctx]
+
+
 def validate_composite_template(text: str) -> list[str]:
-    """校验汇总大模板 Jinja2 语法与基础渲染可用性，返回错误列表（空列表表示通过）。#Created By AiCoding(codex)"""
+    """校验汇总大模板 Jinja2 语法与多分支渲染可用性，返回错误列表（空列表表示通过）。#Created By AiCoding(codex)"""
     if not isinstance(text, str) or not text.strip():
         return ["汇总大模板内容不能为空"]
     try:
@@ -64,7 +78,8 @@ def validate_composite_template(text: str) -> list[str]:
     except TemplateError as exc:
         return [f"汇总大模板解析错误：{exc}"]
     try:
-        tpl.render(**sample_composite_context())
+        for ctx in _validation_contexts():
+            tpl.render(**ctx)
     except TemplateError as exc:
         return [f"汇总大模板样例渲染失败：{exc}"]
     except Exception as exc:  # noqa: BLE001
@@ -91,27 +106,31 @@ def render_composite_report(
     order: dict[str, Any],
     items: list[dict[str, Any]],
 ) -> str:
-    """用 Jinja2 沙箱环境将多份经强证据校验的子报告确定性拼装为完整大报告。#Created By AiCoding(codex)"""
+    """用 Jinja2 不可变沙箱环境将多份经强证据校验的子报告确定性拼装为完整大报告。#Created By AiCoding(codex)"""
     source = (template_text or "").strip() or DEFAULT_COMPOSITE_TEMPLATE
-    summary = build_composite_summary(items)
+    safe_order = copy.deepcopy(dict(order or {}))
+    safe_items = copy.deepcopy(list(items or []))
+    summary = build_composite_summary(safe_items)
     try:
         tpl = _COMPOSITE_ENV.from_string(source)
-        rendered = tpl.render(order=dict(order or {}), items=list(items), summary=summary)
+        rendered = tpl.render(order=safe_order, items=safe_items, summary=summary)
     except TemplateSyntaxError as exc:
         raise CompositeTemplateError(f"汇总大模板第 {exc.lineno} 行语法错误：{exc.message}", line=exc.lineno) from exc
     except TemplateError as exc:
         raise CompositeTemplateError(f"汇总大模板渲染失败：{exc}") from exc
+    except Exception as exc:  # noqa: BLE001 — 非取消类求值异常统一转为领域异常，CancelledError 原样透传
+        raise CompositeTemplateError(f"汇总大模板渲染异常：{exc}") from exc
     return rendered.strip()
 
 
-def sample_composite_context() -> dict[str, Any]:
-    """管理端预览汇总大模板用的脱敏多商品样例上下文（对应典型 1 号码 × 3 商品复合工单）。#Created By AiCoding(codex)"""
+def sample_composite_context(*, include_failed: bool = False) -> dict[str, Any]:
+    """管理端预览汇总大模板用的脱敏多商品样例上下文（include_failed=True 时额外包含 FAILED 分支子项）。#Created By AiCoding(codex)"""
     order = {
         "平台流水号": "部转-20261100123473",
         "手机号码": "13900001234",
         "申诉内容": "未经过本人允许添加会员及保底套餐，要求核查并处理。",
     }
-    items = [
+    items: list[dict[str, Any]] = [
         {
             "index": 1,
             "label": "套餐接续直降80元加享翻倍流量（12个月）",
@@ -158,4 +177,20 @@ def sample_composite_context() -> dict[str, Any]:
             "report": "经核查，号码 13900001234 于 2025年10月12日办理「全家保底消费融合套餐99元」，标准资费 99元/月；二次确认短信暂未查询到（{{二次确认短信}}）。",
         },
     ]
+    if include_failed:
+        items.append({
+            "index": 4,
+            "label": "宽带提速包20元",
+            "templateId": 120,
+            "templateName": "宽带业务续约争议类",
+            "status": "FAILED",
+            "statusLabel": "失败",
+            "foundCount": 0,
+            "totalCount": 6,
+            "missingShown": [],
+            "error": "下游接口响应超时，请人工复核",
+            "runId": "sample-r4",
+            "params": {"业务名称": "宽带提速包20元", "创建时间": "20251012000000", "商品类型": "宽带"},
+            "report": "",
+        })
     return {"order": order, "items": items, "summary": build_composite_summary(items)}

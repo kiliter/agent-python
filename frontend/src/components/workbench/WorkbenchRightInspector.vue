@@ -4,7 +4,7 @@
   #Created By AiCoding(codex)
 -->
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import YAML from 'yaml'
 import { usePlatformStore } from '@/stores/platform'
@@ -12,6 +12,7 @@ import { platformApi, errorMessage } from '@/api/platformApi'
 import { resolveEvidenceInspectorTab } from '@/utils/reportSegments'
 import { renderSafeMarkdown } from '@/utils/markdown'
 import { formatListColumns, parseListColumns } from '@/utils/listColumns'
+import { formatRunFieldSummary } from '@/utils/fieldFormat'
 import type {
   EvidenceType,
   FieldType,
@@ -94,6 +95,7 @@ const originalFieldName = ref<string | undefined>(undefined)
 const enumText = ref('')
 // #Created By AiCoding(codex) 列表字段的列定义编辑文本（每行：列名|类型|可选值|说明）
 const columnsText = ref('')
+const fieldBaselineSig = ref('')
 
 const fieldTypes: FieldType[] = ['文本', '枚举', '日期', '列表']
 const evidenceOptions: Array<{ value: EvidenceType; label: string }> = [
@@ -117,6 +119,50 @@ function parseEnumValues(raw: string): string[] {
 
 const parsedEnums = computed(() => parseEnumValues(enumText.value))
 
+function serializeFieldFormState(
+  f: TemplateField | null,
+  enumsRaw: string,
+  colsRaw: string,
+): string {
+  if (!f) return ''
+  const isList = f.type === '列表'
+  const effectiveMissing = isList ? '置空' : f.whenMissing
+  return JSON.stringify({
+    name: f.name.trim(),
+    visible: Boolean(f.visible),
+    type: f.type,
+    enums: f.type === '枚举' ? parseEnumValues(enumsRaw) : [],
+    cols: isList ? colsRaw.trim() : '',
+    format: f.type === '日期' ? (f.format || '').trim() : '',
+    evidenceType: f.evidenceType,
+    whenMissing: effectiveMissing,
+    quoteWhole: f.evidenceType === 'quote' && !isList ? Boolean(f.quoteWhole) : false,
+    defaultValue: effectiveMissing === '默认值' ? (f.defaultValue || '').trim() : '',
+    description: (f.description || '').trim(),
+  })
+}
+
+const isFieldFormDirty = computed(() => {
+  if (!fieldForm.value) return false
+  if (isCreatingField.value && Boolean(store.ideCreatingFieldDraft.trim()) && Boolean(fieldForm.value.name.trim())) {
+    return true
+  }
+  return serializeFieldFormState(fieldForm.value, enumText.value, columnsText.value) !== fieldBaselineSig.value
+})
+
+function onFieldTypeChange() {
+  const f = fieldForm.value
+  if (!f) return
+  if (f.type === '列表') {
+    f.whenMissing = '置空'
+    f.defaultValue = ''
+    f.quoteWhole = false
+    if (f.evidenceType === 'input') {
+      f.evidenceType = 'quote'
+    }
+  }
+}
+
 function syncFieldFormFromStore() {
   if (store.ideSelectedFieldIdx >= store.templateFields.length && store.templateFields.length > 0) {
     store.ideSelectedFieldIdx = store.templateFields.length - 1
@@ -128,6 +174,7 @@ function syncFieldFormFromStore() {
     originalFieldName.value = undefined
     enumText.value = ''
     columnsText.value = ''
+    fieldBaselineSig.value = serializeFieldFormState(fresh, '', '')
     return
   }
   const src = store.templateFields[store.ideSelectedFieldIdx]
@@ -136,6 +183,7 @@ function syncFieldFormFromStore() {
     originalFieldName.value = undefined
     enumText.value = ''
     columnsText.value = ''
+    fieldBaselineSig.value = ''
     return
   }
   const copy = deepClone(src)
@@ -144,6 +192,7 @@ function syncFieldFormFromStore() {
   originalFieldName.value = src.name
   enumText.value = copy.enumValues.join('\n')
   columnsText.value = formatListColumns(copy.columns)
+  fieldBaselineSig.value = serializeFieldFormState(copy, enumText.value, columnsText.value)
 }
 
 watch(
@@ -194,39 +243,33 @@ function batchCreateAllUndefinedFields() {
   }
 }
 
-function handleApplyField() {
+function applyFieldFormInternal(showSuccessToast = true): { ok: boolean; errorMsg?: string } {
   const f = fieldForm.value
-  if (!f) return
+  if (!f) return { ok: true }
   const name = f.name.trim()
   if (!name) {
-    store.showToast('请填写字段名称', 'warning')
-    return
+    return { ok: false, errorMsg: '请填写字段名称' }
   }
   const enums = f.type === '枚举' ? parseEnumValues(enumText.value) : []
   if (f.type === '枚举' && enums.length === 0) {
-    store.showToast('枚举类型字段请至少配置一个可选值', 'warning')
-    return
+    return { ok: false, errorMsg: `字段「${name}」为枚举类型，请至少配置一个可选值` }
   }
   // #Created By AiCoding(codex) 列表字段：解析列定义；证据只能是原文引用或推导，缺失固定按空列表（置空）处理
   const isList = f.type === '列表'
   const parsedColumns = isList ? parseListColumns(columnsText.value) : { columns: [], error: '' }
   if (isList && parsedColumns.error) {
-    store.showToast(parsedColumns.error, 'warning')
-    return
+    return { ok: false, errorMsg: parsedColumns.error }
   }
   if (isList && f.evidenceType === 'input') {
-    store.showToast('列表字段的证据来源只能是原文引用或逻辑推导', 'warning')
-    return
+    return { ok: false, errorMsg: '列表字段的证据来源只能是原文引用或逻辑推导' }
   }
   if (isList) f.whenMissing = '置空'
   const defaultValue = f.whenMissing === '默认值' ? (f.defaultValue || '').trim() : ''
   if (f.whenMissing === '默认值' && !defaultValue) {
-    store.showToast('请填写未找到证据时使用的默认值', 'warning')
-    return
+    return { ok: false, errorMsg: `请填写字段「${name}」未找到证据时使用的默认值` }
   }
   if (f.type === '枚举' && defaultValue && !enums.includes(defaultValue)) {
-    store.showToast(`默认值「${defaultValue}」必须是枚举可选值之一`, 'warning')
-    return
+    return { ok: false, errorMsg: `默认值「${defaultValue}」必须是枚举可选值之一` }
   }
 
   const creating = isCreatingField.value
@@ -242,15 +285,26 @@ function handleApplyField() {
   }
 
   const ok = store.upsertTemplateField(payload, creating ? undefined : originalFieldName.value)
-  if (!ok) return
+  if (!ok) return { ok: false }
 
   const savedIdx = store.templateFields.findIndex(item => item.name === name)
   store.ideCreatingFieldDraft = ''
   store.ideSelectedFieldIdx = savedIdx >= 0 ? savedIdx : 0
   originalFieldName.value = name
-  store.showToast(
-    creating ? `已创建核查字段「${name}」，保存草稿后生效` : `已应用字段「${name}」规则配置，保存草稿后生效`,
-  )
+  fieldBaselineSig.value = serializeFieldFormState(fieldForm.value, enumText.value, columnsText.value)
+  if (showSuccessToast) {
+    store.showToast(
+      creating ? `已创建核查字段「${name}」，保存草稿后生效` : `已应用字段「${name}」规则配置，保存草稿后生效`,
+    )
+  }
+  return { ok: true }
+}
+
+function handleApplyField() {
+  const res = applyFieldFormInternal(true)
+  if (!res.ok && res.errorMsg) {
+    store.showToast(res.errorMsg, 'warning')
+  }
 }
 
 function handleDeleteField() {
@@ -299,6 +353,21 @@ const currentInput = computed<TemplateInput | null>(() => {
   return list[idx] ?? null
 })
 
+/** 入参键名草稿缓冲：仅在 @change / @blur 或保存/试运行前提交重命名，杜绝 @input 逐字写入半成品脏键 */
+const editingInputKey = ref('')
+
+function syncEditingInputKeyFromStore() {
+  editingInputKey.value = currentInput.value?.key ?? ''
+}
+
+watch(
+  () => [store.currentTemplateId, store.ideSelectedInputIdx, currentInput.value?.key] as const,
+  () => {
+    syncEditingInputKeyFromStore()
+  },
+  { immediate: true },
+)
+
 watch(
   () => store.templateInputs.length,
   len => {
@@ -318,7 +387,39 @@ function isCustomPreset(inp: TemplateInput): boolean {
   return presetSelectValue(inp) === CUSTOM_PRESET
 }
 
-function onInputTextChange(field: 'key' | 'desc' | 'sample', value: string) {
+function commitInputKeyRename(): boolean {
+  const list = store.templateInputs
+  if (!list.length) return true
+  const idx = Math.min(Math.max(0, store.ideSelectedInputIdx), list.length - 1)
+  const target = list[idx]
+  if (!target) return true
+  const oldKey = target.key
+  const nextKey = editingInputKey.value.trim()
+  if (nextKey === oldKey) {
+    editingInputKey.value = oldKey
+    return true
+  }
+  const ok = store.renameTemplateInputKey(idx, nextKey)
+  if (!ok) {
+    editingInputKey.value = oldKey
+    return false
+  }
+  editingInputKey.value = nextKey
+  if (caseForm.value && oldKey in caseForm.value.inputs) {
+    const wasCaseDirty = isCaseFormDirty.value
+    const prevVal = caseForm.value.inputs[oldKey] ?? ''
+    if (!(nextKey in caseForm.value.inputs) || !caseForm.value.inputs[nextKey]) {
+      caseForm.value.inputs[nextKey] = prevVal
+    }
+    delete caseForm.value.inputs[oldKey]
+    if (!wasCaseDirty) {
+      caseBaselineSig.value = serializeCaseFormState(caseForm.value)
+    }
+  }
+  return true
+}
+
+function onInputTextChange(field: 'desc' | 'sample', value: string) {
   const inp = currentInput.value
   if (!inp) return
   inp[field] = value
@@ -375,9 +476,17 @@ function handleDeleteInput() {
     .then(() => {
       const removedKey = target.key
       store.removeTemplateInput(idx)
+      if (caseForm.value && removedKey in caseForm.value.inputs) {
+        const wasCaseDirty = isCaseFormDirty.value
+        delete caseForm.value.inputs[removedKey]
+        if (!wasCaseDirty) {
+          caseBaselineSig.value = serializeCaseFormState(caseForm.value)
+        }
+      }
       if (store.ideSelectedInputIdx >= store.templateInputs.length) {
         store.ideSelectedInputIdx = Math.max(0, store.templateInputs.length - 1)
       }
+      syncEditingInputKeyFromStore()
       store.showToast(`已删除入参「${removedKey}」，保存草稿后生效`)
     })
     .catch(() => {})
@@ -444,8 +553,12 @@ async function fetchSelectedSkillDetail(skillId: string) {
 watch(
   () => [activeSkillId.value, store.ideLeftSection, store.onlineBaselineSeq] as const,
   ([skillId, sec]) => {
-    if (sec === 'skills' || skillId) {
+    if (sec === 'skills' && skillId) {
       void fetchSelectedSkillDetail(skillId)
+    } else if (!skillId) {
+      loadedSkillDetail.value = null
+      skillLoadError.value = ''
+      loadingSkill.value = false
     }
   },
   { immediate: true },
@@ -490,6 +603,7 @@ function handleUnbindSkill(skillId: string) {
 const caseForm = ref<EditableCaseForm | null>(null)
 const savingCase = ref(false)
 const expectedFilter = ref('')
+const caseBaselineSig = ref('')
 
 const isCreatingCase = computed(() => store.ideSelectedCaseIdx < 0)
 
@@ -498,6 +612,28 @@ const currentStoreCase = computed<RegressionCase | null>(() => {
   if (idx < 0 || idx >= store.templateCases.length) return null
   return store.templateCases[idx] ?? null
 })
+
+function serializeCaseFormState(c: EditableCaseForm | null): string {
+  if (!c) return ''
+  const sortedInputs = Object.keys(c.inputs || {})
+    .sort()
+    .map(k => [k, c.inputs[k] ?? ''])
+  const sortedExpected = Object.keys(c.expectedValues || {})
+    .sort()
+    .map(k => [k, (c.expectedValues[k] ?? '').trim()])
+  return JSON.stringify({
+    id: (c.id || '').trim(),
+    name: (c.name || '').trim(),
+    source: (c.source || '').trim(),
+    documentText: c.documentText || '',
+    inputs: sortedInputs,
+    expectedValues: sortedExpected,
+  })
+}
+
+const isCaseFormDirty = computed(
+  () => Boolean(caseForm.value) && serializeCaseFormState(caseForm.value) !== caseBaselineSig.value,
+)
 
 function syncCaseFormFromStore() {
   if (store.ideSelectedCaseIdx >= store.templateCases.length && store.templateCases.length > 0) {
@@ -518,7 +654,7 @@ function syncCaseFormFromStore() {
     store.templateFields.forEach(f => {
       if (!(f.name in expectedValues)) expectedValues[f.name] = ''
     })
-    caseForm.value = {
+    const freshCase: EditableCaseForm = {
       id: '',
       name: '',
       source: '手工新建',
@@ -526,12 +662,15 @@ function syncCaseFormFromStore() {
       documentText: store.dryRunPreset.docText || '',
       expectedValues,
     }
+    caseForm.value = freshCase
+    caseBaselineSig.value = serializeCaseFormState(freshCase)
     return
   }
 
   const src = store.templateCases[store.ideSelectedCaseIdx]
   if (!src) {
     caseForm.value = null
+    caseBaselineSig.value = ''
     return
   }
   const copy = deepClone(src)
@@ -543,7 +682,7 @@ function syncCaseFormFromStore() {
   store.templateFields.forEach(f => {
     if (!(f.name in expectedValues)) expectedValues[f.name] = ''
   })
-  caseForm.value = {
+  const nextCase: EditableCaseForm = {
     id: copy.id || '',
     name: copy.name || '',
     source: copy.source || '手工新建',
@@ -551,6 +690,8 @@ function syncCaseFormFromStore() {
     documentText: copy.documentText || '',
     expectedValues,
   }
+  caseForm.value = nextCase
+  caseBaselineSig.value = serializeCaseFormState(nextCase)
 }
 
 watch(
@@ -575,12 +716,16 @@ watch(
     ] as const,
   () => {
     if (!caseForm.value) return
+    const wasDirty = isCaseFormDirty.value
     store.templateInputs.forEach(inp => {
       if (!(inp.key in caseForm.value!.inputs)) caseForm.value!.inputs[inp.key] = ''
     })
     store.templateFields.forEach(f => {
       if (!(f.name in caseForm.value!.expectedValues)) caseForm.value!.expectedValues[f.name] = ''
     })
+    if (!wasDirty) {
+      caseBaselineSig.value = serializeCaseFormState(caseForm.value)
+    }
   },
 )
 
@@ -609,13 +754,13 @@ function handleFillCaseToDebug() {
   store.showToast(`已将用例「${c.name || c.id || '当前编辑内容'}」填入下方调试区`)
 }
 
-async function handleSaveCaseInline() {
+async function saveCaseFormInternal(): Promise<boolean> {
   const c = caseForm.value
-  if (!c || savingCase.value) return
+  if (!c || savingCase.value) return false
   const name = c.name.trim()
   if (!name) {
     store.showToast('请填写回归用例名称', 'warning')
-    return
+    return false
   }
   const expectedValues: Record<string, string> = {}
   Object.entries(c.expectedValues).forEach(([k, v]) => {
@@ -623,12 +768,18 @@ async function handleSaveCaseInline() {
     if (trimmed) expectedValues[k] = trimmed
   })
 
+  const cleanInputs: Record<string, string> = {}
+  for (const inp of store.templateInputs) {
+    const k = inp.key.trim()
+    if (k) cleanInputs[k] = c.inputs[inp.key] ?? ''
+  }
+
   const isNew = isCreatingCase.value
   const payload: Partial<RegressionCase> = {
     ...(isNew ? {} : currentStoreCase.value || {}),
     name,
     source: (c.source || '').trim() || '手工新建',
-    inputs: { ...c.inputs },
+    inputs: cleanInputs,
     documentText: c.documentText || '',
     expectedValues,
   }
@@ -645,10 +796,17 @@ async function handleSaveCaseInline() {
     if (saved) {
       const idx = store.templateCases.findIndex(item => item.id === saved.id)
       store.ideSelectedCaseIdx = idx >= 0 ? idx : 0
+      syncCaseFormFromStore()
+      return true
     }
+    return false
   } finally {
     savingCase.value = false
   }
+}
+
+async function handleSaveCaseInline() {
+  await saveCaseFormInternal()
 }
 
 function handleDeleteCaseInline() {
@@ -725,19 +883,12 @@ function handleOpenRollbackModal() {
   })
 }
 
-// ======================================================================== 6. 证据溯源快捷栏联动
+// ======================================================================== 6. 证据溯源快捷栏联动与未应用修改守护
 const evidenceFields = computed<TemplateField[]>(() => store.dryRunResult?.fields || [])
 
 /** 证据快捷下拉栏中的字段状态摘要（区分合法空列表 0 行与缺失列表） #Created By AiCoding(codex) */
 function formatRunFieldBrief(rf: TemplateField): string {
-  if (rf.type === '列表') {
-    if (rf.runStatus === 'found') {
-      const n = Array.isArray(rf.runRows) ? rf.runRows.length : (rf.runValue || '').trim() === '[]' ? 0 : -1
-      return n === 0 ? '无记录（0 行）' : n > 0 ? `共 ${n} 行` : rf.runValue || '已找到'
-    }
-    return '缺失（未找到）'
-  }
-  return rf.runStatus === 'found' ? rf.runValue || '已找到' : '未找到'
+  return formatRunFieldSummary(rf, 'brief')
 }
 
 function onEvidenceFieldChange(e: Event) {
@@ -753,13 +904,132 @@ function onEvidenceFieldChange(e: Event) {
 function handleJumpToFieldProps() {
   const fname = store.activeEvidenceKey || store.templateFields[0]?.name || ''
   if (!fname) return
-  store.selectIdeFieldByName(fname)
+  void store.selectIdeFieldByName(fname)
 }
 
 function handleExpandDebugPanel() {
   store.ideDebugCollapsed = false
   store.ideDebugTab = 'inputs'
 }
+
+watch(
+  [isFieldFormDirty, isCaseFormDirty],
+  ([fd, cd]) => {
+    store.inspectorFieldDirty = fd || cd
+  },
+  { immediate: true },
+)
+
+watch(
+  () => store.inspectorResetSeq,
+  () => {
+    syncFieldFormFromStore()
+    syncCaseFormFromStore()
+    syncEditingInputKeyFromStore()
+  },
+)
+
+/** 在保存草稿 / ⌘S / 试运行 / 发布 / 切换选中项前自动校验并刷写右侧未点击“应用”的修改 */
+async function flushInspectorEdits(
+  reason: 'save' | 'dryrun' | 'publish' | 'validate' | 'switch-field' | 'switch-case',
+): Promise<boolean> {
+  if (!commitInputKeyRename()) {
+    store.ideLeftSection = 'inputs'
+    store.ideRightMode = 'inspector'
+    return false
+  }
+
+  if (reason !== 'switch-case' && isFieldFormDirty.value) {
+    const res = applyFieldFormInternal(false)
+    if (!res.ok) {
+      if (reason === 'switch-field') {
+        try {
+          await ElMessageBox.confirm(
+            `当前字段存在未完成应用且未通过校验的修改${res.errorMsg ? `（${res.errorMsg}）` : ''}，切换将放弃该处修改，确认放弃并切换吗？`,
+            '未应用的字段修改',
+            {
+              confirmButtonText: '放弃并切换',
+              cancelButtonText: '继续完善',
+              type: 'warning',
+            },
+          )
+          syncFieldFormFromStore()
+          return true
+        } catch {
+          store.ideLeftSection = 'fields'
+          store.ideRightMode = 'inspector'
+          return false
+        }
+      }
+      store.ideLeftSection = 'fields'
+      store.ideRightMode = 'inspector'
+      if (res.errorMsg) {
+        store.showToast(res.errorMsg, 'warning')
+      }
+      return false
+    }
+  }
+
+  const shouldFlushCase =
+    isCaseFormDirty.value &&
+    (reason === 'switch-case' ||
+      ((reason === 'save' || reason === 'publish' || reason === 'dryrun') &&
+        store.ideLeftSection === 'cases'))
+
+  if (shouldFlushCase && caseForm.value) {
+    if (!caseForm.value.name.trim()) {
+      if (reason === 'switch-case') {
+        try {
+          await ElMessageBox.confirm(
+            '当前回归用例存在未保存修改且尚未填写用例名称，切换将丢失这些修改，确认放弃并切换吗？',
+            '未保存的用例修改',
+            {
+              confirmButtonText: '放弃并切换',
+              cancelButtonText: '继续填写',
+              type: 'warning',
+            },
+          )
+          syncCaseFormFromStore()
+          return true
+        } catch {
+          store.ideLeftSection = 'cases'
+          store.ideRightMode = 'inspector'
+          return false
+        }
+      }
+      store.ideLeftSection = 'cases'
+      store.ideRightMode = 'inspector'
+      store.showToast('右侧回归用例有未保存修改，请先填写用例名称或取消修改', 'warning')
+      return false
+    }
+    const saved = await saveCaseFormInternal()
+    if (!saved) {
+      store.ideLeftSection = 'cases'
+      store.ideRightMode = 'inspector'
+      return false
+    }
+  }
+
+  return true
+}
+
+onMounted(() => {
+  store.registerInspectorFlushHandler(flushInspectorEdits)
+})
+
+onActivated(() => {
+  store.registerInspectorFlushHandler(flushInspectorEdits)
+  store.inspectorFieldDirty = isFieldFormDirty.value || isCaseFormDirty.value
+})
+
+onDeactivated(() => {
+  store.registerInspectorFlushHandler(null)
+})
+
+onBeforeUnmount(() => {
+  store.registerInspectorFlushHandler(null)
+  store.inspectorFieldDirty = false
+})
 </script>
 
 <template>
@@ -944,7 +1214,7 @@ function handleExpandDebugPanel() {
             </div>
             <div class="form-block">
               <label class="field-lbl">数据类型</label>
-              <select v-model="fieldForm.type" class="ide-select">
+              <select v-model="fieldForm.type" class="ide-select" @change="onFieldTypeChange">
                 <option v-for="ft in fieldTypes" :key="ft" :value="ft">{{ ft }}</option>
               </select>
             </div>
@@ -991,7 +1261,12 @@ function handleExpandDebugPanel() {
             <div class="form-block">
               <label class="field-lbl">证据来源</label>
               <select v-model="fieldForm.evidenceType" class="ide-select">
-                <option v-for="opt in evidenceOptions" :key="opt.value" :value="opt.value">
+                <option
+                  v-for="opt in evidenceOptions"
+                  :key="opt.value"
+                  :value="opt.value"
+                  :disabled="fieldForm.type === '列表' && opt.value === 'input'"
+                >
                   {{ opt.label }}
                 </option>
               </select>
@@ -1105,11 +1380,14 @@ function handleExpandDebugPanel() {
               <span class="req-star">*</span>
             </label>
             <input
-              :value="currentInput.key"
+              :value="editingInputKey"
               type="text"
               class="ide-input mono"
               placeholder="如：mobile / orderId"
-              @input="onInputTextChange('key', ($event.target as HTMLInputElement).value)"
+              @input="editingInputKey = ($event.target as HTMLInputElement).value"
+              @change="commitInputKeyRename()"
+              @blur="commitInputKeyRename()"
+              @keydown.enter.prevent="($event.target as HTMLInputElement).blur()"
             />
           </div>
 

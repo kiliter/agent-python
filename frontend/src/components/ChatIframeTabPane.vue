@@ -74,9 +74,8 @@ function onWindowMessage(event: MessageEvent) {
 
   if (data.type === 'chat-ready') {
     tabsStore.recordChatReady(props.tab.key, data)
-    if (props.tab.initSentCount === 0) {
-      sendChatInit(false)
-    }
+    // 每次收到子框架 chat-ready（含首次挂载及子页面主动刷新）均重发最新 chat-init，防止子框架刷新卡死
+    sendChatInit(false)
     return
   }
 

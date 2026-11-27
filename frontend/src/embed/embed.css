@@ -54,6 +54,17 @@
     sans-serif;
   --gpt-font-mono: 'JetBrains Mono', 'SFMono-Regular', ui-monospace, Menlo, Consolas, monospace;
 
+  /* 舞台内弹层统一层级令牌（从低到高严格递增，防止浮层遮挡业务弹窗） */
+  --z-topbar: 30;
+  --z-popover-mask: 80;
+  --z-popover: 90;
+  --z-modal: 1160;
+  --z-submodal: 1220;
+  --z-dropdown: 1260;
+  --z-confirm: 1280;
+  --z-tooltip: 1650;
+  --z-toast: 2400;
+
   /* 兼容子组件内部引用的令牌映射（全部对齐纯亮色体系） */
   --eb-bg-canvas: var(--gpt-bg);
   --eb-bg-surface: var(--gpt-bg);
@@ -134,7 +145,7 @@ body {
   top: 62px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 2400;
+  z-index: var(--z-toast, 2400);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -265,7 +276,7 @@ body {
   max-width: 290px;
   text-align: left;
   box-shadow: 0 4px 14px rgba(15, 23, 42, 0.24);
-  z-index: 1650;
+  z-index: var(--z-tooltip, 1650);
   pointer-events: none;
   opacity: 0;
   visibility: hidden;

@@ -18,6 +18,7 @@ from ..domain.resources import ResourceSet
 from ..runtime.composite import CompositeRunner, CompositeRunRequest
 from ..runtime.runner import AgentRunner, InputValidationError, RunRequest, TemplateUnavailable
 from ..runtime.workspace import ProcessEvent
+from ..store.fsutil import now_iso
 from ..store.runs import new_run_id
 from .steps import StepMapper, sanitize_error_text
 
@@ -154,22 +155,24 @@ class ChatRunManager:
         else:
             ch.notify_scheduled = False
 
-    def start(
+    def _launch_channel(
         self,
         session_id: str,
-        req: RunRequest,
+        run_id: str,
         *,
         resources: ResourceSet | None,
+        task_name: str,
+        exec_fn: Callable[
+            [_RunChannel],
+            Awaitable[tuple[dict[str, Any] | None, str | None, str | None, bool, int]],
+        ],
         on_complete: Callable[[RunCompletion], Awaitable[dict[str, Any]]],
+        is_composite: bool = False,
     ) -> str:
-        """校验单会话互斥并启动后台运行，返回 run_id。"""
+        """统一注册单会话活跃通道并托管后台执行、回调落盘、终态兜底与唤醒生命周期。#Created By AiCoding(codex)"""
         if self.has_active_run(session_id) is not None:
             raise RuntimeError("RUN_IN_PROGRESS")
         self._evict_expired()
-        if not req.run_id:
-            req.run_id = new_run_id()
-        run_id = req.run_id
-
         loop = asyncio.get_running_loop()
         ch = _RunChannel(
             run_id=run_id,
@@ -183,102 +186,66 @@ class ChatRunManager:
         self._channels[run_id] = ch
         self._channels.move_to_end(run_id)
         self._active_by_session[session_id] = run_id
-        ch.task = loop.create_task(self._execute(ch, req, on_complete), name=f"chat-run-{run_id}")
-        return run_id
-
-    def start_composite(
-        self,
-        session_id: str,
-        req: CompositeRunRequest,
-        *,
-        resources: ResourceSet | None,
-        on_complete: Callable[[RunCompletion], Awaitable[dict[str, Any]]],
-    ) -> str:
-        """校验单会话互斥并启动多业务复合工单后台运行，返回复合 run_id。#Created By AiCoding(codex)"""
-        if self.has_active_run(session_id) is not None:
-            raise RuntimeError("RUN_IN_PROGRESS")
-        self._evict_expired()
-        if not req.composite_run_id:
-            req.composite_run_id = f"cmp-{new_run_id()}"
-        run_id = req.composite_run_id
-
-        loop = asyncio.get_running_loop()
-        ch = _RunChannel(
-            run_id=run_id,
-            session_id=session_id,
-            mapper=StepMapper(resources=resources),
-            cond=asyncio.Condition(),
-            loop=loop,
-            started_mono=time.monotonic(),
+        ch.task = loop.create_task(
+            self._run_channel_lifecycle(ch, exec_fn, on_complete, is_composite=is_composite),
+            name=task_name,
         )
-        self._channels[run_id] = ch
-        self._channels.move_to_end(run_id)
-        self._active_by_session[session_id] = run_id
-        ch.task = loop.create_task(self._execute_composite(ch, req, on_complete), name=f"chat-cmp-{run_id}")
         return run_id
 
-    async def _execute_composite(
+    @staticmethod
+    def _build_fallback_final_message(
+        ch: _RunChannel,
+        completion: RunCompletion,
+        *,
+        is_composite: bool,
+    ) -> dict[str, Any]:
+        """当 on_complete 回调异常未能返回卡片字典时，构造合法兜底终态消息以确保 SSE 正常闭合。#Created By AiCoding(codex)"""
+        fallback_err = (
+            ("复合运行已手动停止" if is_composite else "运行已手动停止")
+            if completion.cancelled
+            else sanitize_error_text(completion.error, fallback="运行状态保存失败")
+        )
+        msg: dict[str, Any] = {
+            "id": f"m_run_{ch.run_id}",
+            "role": "assistant",
+            "kind": "run",
+            "createdAt": now_iso(),
+            "runId": ch.run_id,
+            "templateId": 0,
+            "templateName": "复合工单汇总" if is_composite else "",
+            "status": "CANCELLED" if completion.cancelled else "FAILED",
+            "rev": "-",
+            "inputsVersion": 1,
+            "stale": False,
+            "templateOffline": False,
+            "steps": list(completion.steps),
+            "durationMs": completion.duration_ms,
+            "error": fallback_err,
+            "missingShown": [],
+            "foundCount": 0,
+            "totalCount": 0,
+            "versions": [],
+            "confirmed": False,
+        }
+        if is_composite:
+            msg["isComposite"] = True
+            msg["compositeItems"] = []
+            msg["sharedGatewayHits"] = 0
+        return msg
+
+    async def _run_channel_lifecycle(
         self,
         ch: _RunChannel,
-        req: CompositeRunRequest,
+        exec_fn: Callable[
+            [_RunChannel],
+            Awaitable[tuple[dict[str, Any] | None, str | None, str | None, bool, int]],
+        ],
         on_complete: Callable[[RunCompletion], Awaitable[dict[str, Any]]],
+        *,
+        is_composite: bool,
     ) -> None:
-        outcome: dict[str, Any] | None = None
-        error: str | None = None
-        error_code: str | None = None
-        cancelled = False
-
-        def _on_progress(icon: str, text: str, ok: bool) -> None:
-            elapsed = int((time.monotonic() - ch.started_mono) * 1000)
-            ch.mapper.append_custom(icon, text, ok=ok, at_ms=elapsed)
-            ch.raw_events.append({
-                "seq": len(ch.raw_events) + 1,
-                "type": "composite_progress",
-                "atMs": elapsed,
-                "round": 0,
-                "text": text,
-                "ok": ok,
-            })
-            self._schedule_notify(ch)
-
         try:
-            try:
-                outcome = await CompositeRunner(self.runner).run(req, on_progress=_on_progress)
-                status = str(outcome.get("status") or "")
-                dur_ms = int(outcome.get("durationMs") or int((time.monotonic() - ch.started_mono) * 1000))
-                if status in ("SUCCESS", "PARTIAL"):
-                    s = outcome.get("summary") or {}
-                    ch.mapper.append_custom(
-                        "done",
-                        f"复合工单汇总完成（共 {s.get('totalItems', 0)} 项：成功 {s.get('successCount', 0)}、部分缺失 {s.get('partialCount', 0)}、失败 {s.get('failedCount', 0)}）",
-                        ok=True,
-                        at_ms=dur_ms,
-                    )
-                else:
-                    error = "所有业务子项核查均未成功"
-                    error_code = "RUN_FAILED"
-                    ch.mapper.append_custom("error", f"复合核查失败：{error}", ok=False, at_ms=dur_ms)
-            except asyncio.CancelledError:
-                cancelled = True
-                error = "复合运行已手动停止"
-                error_code = "CANCELLED"
-                elapsed = int((time.monotonic() - ch.started_mono) * 1000)
-                ch.mapper.append_custom("warn", "复合运行已手动停止", ok=False, at_ms=elapsed)
-            except InputValidationError as exc:
-                error = sanitize_error_text(exc, fallback="复合工单参数不合法")
-                error_code = "INPUT_INVALID"
-                elapsed = int((time.monotonic() - ch.started_mono) * 1000)
-                ch.mapper.append_custom("error", f"复合核查失败：{error}", ok=False, at_ms=elapsed)
-            except Exception as exc:  # noqa: BLE001
-                log.exception("聊天窗口复合后台运行异常 runId=%s", ch.run_id)
-                error = sanitize_error_text(exc, fallback=type(exc).__name__)
-                error_code = "RUN_ERROR"
-                elapsed = int((time.monotonic() - ch.started_mono) * 1000)
-                ch.mapper.append_custom("error", f"复合核查失败：{error}", ok=False, at_ms=elapsed)
-
-            duration_ms = int(outcome.get("durationMs") or 0) if outcome is not None else int(
-                (time.monotonic() - ch.started_mono) * 1000
-            )
+            outcome, error, error_code, cancelled, duration_ms = await exec_fn(ch)
             completion = RunCompletion(
                 run_id=ch.run_id,
                 session_id=ch.session_id,
@@ -294,13 +261,22 @@ class ChatRunManager:
             try:
                 final_msg = await asyncio.shield(cb_fut)
             except asyncio.CancelledError:
+                # 收尾阶段若收到取消信号，仍等待回调落盘完成以保持会话状态一致
                 try:
                     final_msg = await cb_fut
                 except Exception:  # noqa: BLE001
-                    log.exception("聊天复合运行完成回调失败 runId=%s", ch.run_id)
+                    log.exception("聊天运行完成回调失败 runId=%s", ch.run_id)
             except Exception:  # noqa: BLE001
-                log.exception("聊天复合运行完成回调失败 runId=%s", ch.run_id)
-            ch.final_message = copy.deepcopy(final_msg) if isinstance(final_msg, dict) else None
+                log.exception("聊天运行完成回调失败 runId=%s", ch.run_id)
+
+            if isinstance(final_msg, dict):
+                ch.final_message = copy.deepcopy(final_msg)
+            else:
+                ch.final_message = self._build_fallback_final_message(
+                    ch,
+                    completion,
+                    is_composite=is_composite,
+                )
         finally:
             ch.done = True
             ch.finished_mono = time.monotonic()
@@ -319,12 +295,122 @@ class ChatRunManager:
                 ch.notify_tasks.add(t)
                 t.add_done_callback(ch.notify_tasks.discard)
 
-    async def _execute(
+    def start(
+        self,
+        session_id: str,
+        req: RunRequest,
+        *,
+        resources: ResourceSet | None,
+        on_complete: Callable[[RunCompletion], Awaitable[dict[str, Any]]],
+    ) -> str:
+        """校验单会话互斥并启动后台运行，返回 run_id。"""
+        if not req.run_id:
+            req.run_id = new_run_id()
+        return self._launch_channel(
+            session_id,
+            req.run_id,
+            resources=resources,
+            task_name=f"chat-run-{req.run_id}",
+            exec_fn=lambda ch: self._execute_single_body(ch, req),
+            on_complete=on_complete,
+            is_composite=False,
+        )
+
+    def start_composite(
+        self,
+        session_id: str,
+        req: CompositeRunRequest,
+        *,
+        resources: ResourceSet | None,
+        on_complete: Callable[[RunCompletion], Awaitable[dict[str, Any]]],
+    ) -> str:
+        """校验单会话互斥并启动多业务复合工单后台运行，返回复合 run_id。#Created By AiCoding(codex)"""
+        if not req.composite_run_id:
+            req.composite_run_id = f"cmp-{new_run_id()}"
+        return self._launch_channel(
+            session_id,
+            req.composite_run_id,
+            resources=resources,
+            task_name=f"chat-cmp-{req.composite_run_id}",
+            exec_fn=lambda ch: self._execute_composite_body(ch, req),
+            on_complete=on_complete,
+            is_composite=True,
+        )
+
+    async def _execute_composite_body(
+        self,
+        ch: _RunChannel,
+        req: CompositeRunRequest,
+    ) -> tuple[dict[str, Any] | None, str | None, str | None, bool, int]:
+        outcome: dict[str, Any] | None = None
+        error: str | None = None
+        error_code: str | None = None
+        cancelled = False
+
+        def _on_progress(icon: str, text: str, ok: bool) -> None:
+            elapsed = int((time.monotonic() - ch.started_mono) * 1000)
+            safe_text = (
+                sanitize_error_text(text, fallback="复合核查异常")
+                if (not ok or icon in ("warn", "error"))
+                else text
+            )
+            ch.mapper.append_custom(icon, safe_text, ok=ok, at_ms=elapsed)
+            ch.raw_events.append({
+                "seq": len(ch.raw_events) + 1,
+                "type": "composite_progress",
+                "atMs": elapsed,
+                "round": 0,
+                "text": safe_text,
+                "ok": ok,
+            })
+            self._schedule_notify(ch)
+
+        try:
+            outcome = await CompositeRunner(self.runner).run(req, on_progress=_on_progress)
+            status = str(outcome.get("status") or "")
+            dur_ms = int(outcome.get("durationMs") or int((time.monotonic() - ch.started_mono) * 1000))
+            if status in ("SUCCESS", "PARTIAL"):
+                s = outcome.get("summary") or {}
+                ch.mapper.append_custom(
+                    "done",
+                    f"复合工单汇总完成（共 {s.get('totalItems', 0)} 项：成功 {s.get('successCount', 0)}、部分缺失 {s.get('partialCount', 0)}、失败 {s.get('failedCount', 0)}）",
+                    ok=True,
+                    at_ms=dur_ms,
+                )
+            else:
+                error = "所有业务子项核查均未成功"
+                error_code = "RUN_FAILED"
+                ch.mapper.append_custom("error", f"复合核查失败：{error}", ok=False, at_ms=dur_ms)
+        except asyncio.CancelledError:
+            cancelled = True
+            error = "复合运行已手动停止"
+            error_code = "CANCELLED"
+            elapsed = int((time.monotonic() - ch.started_mono) * 1000)
+            ch.mapper.append_custom("warn", "复合运行已手动停止", ok=False, at_ms=elapsed)
+        except InputValidationError as exc:
+            error = sanitize_error_text(exc, fallback="复合工单参数不合法")
+            error_code = "INPUT_INVALID"
+            elapsed = int((time.monotonic() - ch.started_mono) * 1000)
+            ch.mapper.append_custom("error", f"复合核查失败：{error}", ok=False, at_ms=elapsed)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("聊天窗口复合后台运行异常 runId=%s", ch.run_id)
+            error = sanitize_error_text(exc, fallback=type(exc).__name__)
+            error_code = "RUN_ERROR"
+            elapsed = int((time.monotonic() - ch.started_mono) * 1000)
+            ch.mapper.append_custom("error", f"复合核查失败：{error}", ok=False, at_ms=elapsed)
+
+        duration_ms = (
+            int(outcome.get("durationMs") or int((time.monotonic() - ch.started_mono) * 1000))
+            if outcome is not None
+            else int((time.monotonic() - ch.started_mono) * 1000)
+        )
+        return outcome, error, error_code, cancelled, duration_ms
+
+    async def _execute_single_body(
         self,
         ch: _RunChannel,
         req: RunRequest,
-        on_complete: Callable[[RunCompletion], Awaitable[dict[str, Any]]],
-    ) -> None:
+    ) -> tuple[dict[str, Any] | None, str | None, str | None, bool, int]:
         outcome: dict[str, Any] | None = None
         error: str | None = None
         error_code: str | None = None
@@ -338,103 +424,60 @@ class ChatRunManager:
             self._schedule_notify(ch)
 
         try:
-            try:
-                outcome = await self.runner.run(req, listener=_on_event)
-                status = str(outcome.get("status") or "")
-                dur_ms = int(outcome.get("durationMs") or int((time.monotonic() - ch.started_mono) * 1000))
-                if status in ("SUCCESS", "PARTIAL"):
-                    found_cnt = int(outcome.get("foundCount") or 0)
-                    total_cnt = int(outcome.get("totalCount") or 0)
+            outcome = await self.runner.run(req, listener=_on_event)
+            status = str(outcome.get("status") or "")
+            dur_ms = int(outcome.get("durationMs") or int((time.monotonic() - ch.started_mono) * 1000))
+            if status in ("SUCCESS", "PARTIAL"):
+                found_cnt = int(outcome.get("foundCount") or 0)
+                total_cnt = int(outcome.get("totalCount") or 0)
+                ch.mapper.append_custom(
+                    "done",
+                    f"报告生成完成（找到 {found_cnt}/{total_cnt} 个字段）",
+                    ok=True,
+                    at_ms=dur_ms,
+                )
+            else:
+                error = sanitize_error_text(outcome.get("error"), fallback="运行失败")
+                error_code = "RUN_FAILED"
+                if not ch.saw_run_failed:
                     ch.mapper.append_custom(
-                        "done",
-                        f"报告生成完成（找到 {found_cnt}/{total_cnt} 个字段）",
-                        ok=True,
+                        "error",
+                        f"运行失败：{error}",
+                        ok=False,
                         at_ms=dur_ms,
                     )
-                else:
-                    error = sanitize_error_text(outcome.get("error"), fallback="运行失败")
-                    error_code = "RUN_FAILED"
-                    if not ch.saw_run_failed:
-                        ch.mapper.append_custom(
-                            "error",
-                            f"运行失败：{error}",
-                            ok=False,
-                            at_ms=dur_ms,
-                        )
-            except asyncio.CancelledError:
-                cancelled = True
-                error = "运行已手动停止"
-                error_code = "CANCELLED"
-                elapsed = int((time.monotonic() - ch.started_mono) * 1000)
-                ch.mapper.append_custom("warn", "运行已手动停止", ok=False, at_ms=elapsed)
-            except InputValidationError as exc:
-                error = sanitize_error_text(exc, fallback="入参校验不通过")
-                error_code = "INPUT_INVALID"
-                elapsed = int((time.monotonic() - ch.started_mono) * 1000)
-                if not ch.saw_run_failed:
-                    ch.mapper.append_custom("error", f"运行失败：{error}", ok=False, at_ms=elapsed)
-            except TemplateUnavailable as exc:
-                error = sanitize_error_text(exc, fallback="模板不可用")
-                error_code = "TEMPLATE_UNAVAILABLE"
-                elapsed = int((time.monotonic() - ch.started_mono) * 1000)
-                if not ch.saw_run_failed:
-                    ch.mapper.append_custom("error", f"运行失败：{error}", ok=False, at_ms=elapsed)
-            except Exception as exc:  # noqa: BLE001 - 兜底捕获保证会话状态回写与订阅流正常闭合
-                log.exception("聊天窗口后台运行未捕获异常 runId=%s", ch.run_id)
-                error = sanitize_error_text(exc, fallback=type(exc).__name__)
-                error_code = "RUN_ERROR"
-                elapsed = int((time.monotonic() - ch.started_mono) * 1000)
-                if not ch.saw_run_failed:
-                    ch.mapper.append_custom("error", f"运行失败：{error}", ok=False, at_ms=elapsed)
+        except asyncio.CancelledError:
+            cancelled = True
+            error = "运行已手动停止"
+            error_code = "CANCELLED"
+            elapsed = int((time.monotonic() - ch.started_mono) * 1000)
+            ch.mapper.append_custom("warn", "运行已手动停止", ok=False, at_ms=elapsed)
+        except InputValidationError as exc:
+            error = sanitize_error_text(exc, fallback="入参校验不通过")
+            error_code = "INPUT_INVALID"
+            elapsed = int((time.monotonic() - ch.started_mono) * 1000)
+            if not ch.saw_run_failed:
+                ch.mapper.append_custom("error", f"运行失败：{error}", ok=False, at_ms=elapsed)
+        except TemplateUnavailable as exc:
+            error = sanitize_error_text(exc, fallback="模板不可用")
+            error_code = "TEMPLATE_UNAVAILABLE"
+            elapsed = int((time.monotonic() - ch.started_mono) * 1000)
+            if not ch.saw_run_failed:
+                ch.mapper.append_custom("error", f"运行失败：{error}", ok=False, at_ms=elapsed)
+        except Exception as exc:  # noqa: BLE001 - 兜底捕获保证会话状态回写与订阅流正常闭合
+            log.exception("聊天窗口后台运行未捕获异常 runId=%s", ch.run_id)
+            error = sanitize_error_text(exc, fallback=type(exc).__name__)
+            error_code = "RUN_ERROR"
+            elapsed = int((time.monotonic() - ch.started_mono) * 1000)
+            if not ch.saw_run_failed:
+                ch.mapper.append_custom("error", f"运行失败：{error}", ok=False, at_ms=elapsed)
 
-            if outcome is not None:
-                duration_ms = int(outcome.get("durationMs") or int((time.monotonic() - ch.started_mono) * 1000))
-            else:
-                duration_ms = int((time.monotonic() - ch.started_mono) * 1000)
-
-            completion = RunCompletion(
-                run_id=ch.run_id,
-                session_id=ch.session_id,
-                outcome=outcome,
-                error=error,
-                error_code=error_code,
-                cancelled=cancelled,
-                steps=[dict(s) for s in ch.mapper.steps],
-                duration_ms=max(0, duration_ms),
-            )
-
-            cb_fut = asyncio.ensure_future(on_complete(completion))
-            final_msg: dict[str, Any] | None = None
-            try:
-                final_msg = await asyncio.shield(cb_fut)
-            except asyncio.CancelledError:
-                # 收尾阶段若再次收到取消信号，仍等待回调落盘完成以保持会话状态一致
-                try:
-                    final_msg = await cb_fut
-                except Exception:  # noqa: BLE001
-                    log.exception("聊天运行完成回调执行失败 runId=%s", ch.run_id)
-            except Exception:  # noqa: BLE001
-                log.exception("聊天运行完成回调执行失败 runId=%s", ch.run_id)
-
-            ch.final_message = copy.deepcopy(final_msg) if isinstance(final_msg, dict) else None
-        finally:
-            ch.done = True
-            ch.finished_mono = time.monotonic()
-            if self._active_by_session.get(ch.session_id) == ch.run_id:
-                self._active_by_session.pop(ch.session_id, None)
-            self._evict_expired()
-            try:
-                async with ch.cond:
-                    ch.cond.notify_all()
-            except asyncio.CancelledError:
-                # 兜底用独立脉冲唤醒仍在等待的订阅协程
-                async def _final_wake() -> None:
-                    async with ch.cond:
-                        ch.cond.notify_all()
-
-                t = ch.loop.create_task(_final_wake())
-                ch.notify_tasks.add(t)
-                t.add_done_callback(ch.notify_tasks.discard)
+        duration_ms = (
+            int(outcome.get("durationMs") or int((time.monotonic() - ch.started_mono) * 1000))
+            if outcome is not None
+            else int((time.monotonic() - ch.started_mono) * 1000)
+        )
+        return outcome, error, error_code, cancelled, duration_ms
 
     def cancel(self, run_id: str) -> bool:
         """若该 run_id 正在运行，取消其后台任务并返回 True；否则返回 False。"""
@@ -442,6 +485,15 @@ class ChatRunManager:
         if ch is None or ch.done or ch.task is None or ch.task.done():
             return False
         return ch.task.cancel()
+
+    async def cancel_and_wait(self, run_id: str, *, timeout: float = 3.0) -> bool:
+        """取消正在运行的任务并有限等待收尾回调释放会话活跃槽位，消除停止后立即重跑的 409 竞态。#Created By AiCoding(codex)"""
+        ch = self._channels.get(run_id)
+        if ch is None or ch.done or ch.task is None or ch.task.done():
+            return False
+        did_cancel = ch.task.cancel()
+        await asyncio.wait({ch.task}, timeout=max(0.0, float(timeout)))
+        return did_cancel
 
     def subscribe(
         self,

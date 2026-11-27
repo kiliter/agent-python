@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from typing import Any
 
 from ..chat.steps import events_to_steps
 from ..domain.resources import ResourceSet
 from ..store.fsutil import fmt_time, now_iso
-from .dto import document_lines
+from .dto import document_lines, safe_int
 from .missing_summary import build_missing_summary
 
 _MAX_RAW_STR_LEN = 2400
@@ -53,10 +54,10 @@ def _sanitize_raw_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 merged[k] = v
 
         clean: dict[str, Any] = {
-            "seq": int(merged.get("seq") or (idx + 1)),
+            "seq": safe_int(merged.get("seq"), idx + 1) or (idx + 1),
             "type": str(merged.get("type") or ""),
-            "atMs": max(0, int(merged.get("atMs", merged.get("at_ms", 0)) or 0)),
-            "round": max(0, int(merged.get("round", 0) or 0)),
+            "atMs": max(0, safe_int(merged.get("atMs", merged.get("at_ms", 0)), 0)),
+            "round": max(0, safe_int(merged.get("round", 0), 0)),
         }
         for k, v in merged.items():
             if k in ("seq", "type", "atMs", "at_ms", "round"):
@@ -98,7 +99,7 @@ def _sanitize_api_results(api_results: list[dict[str, Any]]) -> list[dict[str, A
             "args": {str(k): "" if v is None else str(v) for k, v in args.items()},
             "ok": bool(res.get("ok", True)),
             "error": str(res.get("error") or "") if res.get("error") else "",
-            "costMs": int(res.get("costMs") or 0),
+            "costMs": safe_int(res.get("costMs"), 0),
             "noData": bool(res.get("noData", False)),
             "columns": {str(k): str(v) for k, v in cols.items()},
             "records": records_out,
@@ -135,7 +136,7 @@ def _sanitize_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any
             "tool": str(tc.get("tool") or ""),
             "args": _clip_json_val(tc.get("args"), 2000),
             "output": _clip_json_val(tc.get("output"), 2400),
-            "atMs": int(tc.get("atMs") or 0),
+            "atMs": safe_int(tc.get("atMs"), 0),
             "ok": bool(tc.get("ok", True)),
         })
     return out
@@ -146,7 +147,7 @@ def _build_steps(run: dict[str, Any], resources: ResourceSet | None) -> list[dic
     raw_events = run.get("events") or []
     steps = events_to_steps(raw_events, resources=resources)
     status = str(run.get("status") or "SUCCESS")
-    duration_ms = int(run.get("durationMs") or 0)
+    duration_ms = safe_int(run.get("durationMs"), 0)
     last_ms = steps[-1]["atMs"] if steps else 0
     end_ms = max(last_ms, duration_ms)
 
@@ -190,12 +191,21 @@ def build_replay_item(run: dict[str, Any], resources: ResourceSet | None = None)
         val = f.get("value")
         if isinstance(val, list):
             val_text = "[]" if not val else json.dumps(val, ensure_ascii=False)
+        elif isinstance(val, dict):
+            val_text = json.dumps(val, ensure_ascii=False)
         elif val is None:
             val_text = ""
         else:
             val_text = str(val)
+        raw_rendered = f.get("renderedValue")
+        if raw_rendered is None:
+            rendered_text = ""
+        elif isinstance(raw_rendered, (list, dict)):
+            rendered_text = json.dumps(raw_rendered, ensure_ascii=False)
+        else:
+            rendered_text = str(raw_rendered)
         ev_target = f.get("evidenceTarget")
-        fields_out.append({
+        field_entry: dict[str, Any] = {
             "name": str(f.get("name") or ""),
             "visible": bool(f.get("visible", True)),
             "shown": bool(f.get("shown", False)),
@@ -203,14 +213,20 @@ def build_replay_item(run: dict[str, Any], resources: ResourceSet | None = None)
             "evidenceType": str(f.get("evidenceType") or "derive"),
             "whenMissing": str(f.get("whenMissing") or "placeholder"),
             "status": str(f.get("status") or "not_found"),
-            "value": val_text,
+            # 保留原生 value（list 字段维持数组结构供纯 JSON 导出），展示用文本独立存 displayValue
+            "value": _clip_json_val(val, _MAX_CELL_STR_LEN),
+            "displayValue": _clip_str(val_text, _MAX_CELL_STR_LEN),
+            "renderedValue": _clip_str(rendered_text, _MAX_CELL_STR_LEN),
             "evidence": f.get("evidence") if isinstance(f.get("evidence"), list) else [],
             "evidenceLabel": str(f.get("evidenceLabel") or ""),
             "evidenceTarget": dict(ev_target) if isinstance(ev_target, dict) else {"tab": "doc"},
             "reasoning": _clip_str(f.get("reasoning") or "", 800),
             "retried": bool(f.get("retried", False)),
             "validationFailed": bool(f.get("validationFailed", False)),
-        })
+        }
+        if isinstance(f.get("columns"), list):
+            field_entry["columns"] = _clip_json_val(f["columns"], _MAX_RAW_STR_LEN)
+        fields_out.append(field_entry)
 
     inputs_raw = run.get("inputs") if isinstance(run.get("inputs"), dict) else {}
     inputs = {str(k): "" if v is None else str(v) for k, v in inputs_raw.items()}
@@ -241,17 +257,17 @@ def build_replay_item(run: dict[str, Any], resources: ResourceSet | None = None)
         "batchNo": str(run.get("batchNo") or extra.get("batchNo") or ""),
         "status": str(run.get("status") or "FAILED"),
         "error": str(run.get("error") or "") if run.get("error") else "",
-        "durationMs": int(run.get("durationMs") or 0),
-        "rounds": int(run.get("rounds") or 0),
-        "foundCount": int(run.get("foundCount") or 0),
-        "totalCount": int(run.get("totalCount") or 0),
+        "durationMs": safe_int(run.get("durationMs"), 0),
+        "rounds": safe_int(run.get("rounds"), 0),
+        "foundCount": safe_int(run.get("foundCount"), 0),
+        "totalCount": safe_int(run.get("totalCount"), 0),
         "missingShown": [str(x) for x in (run.get("missingShown") or [])],
         "skillsLoaded": [str(x) for x in (run.get("skillsLoaded") or [])],
         "usage": {
-            "requests": int(usage.get("requests") or 0),
-            "toolCalls": int(usage.get("toolCalls") or 0),
-            "inputTokens": int(usage.get("inputTokens") or 0),
-            "outputTokens": int(usage.get("outputTokens") or 0),
+            "requests": safe_int(usage.get("requests"), 0),
+            "toolCalls": safe_int(usage.get("toolCalls"), 0),
+            "inputTokens": safe_int(usage.get("inputTokens"), 0),
+            "outputTokens": safe_int(usage.get("outputTokens"), 0),
         },
         "validationRounds": val_rounds,
         "inputs": inputs,
@@ -306,7 +322,8 @@ def render_runs_replay_html(
     }
     safe_title = html.escape(page_title, quote=True)
     safe_json = _safe_inline_json(payload)
-    return _HTML_TEMPLATE.replace("__PAGE_TITLE__", safe_title).replace("__REPLAY_PAYLOAD__", safe_json)
+    replacements = {"__PAGE_TITLE__": safe_title, "__REPLAY_PAYLOAD__": safe_json}
+    return re.sub(r"__(?:PAGE_TITLE|REPLAY_PAYLOAD)__", lambda m: replacements[m.group(0)], _HTML_TEMPLATE)
 
 
 # ============================================================================ 单页离线双视图 HTML 模板
@@ -1341,7 +1358,7 @@ button { font-family: inherit; }
       const dotCls = 'dot-' + String(r.status || 'failed').toLowerCase();
       return `<button type="button" class="sb-item ${idx === activeIdx ? 'active' : ''}" data-idx="${idx}">
         <div class="sb-item-top">
-          <span class="dot ${dotCls}"></span>
+          <span class="dot ${esc(dotCls)}"></span>
           <span class="sb-item-name" title="${esc(biz)}">${esc(biz)}</span>
           <span class="mono" style="font-size:11px;color:var(--gpt-ink-muted)">${fmtDur(r.durationMs)}</span>
         </div>
@@ -1728,6 +1745,7 @@ button { font-family: inherit; }
         : (f.visible ? '<span class="status-badge badge-muted">未触发分支</span>' : '<span class="status-badge badge-muted">控制字段</span>');
       const retryTag = f.retried ? '<span class="status-badge badge-amber">已重试</span>' : '';
       const failTag = f.validationFailed ? '<span class="status-badge badge-coral">校验降级</span>' : '';
+      const dispVal = (f.displayValue != null && f.displayValue !== '') ? f.displayValue : fmtJsonVal(f.value);
       return `<tr class="field-row ${isAct ? 'is-active' : ''}" data-fname="${esc(f.name)}">
         <td style="width:130px">
           <div style="font-weight:600">${esc(f.name)}</div>
@@ -1735,7 +1753,7 @@ button { font-family: inherit; }
           <div style="font-size:11px;color:var(--gpt-ink-muted);margin-top:2px">${esc(EV_TYPE_LABEL[f.evidenceType] || f.evidenceType)}</div>
         </td>
         <td style="width:74px">${stBadge}</td>
-        <td style="max-width:220px;word-break:break-word;white-space:pre-wrap">${esc(f.value || '—')}</td>
+        <td style="max-width:220px;word-break:break-word;white-space:pre-wrap">${esc(dispVal || '—')}</td>
         <td style="font-size:11.5px;color:var(--gpt-ink-secondary);word-break:break-word">
           ${f.evidenceLabel ? `<div style="color:var(--gpt-accent);margin-bottom:3px">${esc(f.evidenceLabel)}</div>` : ''}
           <div>${esc(f.reasoning || '—')}</div>
@@ -1929,8 +1947,8 @@ button { font-family: inherit; }
   }
 
   /* ==================== 视图 A：Chat 模拟运行状态机 ==================== */
-  async function sleepStep(ms, gen) {
-    if (speed === 0 || ms <= 0) return true;
+  async function sleepStep(ms, gen, instant) {
+    if (instant || speed === 0 || ms <= 0) return gen === playGen;
     let remaining = Math.round(ms / speed);
     const slice = 40;
     while (remaining > 0) {
@@ -1939,6 +1957,8 @@ button { font-family: inherit; }
         await new Promise((r) => setTimeout(r, 80));
         continue;
       }
+      const curSpeed = speed;
+      if (curSpeed === 0) return gen === playGen;
       const step = Math.min(slice, remaining);
       await new Promise((r) => setTimeout(r, step));
       remaining -= step;
@@ -1993,8 +2013,7 @@ button { font-family: inherit; }
     activeApiResultId = '';
 
     const run = runs[activeIdx];
-    const prevSpeed = speed;
-    if (instantOverride) speed = 0;
+    const instant = Boolean(instantOverride);
 
     renderSidebar();
     const inpEntries = Object.entries(run.inputs || {}).filter(([, v]) => String(v || '').trim());
@@ -2024,7 +2043,7 @@ button { font-family: inherit; }
     els.chatStream.appendChild(userRow);
     els.chatScroll.scrollTop = els.chatScroll.scrollHeight;
 
-    if (!(await sleepStep(360, gen))) { speed = prevSpeed; return; }
+    if (!(await sleepStep(360, gen, instant))) return;
 
     const aiRow = document.createElement('div');
     aiRow.className = 'msg-row';
@@ -2046,7 +2065,7 @@ button { font-family: inherit; }
       </div>${run.routing.reason ? `<div class="route-reason">${esc(run.routing.reason)}</div>` : ''}`;
       aiBody.appendChild(routeEl);
       els.chatScroll.scrollTop = els.chatScroll.scrollHeight;
-      if (!(await sleepStep(500, gen))) { speed = prevSpeed; return; }
+      if (!(await sleepStep(500, gen, instant))) return;
     }
 
     const steps = run.steps || [];
@@ -2126,7 +2145,7 @@ button { font-family: inherit; }
       const delta = Math.max(0, (st.atMs || 0) - prevAt);
       prevAt = st.atMs || prevAt;
       const delay = i === 0 ? 220 : Math.min(820, Math.max(200, Math.round(delta * 0.14)));
-      if (!(await sleepStep(delay, gen))) { speed = prevSpeed; return; }
+      if (!(await sleepStep(delay, gen, instant))) return;
 
       const rowEl = document.createElement('div');
       rowEl.className = 'step-row';
@@ -2158,7 +2177,7 @@ button { font-family: inherit; }
     traceCaption.textContent = `共 ${steps.length} 步 · ${run.rounds || 0} 轮推理 · 耗时 ${fmtDur(run.durationMs)}`;
     if (traceMode === 'raw') paintChatRaw();
 
-    if (!(await sleepStep(300, gen))) { speed = prevSpeed; return; }
+    if (!(await sleepStep(300, gen, instant))) return;
 
     if (run.report) {
       const badgeHtml = run.status === 'SUCCESS'
@@ -2204,7 +2223,7 @@ button { font-family: inherit; }
       card.querySelector('#btn-rmc-full').addEventListener('click', (e) => { e.stopPropagation(); openReportPreviewModal(run); });
       card.querySelector('#rmc-top').addEventListener('click', () => openReportPreviewModal(run));
 
-      if (speed === 0) {
+      if (instant || speed === 0) {
         paintFullReport();
       } else {
         els.dockStatus.textContent = '正在渲染最终申告报告…';
@@ -2212,7 +2231,7 @@ button { font-family: inherit; }
         const chunks = Math.min(28, Math.max(8, Math.ceil(fullText.length / 65)));
         const stepSize = Math.ceil(fullText.length / chunks);
         for (let pos = stepSize; pos < fullText.length; pos += stepSize) {
-          if (!(await sleepStep(70, gen))) { speed = prevSpeed; return; }
+          if (!(await sleepStep(70, gen, instant))) return;
           rmcBody.innerHTML = renderMarkdown(fullText.slice(0, pos)) + '<span class="cursor-blink"></span>';
           els.dockProgress.style.width = (76 + Math.round((pos / fullText.length) * 22)) + '%';
           els.chatScroll.scrollTop = els.chatScroll.scrollHeight;
@@ -2229,7 +2248,6 @@ button { font-family: inherit; }
     els.dockProgress.style.width = '100%';
     els.dockStatus.innerHTML = `<span class="dot dot-${esc(stLower)}"></span> 回放完成 · ${esc(STATUS_TEXT[run.status] || run.status)}（真实耗时 ${fmtDur(run.durationMs)}，共 ${run.rounds || 0} 轮）`;
     els.chatScroll.scrollTop = els.chatScroll.scrollHeight;
-    speed = prevSpeed;
   }
 
   /* 全局事件绑定 */

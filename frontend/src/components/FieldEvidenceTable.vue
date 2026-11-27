@@ -3,6 +3,7 @@
 import { computed } from 'vue'
 import { usePlatformStore } from '@/stores/platform'
 import { resolveEvidenceInspectorTab } from '@/utils/reportSegments'
+import { getListFieldRowCount, isEmptyFoundListField } from '@/utils/fieldFormat'
 import type { TemplateField } from '@/types/platform'
 import StatusTag from './StatusTag.vue'
 import SvgIcon from './SvgIcon.vue'
@@ -28,14 +29,12 @@ const foldPrefix = computed(() => `field_${store.activeRun?.runId ?? ''}_`)
 
 /** 判断列表字段是否为“已查证但无记录（0 行）”的合法空列表 #Created By AiCoding(codex) */
 function isEmptyFoundList(f: TemplateField): boolean {
-  if (f.type !== '列表' || f.runStatus !== 'found') return false
-  if (Array.isArray(f.runRows)) return f.runRows.length === 0
-  return (f.runValue || '').trim() === '[]'
+  return isEmptyFoundListField(f)
 }
 
 /** 列表字段匹配行数 #Created By AiCoding(codex) */
 function listRowCount(f: TemplateField): number {
-  return Array.isArray(f.runRows) ? f.runRows.length : 0
+  return Math.max(0, getListFieldRowCount(f))
 }
 
 /** 按状态筛选与关键字（字段名 / 值）过滤字段 */

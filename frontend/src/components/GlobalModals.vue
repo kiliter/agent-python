@@ -14,6 +14,7 @@ const API_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/
 const publishNote = ref('')
 const validating = ref(false)
 const publishing = ref(false)
+const submitting = ref(false)
 const emergencyReason = ref('')
 const rollbackMode = ref<'draft_only' | 'publish_now'>('draft_only')
 const rollbackReason = ref('')
@@ -108,6 +109,7 @@ async function revalidate() {
 watch(
   () => store.activeModal,
   modal => {
+    submitting.value = false
     if (modal === 'publish') {
       publishNote.value = ''
       void ensurePublishValidation()
@@ -176,6 +178,27 @@ function locateTab(tab: 'body' | 'history') {
   store.switchWorkbenchTab(tab)
 }
 
+/** 关闭弹窗并精准定位到正文报错行或关联字段 */
+function locateBodyIssue(issue: ValidationIssue) {
+  store.closeModal()
+  store.switchWorkbenchTab('body')
+  if (issue.line != null && issue.line >= 1) {
+    store.requestLocateLineInBody(issue.line)
+  } else if (issue.field) {
+    store.requestLocateFieldInBody(issue.field)
+  }
+}
+
+async function runWithSubmitLock(task: () => Promise<unknown>) {
+  if (submitting.value) return
+  submitting.value = true
+  try {
+    await task()
+  } finally {
+    submitting.value = false
+  }
+}
+
 /** 确认发布当前模板 */
 async function handlePublishConfirm() {
   if (publishBlocked.value) return
@@ -216,7 +239,8 @@ function checkNewTemplateId(raw: number | string): number | null {
 }
 
 /** 新建模板 */
-function handleCreateNewTemplate() {
+async function handleCreateNewTemplate() {
+  if (submitting.value) return
   const id = checkNewTemplateId(newTplId.value)
   if (id == null) return
   const name = newTplName.value.trim()
@@ -224,11 +248,12 @@ function handleCreateNewTemplate() {
     store.showToast('请填写模板名称', 'warning')
     return
   }
-  void store.createNewTemplate(id, name, newTplDescription.value.trim())
+  await runWithSubmitLock(() => store.createNewTemplate(id, name, newTplDescription.value.trim()))
 }
 
 /** 从已有模板复制 */
-function handleCopyTemplate() {
+async function handleCopyTemplate() {
+  if (submitting.value) return
   const srcId = Number(copySourceId.value)
   if (!srcId || !store.templates.some(t => t.id === srcId)) {
     store.showToast('请选择源模板', 'warning')
@@ -241,41 +266,57 @@ function handleCopyTemplate() {
     store.showToast('请填写新模板名称', 'warning')
     return
   }
-  void store.copyExistingTemplate(srcId, id, name)
+  await runWithSubmitLock(() => store.copyExistingTemplate(srcId, id, name))
 }
 
 /** 紧急切换线上版本（原因必填） */
-function handleEmergencySwitchConfirm() {
+async function handleEmergencySwitchConfirm() {
+  if (submitting.value) return
   const reason = emergencyReason.value.trim()
   if (!reason) {
     store.showToast('请填写紧急切换线上版本的原因', 'warning')
     return
   }
-  void store.emergencySwitchVersion(store.targetEmergencyRev, reason)
+  await runWithSubmitLock(() => store.emergencySwitchVersion(store.targetEmergencyRev, reason))
+}
+
+/** 技能发布确认 */
+async function handleSkillPublishConfirm() {
+  await runWithSubmitLock(() => store.publishCurrentSkill(skillPublishNote.value.trim()))
+}
+
+/** 下线模板确认 */
+async function handleOfflineTemplateConfirm() {
+  await runWithSubmitLock(() => store.confirmOfflineTemplate(offlineReason.value.trim()))
 }
 
 /** 回退模板版本（立即上线时说明必填） */
-function handleTemplateRollbackConfirm() {
+async function handleTemplateRollbackConfirm() {
+  if (submitting.value) return
   const reason = rollbackReason.value.trim()
   if (rollbackMode.value === 'publish_now' && !reason) {
     store.showToast('直接回退并立即上线时请填写回退说明', 'warning')
     return
   }
-  void store.rollbackTemplateToRev(store.targetRollbackInfo.rev, rollbackMode.value, reason)
+  await runWithSubmitLock(() =>
+    store.rollbackTemplateToRev(store.targetRollbackInfo.rev, rollbackMode.value, reason),
+  )
 }
 
 /** 保存为回归用例（名称必填） */
-function handleSaveCase() {
+async function handleSaveCase() {
+  if (submitting.value) return
   const name = saveCaseName.value.trim()
   if (!name) {
     store.showToast('请填写用例名称', 'warning')
     return
   }
-  void store.createRegressionCase(name)
+  await runWithSubmitLock(() => store.createRegressionCase(name))
 }
 
 /** 新建技能 */
-function handleCreateNewSkill() {
+async function handleCreateNewSkill() {
+  if (submitting.value) return
   const id = newSkillId.value.trim()
   const name = newSkillName.value.trim()
   if (!id || !name) {
@@ -290,17 +331,20 @@ function handleCreateNewSkill() {
     store.showToast(`技能标识 ${id} 已存在`, 'warning')
     return
   }
-  void store.createNewSkill(
-    id,
-    name,
-    newSkillDesc.value.trim(),
-    newSkillScope.value === 'chat' ? [] : [...newSkillApis.value],
-    newSkillScope.value,
+  await runWithSubmitLock(() =>
+    store.createNewSkill(
+      id,
+      name,
+      newSkillDesc.value.trim(),
+      newSkillScope.value === 'chat' ? [] : [...newSkillApis.value],
+      newSkillScope.value,
+    ),
   )
 }
 
 /** 新建 API */
-function handleCreateNewApi() {
+async function handleCreateNewApi() {
+  if (submitting.value) return
   const name = newApiName.value.trim()
   const title = newApiTitle.value.trim()
   if (!name || !title) {
@@ -321,13 +365,17 @@ function handleCreateNewApi() {
       store.showToast('请求地址 URL 须以 http:// 或 https:// 开头', 'warning')
       return
     }
-    void store.createNewApi(name, title, newApiDesc.value.trim(), 'http', {
-      method: newApiMethod.value,
-      url: rawUrl || undefined,
-    })
+    await runWithSubmitLock(() =>
+      store.createNewApi(name, title, newApiDesc.value.trim(), 'http', {
+        method: newApiMethod.value,
+        url: rawUrl || undefined,
+      }),
+    )
     return
   }
-  void store.createNewApi(name, title, newApiDesc.value.trim(), newApiConnector.value)
+  await runWithSubmitLock(() =>
+    store.createNewApi(name, title, newApiDesc.value.trim(), newApiConnector.value),
+  )
 }
 
 /** 冲突后重新加载服务端草稿（放弃本地修改） */
@@ -336,25 +384,27 @@ function handleConflictReload() {
   void store.loadTemplate(store.currentTemplateId)
 }
 
-/** 不保存直接离开工作台 */
+/** 不保存直接离开工作台（同步还原内存快照而非只清布尔值） */
 function handleLeaveWithoutSave() {
-  store.hasUnsavedChanges = false
+  store.discardUnsavedMemoryChanges('workbench')
   store.closeModal()
-  store.navigate('templates')
+  store.navigate('templates', true)
 }
 
 /** 保存草稿成功后再离开工作台 */
 async function handleSaveAndLeave() {
-  if (await store.handleSaveDraft()) {
-    store.closeModal()
-    store.navigate('templates')
-  }
+  await runWithSubmitLock(async () => {
+    if (await store.handleSaveDraft()) {
+      store.closeModal()
+      store.navigate('templates', true)
+    }
+  })
 }
 </script>
 
 <template>
   <!-- 1. 发布对话框 -->
-  <div v-if="store.activeModal === 'publish'" class="modal-backdrop" @click="store.closeModal()">
+  <div v-if="store.activeModal === 'publish'" class="modal-backdrop" @mousedown.self="!submitting && !publishing && store.closeModal()">
     <div class="modal-dialog" @click.stop>
       <div class="modal-header">
         <div class="modal-title">
@@ -409,7 +459,7 @@ async function handleSaveAndLeave() {
                   <button v-if="issue.field" class="btn-link danger" @click="locateField(issue.field)">
                     定位字段 ↗
                   </button>
-                  <button v-if="isBodyIssue(issue)" class="btn-link danger" @click="locateTab('body')">
+                  <button v-if="isBodyIssue(issue)" class="btn-link danger" @click="locateBodyIssue(issue)">
                     定位正文 ↗
                   </button>
                 </div>
@@ -435,7 +485,7 @@ async function handleSaveAndLeave() {
                   <button v-if="issue.field" class="btn-link" @click="locateField(issue.field)">
                     定位字段 ↗
                   </button>
-                  <button v-if="isBodyIssue(issue)" class="btn-link" @click="locateTab('body')">
+                  <button v-if="isBodyIssue(issue)" class="btn-link" @click="locateBodyIssue(issue)">
                     定位正文 ↗
                   </button>
                 </div>
@@ -489,7 +539,7 @@ async function handleSaveAndLeave() {
   </div>
 
   <!-- 2. 保存冲突提示弹窗 -->
-  <div v-else-if="store.activeModal === 'conflict'" class="modal-backdrop" @click="store.closeModal()">
+  <div v-else-if="store.activeModal === 'conflict'" class="modal-backdrop" @mousedown.self="!submitting && !publishing && store.closeModal()">
     <div class="modal-dialog" style="width: 520px" @click.stop>
       <div class="modal-header">
         <div class="modal-title" style="color: var(--danger)">
@@ -521,7 +571,7 @@ async function handleSaveAndLeave() {
   <div
     v-else-if="store.activeModal === 'emergency-switch'"
     class="modal-backdrop"
-    @click="store.closeModal()"
+    @mousedown.self="!submitting && !publishing && store.closeModal()"
   >
     <div class="modal-dialog" style="width: 540px" @click.stop>
       <div class="modal-header">
@@ -550,12 +600,13 @@ async function handleSaveAndLeave() {
         </div>
       </div>
       <div class="modal-footer">
-        <button class="btn" @click="store.closeModal()">取消</button>
+        <button class="btn" :disabled="submitting" @click="store.closeModal()">取消</button>
         <button
           class="btn btn-danger"
+          :disabled="submitting"
           @click="handleEmergencySwitchConfirm"
         >
-          确认切换
+          {{ submitting ? '切换中…' : '确认切换' }}
         </button>
       </div>
     </div>
@@ -565,7 +616,7 @@ async function handleSaveAndLeave() {
   <div
     v-else-if="store.activeModal === 'skill-publish'"
     class="modal-backdrop"
-    @click="store.closeModal()"
+    @mousedown.self="!submitting && !publishing && store.closeModal()"
   >
     <div class="modal-dialog" style="width: 520px" @click.stop>
       <div class="modal-header">
@@ -613,9 +664,9 @@ async function handleSaveAndLeave() {
         </div>
       </div>
       <div class="modal-footer">
-        <button class="btn" @click="store.closeModal()">取消</button>
-        <button class="btn btn-primary" @click="store.publishCurrentSkill(skillPublishNote.trim())">
-          确认发布
+        <button class="btn" :disabled="submitting" @click="store.closeModal()">取消</button>
+        <button class="btn btn-primary" :disabled="submitting" @click="handleSkillPublishConfirm">
+          {{ submitting ? '发布中…' : '确认发布' }}
         </button>
       </div>
     </div>
@@ -625,7 +676,7 @@ async function handleSaveAndLeave() {
   <div
     v-else-if="store.activeModal === 'new-template'"
     class="modal-backdrop"
-    @click="store.closeModal()"
+    @mousedown.self="!submitting && !publishing && store.closeModal()"
   >
     <div class="modal-dialog" style="width: 480px" @click.stop>
       <div class="modal-header">
@@ -664,8 +715,10 @@ async function handleSaveAndLeave() {
         </div>
       </div>
       <div class="modal-footer">
-        <button class="btn" @click="store.closeModal()">取消</button>
-        <button class="btn btn-primary" @click="handleCreateNewTemplate">创建并进入工作台</button>
+        <button class="btn" :disabled="submitting" @click="store.closeModal()">取消</button>
+        <button class="btn btn-primary" :disabled="submitting" @click="handleCreateNewTemplate">
+          {{ submitting ? '创建中…' : '创建并进入工作台' }}
+        </button>
       </div>
     </div>
   </div>
@@ -674,7 +727,7 @@ async function handleSaveAndLeave() {
   <div
     v-else-if="store.activeModal === 'copy-template'"
     class="modal-backdrop"
-    @click="store.closeModal()"
+    @mousedown.self="!submitting && !publishing && store.closeModal()"
   >
     <div class="modal-dialog" style="width: 480px" @click.stop>
       <div class="modal-header">
@@ -707,8 +760,10 @@ async function handleSaveAndLeave() {
         </div>
       </div>
       <div class="modal-footer">
-        <button class="btn" @click="store.closeModal()">取消</button>
-        <button class="btn btn-primary" @click="handleCopyTemplate">确定复制</button>
+        <button class="btn" :disabled="submitting" @click="store.closeModal()">取消</button>
+        <button class="btn btn-primary" :disabled="submitting" @click="handleCopyTemplate">
+          {{ submitting ? '复制中…' : '确定复制' }}
+        </button>
       </div>
     </div>
   </div>
@@ -717,7 +772,7 @@ async function handleSaveAndLeave() {
   <div
     v-else-if="store.activeModal === 'offline-template'"
     class="modal-backdrop"
-    @click="store.closeModal()"
+    @mousedown.self="!submitting && !publishing && store.closeModal()"
   >
     <div class="modal-dialog" style="width: 460px" @click.stop>
       <div class="modal-header">
@@ -742,8 +797,10 @@ async function handleSaveAndLeave() {
         </div>
       </div>
       <div class="modal-footer">
-        <button class="btn" @click="store.closeModal()">取消</button>
-        <button class="btn btn-danger" @click="store.confirmOfflineTemplate(offlineReason.trim())">确认下线</button>
+        <button class="btn" :disabled="submitting" @click="store.closeModal()">取消</button>
+        <button class="btn btn-danger" :disabled="submitting" @click="handleOfflineTemplateConfirm">
+          {{ submitting ? '下线中…' : '确认下线' }}
+        </button>
       </div>
     </div>
   </div>
@@ -752,7 +809,7 @@ async function handleSaveAndLeave() {
   <div
     v-else-if="store.activeModal === 'add-skill'"
     class="modal-backdrop"
-    @click="store.closeModal()"
+    @mousedown.self="!submitting && !publishing && store.closeModal()"
   >
     <div class="modal-dialog" style="width: 520px" @click.stop>
       <div class="modal-header">
@@ -841,7 +898,7 @@ async function handleSaveAndLeave() {
   <div
     v-else-if="store.activeModal === 'save-case'"
     class="modal-backdrop"
-    @click="store.closeModal()"
+    @mousedown.self="!submitting && !publishing && store.closeModal()"
   >
     <div class="modal-dialog" style="width: 500px" @click.stop>
       <div class="modal-header">
@@ -863,12 +920,13 @@ async function handleSaveAndLeave() {
         </div>
       </div>
       <div class="modal-footer">
-        <button class="btn" @click="store.closeModal()">取消</button>
+        <button class="btn" :disabled="submitting" @click="store.closeModal()">取消</button>
         <button
           class="btn btn-primary"
+          :disabled="submitting"
           @click="handleSaveCase"
         >
-          保存
+          {{ submitting ? '保存中…' : '保存' }}
         </button>
       </div>
     </div>
@@ -878,7 +936,7 @@ async function handleSaveAndLeave() {
   <div
     v-else-if="store.activeModal === 'unsaved-leave'"
     class="modal-backdrop"
-    @click="store.closeModal()"
+    @mousedown.self="!submitting && !publishing && store.closeModal()"
   >
     <div class="modal-dialog" style="width: 440px" @click.stop>
       <div class="modal-header">
@@ -891,15 +949,16 @@ async function handleSaveAndLeave() {
         <div style="font-size: 13px">当前草稿有未保存的修改，确定要离开页面吗？</div>
       </div>
       <div class="modal-footer">
-        <button class="btn" @click="store.closeModal()">留在当前页</button>
+        <button class="btn" :disabled="submitting" @click="store.closeModal()">留在当前页</button>
         <button
           class="btn btn-danger-ghost"
+          :disabled="submitting"
           @click="handleLeaveWithoutSave"
         >
           不保存离开
         </button>
-        <button class="btn btn-primary" @click="handleSaveAndLeave">
-          保存并离开
+        <button class="btn btn-primary" :disabled="submitting" @click="handleSaveAndLeave">
+          {{ submitting ? '保存中…' : '保存并离开' }}
         </button>
       </div>
     </div>
@@ -909,7 +968,7 @@ async function handleSaveAndLeave() {
   <div
     v-else-if="store.activeModal === 'new-skill'"
     class="modal-backdrop"
-    @click="store.closeModal()"
+    @mousedown.self="!submitting && !publishing && store.closeModal()"
   >
     <div class="modal-dialog" style="width: min(620px, 94vw)" @click.stop>
       <div class="modal-header">
@@ -1055,8 +1114,10 @@ async function handleSaveAndLeave() {
         </div>
       </div>
       <div class="modal-footer">
-        <button class="btn" @click="store.closeModal()">取消</button>
-        <button class="btn btn-primary" @click="handleCreateNewSkill">创建并编辑</button>
+        <button class="btn" :disabled="submitting" @click="store.closeModal()">取消</button>
+        <button class="btn btn-primary" :disabled="submitting" @click="handleCreateNewSkill">
+          {{ submitting ? '创建中…' : '创建并编辑' }}
+        </button>
       </div>
     </div>
   </div>
@@ -1065,7 +1126,7 @@ async function handleSaveAndLeave() {
   <div
     v-else-if="store.activeModal === 'new-api'"
     class="modal-backdrop"
-    @click="store.closeModal()"
+    @mousedown.self="!submitting && !publishing && store.closeModal()"
   >
     <div class="modal-dialog" style="width: min(660px, 94vw)" @click.stop>
       <div class="modal-header">
@@ -1208,8 +1269,10 @@ async function handleSaveAndLeave() {
         </div>
       </div>
       <div class="modal-footer">
-        <button class="btn" @click="store.closeModal()">取消</button>
-        <button class="btn btn-primary" @click="handleCreateNewApi">创建并编辑</button>
+        <button class="btn" :disabled="submitting" @click="store.closeModal()">取消</button>
+        <button class="btn btn-primary" :disabled="submitting" @click="handleCreateNewApi">
+          {{ submitting ? '创建中…' : '创建并编辑' }}
+        </button>
       </div>
     </div>
   </div>
@@ -1218,7 +1281,7 @@ async function handleSaveAndLeave() {
   <div
     v-else-if="store.activeModal === 'rollback-template'"
     class="modal-backdrop"
-    @click="store.closeModal()"
+    @mousedown.self="!submitting && !publishing && store.closeModal()"
   >
     <div class="modal-dialog" style="width: 560px" @click.stop>
       <div class="modal-header">
@@ -1309,12 +1372,19 @@ async function handleSaveAndLeave() {
         </div>
       </div>
       <div class="modal-footer">
-        <button class="btn" @click="store.closeModal()">取消</button>
+        <button class="btn" :disabled="submitting" @click="store.closeModal()">取消</button>
         <button
           :class="rollbackMode === 'publish_now' ? 'btn btn-danger' : 'btn btn-primary'"
+          :disabled="submitting"
           @click="handleTemplateRollbackConfirm"
         >
-          {{ rollbackMode === 'publish_now' ? `确认回退至 ${store.targetRollbackInfo.rev} 并立即上线` : `确认恢复 ${store.targetRollbackInfo.rev} 至草稿` }}
+          {{
+            submitting
+              ? '处理中…'
+              : rollbackMode === 'publish_now'
+                ? `确认回退至 ${store.targetRollbackInfo.rev} 并立即上线`
+                : `确认恢复 ${store.targetRollbackInfo.rev} 至草稿`
+          }}
         </button>
       </div>
     </div>

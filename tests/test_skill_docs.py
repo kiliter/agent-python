@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 from pathlib import Path
 
 import pytest
@@ -262,8 +261,7 @@ async def test_runtime_and_chat_lazy_load_skill_subdocs(container):
         }
         return ModelResponse(parts=[ToolCallPart("submit_report", report)])
 
-    container.runner._bundle = dataclasses.replace(container.runner._bundle, model=FunctionModel(_lazy_flow))
-    container.runner._agent_cache.clear()
+    container.runner.model = FunctionModel(_lazy_flow)
     detail = await container.runner.run(
         RunRequest(
             template_id=1001,

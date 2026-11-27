@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date
+import logging
 from typing import Any
 from urllib.parse import quote
 import weakref
@@ -14,6 +15,7 @@ import weakref
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
+from ..domain.sanitize import sanitize_sensitive_text
 from ..runtime.composite import CompositeItemRequest, CompositeRunner, CompositeRunRequest
 from ..runtime.runner import RunRequest
 from ..store.fsutil import fmt_time, now_iso
@@ -37,6 +39,8 @@ from .dto import release_dto, run_record
 from .missing_summary import build_missing_summary, generate_ai_missing_summary
 from .run_export import render_runs_replay_html
 from .run_views import detail_view, report_view
+
+log = logging.getLogger(__name__)
 
 auth_router = APIRouter(prefix="/api/v1")
 admin_router = APIRouter(prefix="/api/v1", tags=["发布版本 / 运行记录"], dependencies=[Depends(require_user)])
@@ -114,7 +118,14 @@ async def login(request: Request, response: Response, body: LoginBody) -> dict[s
     guard.success(username, client_ip=client_ip)
     user = User(username, rec.get("displayName") or username, rec.get("role") or "")
     token = request.app.state.tokens.issue(user)
-    settings = container(request).settings
+    c = container(request)
+    settings = c.settings
+    await asyncio.to_thread(
+        c.publisher.audit,
+        "login",
+        user.displayName,
+        {"username": user.username, "role": user.role, "ip": client_ip or ""},
+    )
     response.set_cookie(
         COOKIE_NAME,
         token,
@@ -131,7 +142,13 @@ async def login(request: Request, response: Response, body: LoginBody) -> dict[s
 def logout(request: Request, response: Response) -> dict[str, Any]:
     verified = verify_request_user(request)
     if verified is not None:
-        request.app.state.tokens.revoke(verified[1])
+        user, claims = verified
+        request.app.state.tokens.revoke(claims)
+        container(request).publisher.audit(
+            "logout",
+            user.displayName,
+            {"username": user.username},
+        )
     response.delete_cookie(COOKIE_NAME, path="/")
     return {"ok": True}
 
@@ -350,11 +367,17 @@ async def summarize_missing_fields_ai(
     if not SAFE_ID_RE.match(run_id):
         raise bad_request("运行记录编号格式不合法", "INVALID_RUN_ID")
     c = container(request)
-    run = c.runs.get(run_id)
-    if run is None:
+
+    def _load_and_build() -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        rec = c.runs.get(run_id)
+        if rec is None:
+            return None, None
+        return rec, build_missing_summary(rec)
+
+    run, det = await asyncio.to_thread(_load_and_build)
+    if run is None or det is None:
         raise not_found(f"运行记录 {run_id} 不存在")
 
-    det = build_missing_summary(run)
     if det["nonFoundCount"] == 0:
         raise bad_request("本次运行所有字段均已找到，无需生成未找到原因摘要", "NO_MISSING_FIELDS")
 
@@ -371,17 +394,20 @@ async def summarize_missing_fields_ai(
             model_name=c.settings.llm_model,
             operator=op,
         )
-    except Exception as exc:  # noqa: BLE001 - 对外屏蔽内部堆栈，仅返回可读错误
+    except Exception as exc:  # noqa: BLE001 - 对外屏蔽内部堆栈与敏感路径/密钥，仅返回可读错误
+        log.warning("生成 AI 缺失摘要失败 runId=%s：%s", run_id, type(exc).__name__)
+        safe_msg = sanitize_sensitive_text(f"{type(exc).__name__}: {exc}", fallback=type(exc).__name__)
         raise HTTPException(
             502,
-            detail={"code": "AI_SUMMARY_FAILED", "message": f"生成 AI 总结失败：{type(exc).__name__}"},
+            detail={"code": "AI_SUMMARY_FAILED", "message": f"生成 AI 总结失败：{safe_msg}"},
         ) from exc
 
-    updated = await asyncio.to_thread(c.runs.update_detail, run_id, {"missingSummaryAi": ai_obj})
-    if updated is not None:
-        return {**build_missing_summary(updated), "cached": False}
-    # 极端情况（如仅从 index 恢复的降级记录无 json 文件）：仍返回当次生成结果
-    return {**build_missing_summary({**run, "missingSummaryAi": ai_obj}), "cached": False}
+    def _persist_and_rebuild() -> dict[str, Any]:
+        updated_rec = c.runs.update_detail(run_id, {"missingSummaryAi": ai_obj})
+        target_rec = updated_rec if updated_rec is not None else {**run, "missingSummaryAi": ai_obj}
+        return {**build_missing_summary(target_rec), "cached": False}
+
+    return await asyncio.to_thread(_persist_and_rebuild)
 
 
 # ============================================================================ 系统运行可观测概览
@@ -617,9 +643,23 @@ async def polish_composite_report(request: Request, body: CompositePolishBody) -
     """对已拼装的复合工单报告执行大模型二次润色（标记未经证据校验，保留原版可溯源）。#Created By AiCoding(codex)"""
     if not body.markdown.strip():
         raise bad_request("待润色的报告正文不能为空", "EMPTY_MARKDOWN")
-    polished = await CompositeRunner(container(request).runner).polish_markdown(
-        body.markdown,
-        order=body.order,
-        instruction=body.instruction,
-    )
+    try:
+        polished = await CompositeRunner(container(request).runner).polish_markdown(
+            body.markdown,
+            order=body.order,
+            instruction=body.instruction,
+        )
+    except TimeoutError as exc:
+        log.warning("上游复合报告二次润色超时")
+        raise HTTPException(
+            504,
+            detail={"code": "POLISH_TIMEOUT", "message": "大模型二次润色超时，请稍后重试"},
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.exception("上游复合报告二次润色异常")
+        safe_msg = sanitize_sensitive_text(exc, fallback=type(exc).__name__)
+        raise HTTPException(
+            502,
+            detail={"code": "POLISH_FAILED", "message": f"大模型二次润色失败：{safe_msg}"},
+        ) from exc
     return {"markdown": polished, "verified": False}

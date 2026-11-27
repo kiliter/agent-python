@@ -15,7 +15,7 @@ from fastapi import APIRouter, Body, Depends, Query, Request
 from pydantic import BaseModel, Field
 
 from ..domain.jinja_env import BodySyntaxError, TrackedValue, body_variables, render_body
-from ..domain.resources import _RESERVED_FIELD_NAMES
+from ..domain.resources import BODY_FILE, Issue, _RESERVED_FIELD_NAMES
 from ..domain.template import FieldDef, Template, TemplateDef
 from ..runtime.render import field_render
 from ..runtime.runner import RunRequest
@@ -37,7 +37,17 @@ from .common import (
     sse_run,
     validation_result_with_drift,
 )
-from .dto import body_usage, dto_to_field, dto_to_input, field_to_dto, input_to_dto, ref_by_fields, template_item
+from .dto import (
+    body_usage,
+    dto_to_field,
+    dto_to_input,
+    field_to_dto,
+    input_to_dto,
+    non_empty_expected_count,
+    ref_by_fields,
+    serialize_expected_value,
+    template_item,
+)
 from .run_views import detail_view
 
 router = APIRouter(prefix="/api/v1", tags=["模板"], dependencies=[Depends(require_user)])
@@ -258,9 +268,25 @@ def cross_fields(request: Request, exclude: int | None = None) -> list[dict[str,
 
 @router.get("/templates/{tid}")
 def get_template(request: Request, tid: int, version: str = Query("working")) -> dict[str, Any]:
-    """version：working（草稿优先）/ draft / online / rN。"""
+    """version：working（草稿优先）/ draft / online / rN。草稿损坏且存在线上版本时回退线上定义避免工作台死锁。"""
     _check_tid(tid)
-    tpl = container(request).service.template_version(tid, version)
+    c = container(request)
+    ver = version or "working"
+    try:
+        tpl = c.service.template_version(tid, ver)
+    except InvalidResource as exc:
+        if ver != "working":
+            raise
+        online = c.service.template_online(tid)
+        if online is None:
+            raise
+        raw_body = c.drafts.read_file(tpl_ref(tid), BODY_FILE) if c.drafts.exists(tpl_ref(tid)) else None
+        fallback_tpl = Template(
+            definition=online.definition,
+            body=raw_body if raw_body is not None else online.body,
+            offline=online.offline,
+        )
+        return {**_detail(request, tid, fallback_tpl, ver), "draftError": str(exc)}
     if tpl is None:
         raise not_found(f"模板 {tid} 没有 {version} 版本")
     return _detail(request, tid, tpl, version)
@@ -329,6 +355,8 @@ def discard_draft(request: Request, tid: int) -> dict[str, Any]:
     _check_tid(tid)
     c = container(request)
     had_draft = c.service.discard(tpl_ref(tid))
+    if had_draft:
+        c.publisher.audit("discard-draft", operator(request), {"kind": "template", "key": str(tid)})
     tpl = c.service.template_online(tid)
     if tpl is None:
         if not had_draft:
@@ -341,13 +369,30 @@ def discard_draft(request: Request, tid: int) -> dict[str, Any]:
 
 @router.post("/templates/{tid}/validate")
 def validate(request: Request, tid: int, body: DraftBody | None = None) -> dict[str, Any]:
-    """校验工作副本；传入 body 时校验 body 描述的内容（不保存）。"""
+    """校验工作副本；传入 body 时校验 body 描述的内容（不保存）；草稿损坏时返回结构化校验问题而非 400 死锁。"""
+    _check_tid(tid)
     c = container(request)
-    tpl = _working(request, tid)
-    if body is not None and any(v is not None for v in body.model_dump(exclude={"revision"}).values()):
+    ref = tpl_ref(tid)
+    has_patch = body is not None and any(v is not None for v in body.model_dump(exclude={"revision"}).values())
+    try:
+        tpl = c.service.template_working(tid)
+    except InvalidResource as exc:
+        online = c.service.template_online(tid)
+        if has_patch and body is not None:
+            patched = _apply_draft_body_patch(request, tid, online, body)
+            issues = c.service.validate_template_working(tid, patched)
+        else:
+            issues = [Issue("error", "DRAFT_INVALID", str(exc), "template", str(tid))]
+        state = c.service.state(ref)
+        return validation_result_with_drift(issues, state, casesCount=c.cases.count(tid))
+    if tpl is None:
+        if not has_patch or body is None or not c.drafts.exists(ref):
+            raise not_found(f"模板 {tid} 不存在")
+        tpl = _apply_draft_body_patch(request, tid, None, body)
+    elif has_patch and body is not None:
         tpl = _apply_draft_body_patch(request, tid, tpl, body)
     issues = c.service.validate_template_working(tid, tpl)
-    state = c.service.state(tpl_ref(tid))
+    state = c.service.state(ref)
     return validation_result_with_drift(issues, state, casesCount=c.cases.count(tid))
 
 
@@ -485,6 +530,22 @@ def _parse_preview_fields(raw_fields: list[dict[str, Any]]) -> list[FieldDef]:
     return parsed
 
 
+def _build_preview_context(tpl: Template, values: dict[str, Any]) -> dict[str, Any]:
+    """统一通过 field_render 构造预览渲染上下文，消除与生产渲染重复的 whenMissing 逻辑。#Created By AiCoding(codex)"""
+    ctx: dict[str, Any] = {}
+    for f in tpl.definition.fields:
+        val = values.get(f.name)
+        if f.is_list:
+            rows = _preview_rows(val)
+            ans = {"status": "found", "value": rows} if isinstance(rows, list) else {"status": "not_found", "value": None}
+        elif val not in (None, ""):
+            ans = {"status": "found", "value": val}
+        else:
+            ans = {"status": "not_found", "value": None}
+        ctx[f.name] = field_render(f, ans).context_value
+    return ctx
+
+
 @router.post("/templates/{tid}/render-preview")
 def render_preview(request: Request, tid: int, body: PreviewBody) -> dict[str, Any]:
     """用给定字段值渲染正文，找不到的字段按 whenMissing 处理（优先采用请求体传入的内存 fields）。"""
@@ -498,24 +559,7 @@ def render_preview(request: Request, tid: int, body: PreviewBody) -> dict[str, A
         )
     else:
         preview_tpl = tpl
-    ctx: dict[str, Any] = {}
-    for f in preview_tpl.definition.fields:
-        val = body.values.get(f.name)
-        if f.is_list:
-            # #Created By AiCoding(codex) 列表字段与生产渲染走同一路径（找不到时为空列表）
-            ctx[f.name] = field_render(f, {"status": "found", "value": _preview_rows(val)}).context_value
-            continue
-        if val not in (None, ""):
-            ctx[f.name] = TrackedValue(str(val), f.name)
-        else:
-            missing = (
-                ""
-                if f.whenMissing == "empty"
-                else f.defaultValue
-                if f.whenMissing == "value"
-                else "{{" + f.name + "}}"
-            )
-            ctx[f.name] = TrackedValue(missing, f.name, missing=True)
+    ctx = _build_preview_context(preview_tpl, body.values)
     try:
         undefined = sorted(body_variables(text) - set(ctx))
         for name in undefined:
@@ -652,7 +696,7 @@ def save_field(request: Request, tid: int, name: str, body: dict[str, Any]) -> d
                 fields.append(new)
             else:
                 fields[orig_idx] = new
-            text = _rename_body_variable(text, original, new["name"])
+                text = _rename_body_variable(text, original, new["name"])
         else:
             if orig_idx is None:
                 fields.append(new)
@@ -699,9 +743,17 @@ def delete_field(
     tpl = _working(request, tid)
     if tpl.definition.field(name) is None:
         raise not_found(f"字段「{name}」不存在")
-    usage = body_usage(tpl.body).get(name, 0)
-    if usage and not force:
-        raise bad_request(f"字段「{name}」在正文中被引用 {usage} 次，请先移除引用", "FIELD_IN_USE", usage=usage)
+    if not force:
+        usage = body_usage(tpl.body).get(name, 0)
+        if usage:
+            raise bad_request(f"字段「{name}」在正文中被引用 {usage} 次，请先移除引用", "FIELD_IN_USE", usage=usage)
+        refs = ref_by_fields(tpl).get(name, [])
+        if refs:
+            raise bad_request(
+                f"字段「{name}」被其他字段说明引用（{'、'.join(refs)}），请先移除引用",
+                "FIELD_IN_USE",
+                refByFields=refs,
+            )
 
     def fn(data: dict[str, Any], text: str) -> str:
         data["fields"] = [f for f in data["fields"] if f["name"] != name]
@@ -788,14 +840,14 @@ def update_skills(request: Request, tid: int, body: SkillsBody) -> dict[str, Any
 
 # ============================================================================ 用例
 def _case_dto(case) -> dict[str, Any]:
-    total = len(case.expectedValues)
+    non_empty = non_empty_expected_count(case.expectedValues)
     return {
         **case.model_dump(),
         "mobile": case.inputs.get("手机号码", ""),
         "busiName": case.inputs.get("业务名称", ""),
         "createTime": case.inputs.get("创建时间", ""),
         "busiMonth": case.inputs.get("业务月份", ""),
-        "expectedCount": f"{sum(1 for v in case.expectedValues.values() if v)} / {total}" if total else "—",
+        "expectedCount": f"{non_empty} 项" if non_empty else "—",
         "updatedAt": fmt_time(case.updatedAt),
     }
 
@@ -817,6 +869,7 @@ def create_case(request: Request, tid: int, body: dict[str, Any]) -> dict[str, A
     if c.cases.get(tid, case_id) is not None:
         case_id = c.cases.next_id(tid)
     data = {**body, "id": case_id}
+    from_run_id: str | None = None
     if body.get("fromRunId"):
         from_run_id = str(body["fromRunId"]).strip()
         if not SAFE_ID_RE.match(from_run_id):
@@ -829,14 +882,8 @@ def create_case(request: Request, tid: int, body: dict[str, Any]) -> dict[str, A
         data.setdefault(
             "expectedValues",
             {
-                # #Created By AiCoding(codex) 列表字段的值转为 JSON 文本保存
-                str(f["name"]): (
-                    ""
-                    if f.get("value") is None
-                    else json.dumps(f["value"], ensure_ascii=False)
-                    if isinstance(f.get("value"), (list, dict))
-                    else str(f.get("value"))
-                )
+                # #Created By AiCoding(codex) 统一期望值序列化口径（与 adopt-baseline 完全对齐）
+                str(f["name"]): serialize_expected_value(f.get("value"))
                 for f in (run.get("fields") or [])
                 if isinstance(f, dict) and f.get("name") and (f.get("status") or f.get("runStatus")) == "found"
             },
@@ -846,6 +893,11 @@ def create_case(request: Request, tid: int, body: dict[str, Any]) -> dict[str, A
         case = c.cases.save(tid, CaseStore.from_payload(data))
     except ValueError as exc:
         raise bad_request(str(exc)) from exc
+    c.publisher.audit(
+        "case-create",
+        operator(request),
+        {"scope": str(tid), "caseId": case.id, **({"fromRunId": from_run_id} if from_run_id else {})},
+    )
     return _case_dto(case)
 
 
@@ -858,6 +910,7 @@ def update_case(request: Request, tid: int, case_id: str, body: dict[str, Any]) 
     if base is None:
         raise not_found(f"用例 {case_id} 不存在")
     case = c.cases.save(tid, CaseStore.from_payload({**body, "id": case_id}, base))
+    c.publisher.audit("case-update", operator(request), {"scope": str(tid), "caseId": case.id})
     return _case_dto(case)
 
 
@@ -865,8 +918,10 @@ def update_case(request: Request, tid: int, case_id: str, body: dict[str, Any]) 
 def delete_case(request: Request, tid: int, case_id: str) -> dict[str, Any]:
     _working(request, tid)
     _check_case_id(case_id)
-    if not container(request).cases.delete(tid, case_id):
+    c = container(request)
+    if not c.cases.delete(tid, case_id):
         raise not_found(f"用例 {case_id} 不存在")
+    c.publisher.audit("case-delete", operator(request), {"scope": str(tid), "caseId": case_id})
     return {"deletedId": case_id}
 
 

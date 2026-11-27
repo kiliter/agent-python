@@ -5,6 +5,8 @@
  * 由管理工作台 AgentTimeline.vue 与嵌入式聊天窗口 RawEventsTimeline.vue 共同复用。
  */
 
+import { formatDurationMs } from '@/utils/duration'
+
 export interface TimelineRouteCandidate {
   templateId: number
   templateName?: string
@@ -132,11 +134,9 @@ export function formatElapsedAt(ms: number | undefined): string {
   return `+${(Math.max(0, ms ?? 0) / 1000).toFixed(1)}s`
 }
 
-/** 自动路由耗时格式化（<1000ms 显示 ms，否则保留 1 位小数秒） */
+/** 自动路由耗时格式化（复用 utils/duration.ts 的 formatDurationMs） */
 export function formatRouteDuration(ms: number | undefined | null): string {
-  if (ms === undefined || ms === null || !Number.isFinite(ms) || ms < 0) return ''
-  if (ms < 1000) return `${Math.round(ms)}ms`
-  return `${(ms / 1000).toFixed(1)}s`
+  return formatDurationMs(ms, { emptyText: '', zeroText: '0ms' })
 }
 
 /** 路由置信度映射为样式语义级别 */

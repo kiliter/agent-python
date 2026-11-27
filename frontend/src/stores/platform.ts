@@ -6,9 +6,12 @@ import { defineStore } from 'pinia'
 import { computed, markRaw, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import YAML from 'yaml'
+import router from '@/router'
 import { ApiError, errorMessage, platformApi, type DryRunPayload } from '@/api/platformApi'
 import { copyToClipboard } from '@/utils/clipboard'
+import { buildFieldInsertSnippet, cloneAdoptedTemplateField } from '@/utils/fieldFormat'
 import { analyzeJinjaBody, renameJinjaBodyVariable } from '@/utils/jinjaBody'
+import { resolveEvidenceInspectorTab } from '@/utils/reportSegments'
 import type {
   ApiConnector,
   ApiEditMode,
@@ -162,6 +165,7 @@ export const usePlatformStore = defineStore('platform', () => {
   const reportViewMode = ref<'rendered' | 'markdown'>('rendered')
   const activeEvidenceKey = ref<string>('')
   const inspectorTab = ref<'api' | 'doc' | 'input'>('api')
+  const evidenceLocateSeq = ref<number>(0)
   const historyDiffTab = ref<'body' | 'fields' | 'inputs'>('fields')
   /** 版本对比的两个版本：draft / online / rN */
   const historyVerA = ref<string>('draft')
@@ -190,8 +194,33 @@ export const usePlatformStore = defineStore('platform', () => {
 
   const ideInsertRequest = ref<{ text: string; seq: number } | null>(null)
   const ideLocateRequest = ref<{ fieldName: string; seq: number } | null>(null)
+  const ideLocateLineRequest = ref<{ line: number; seq: number } | null>(null)
+  const inspectorFieldDirty = ref<boolean>(false)
+  const inspectorResetSeq = ref<number>(0)
   let ideInsertSeq = 0
   let ideLocateSeq = 0
+  let ideLocateLineSeq = 0
+
+  type InspectorFlushReason =
+    | 'save'
+    | 'dryrun'
+    | 'publish'
+    | 'validate'
+    | 'switch-field'
+    | 'switch-case'
+  type InspectorFlushHandler = (reason: InspectorFlushReason) => Promise<boolean> | boolean
+  let inspectorFlushHandler: InspectorFlushHandler | null = null
+
+  function registerInspectorFlushHandler(fn: InspectorFlushHandler | null) {
+    inspectorFlushHandler = fn
+  }
+
+  async function flushPendingInspectorEdits(
+    reason: InspectorFlushReason = 'save',
+  ): Promise<boolean> {
+    if (!inspectorFlushHandler) return true
+    return await inspectorFlushHandler(reason)
+  }
 
   const templateSearch = ref<string>('')
   const templateStatusFilter = ref<string>('ALL')
@@ -205,6 +234,7 @@ export const usePlatformStore = defineStore('platform', () => {
   const runDateTo = ref<string>('')
 
   // ======================================================================== 4. 登录与用户
+  const authBootstrapping = ref<boolean>(true)
   const loginError = ref<boolean>(false)
   const loginErrorText = ref<string>('')
   const loginUser = ref<string>('')
@@ -257,6 +287,8 @@ export const usePlatformStore = defineStore('platform', () => {
   const apiDirty = ref<boolean>(false)
 
   const runs = ref<RunRecord[]>([])
+  const runsHasMore = ref<boolean>(false)
+  const runsPageOffset = ref<number>(0)
   const runDetail = ref<RunDetail | null>(null)
 
   const regressionCases = ref<GlobalRegressionCase[]>([])
@@ -293,6 +325,8 @@ export const usePlatformStore = defineStore('platform', () => {
   /** 每次发布/回退/下线/恢复/切换版本后递增，驱动各工作台立即刷新线上版本与 Diff */
   const onlineBaselineSeq = ref<number>(0)
   let loadTemplateReqSeq = 0
+  let validateTemplateReqSeq = 0
+  let casesReqSeq = 0
   let debugRunReqSeq = 0
   let debugRunsListReqSeq = 0
   let templateRevsReqSeq = 0
@@ -301,11 +335,24 @@ export const usePlatformStore = defineStore('platform', () => {
   let loadApiReqSeq = 0
   let runsReqSeq = 0
   let runDetailReqSeq = 0
+  let regCasesReqSeq = 0
+  let regBatchReqSeq = 0
+  let regRunToken = 0
   let releaseDiffReqSeq = 0
   let settingsReqSeq = 0
   let dryRunReqSeq = 0
   let dryRunAbortController: AbortController | null = null
   let isConfirmingDirtyLeave = false
+
+  interface SavedTemplateMemorySnapshot {
+    name: string
+    description: string
+    bodyText: string
+    skills: string[]
+    inputs: TemplateInput[]
+    fields: TemplateField[]
+  }
+  let savedTemplateSnapshotObj: SavedTemplateMemorySnapshot | null = null
 
   /** 标记大体积只读运行明细节点为非响应式，避免深层 Proxy 遍历海量接口行与长单据文本 */
   function stabilizeRunDetail(detail: RunDetail): RunDetail {
@@ -486,7 +533,10 @@ export const usePlatformStore = defineStore('platform', () => {
 
   function resetSessionState() {
     abortActiveDryRun()
+    abortBatchRegression()
     loadTemplateReqSeq += 1
+    validateTemplateReqSeq += 1
+    casesReqSeq += 1
     debugRunReqSeq += 1
     debugRunsListReqSeq += 1
     templateRevsReqSeq += 1
@@ -495,6 +545,9 @@ export const usePlatformStore = defineStore('platform', () => {
     loadApiReqSeq += 1
     runsReqSeq += 1
     runDetailReqSeq += 1
+    regCasesReqSeq += 1
+    regBatchReqSeq += 1
+    regRunToken += 1
     releaseDiffReqSeq += 1
     settingsReqSeq += 1
 
@@ -505,6 +558,11 @@ export const usePlatformStore = defineStore('platform', () => {
     activeDrawer.value = null
     conflictInfo.value = null
     currentUser.value = null
+    expandedTexts.value = {}
+    evidenceLocateSeq.value = 0
+    inspectorFieldDirty.value = false
+    inspectorResetSeq.value += 1
+    savedTemplateSnapshotObj = null
 
     templates.value = []
     currentTemplateId.value = 0
@@ -521,6 +579,7 @@ export const usePlatformStore = defineStore('platform', () => {
     templateRevisions.value = []
     templateDiff.value = null
     bodyText.value = ''
+    templateSavedSnapshot.value = ''
     hasUnsavedChanges.value = false
     checkedFieldIndices.value = []
     templateDebugRuns.value = []
@@ -538,6 +597,10 @@ export const usePlatformStore = defineStore('platform', () => {
     skillsSubView.value = 'list'
     skillMarkdown.value = ''
     skillOnlineMarkdown.value = ''
+    skillSavedMarkdown.value = ''
+    skillDocs.value = {}
+    skillOnlineDocs.value = {}
+    skillSavedDocs.value = {}
     skillDraftRevision.value = null
     skillRevisions.value = []
     skillDirty.value = false
@@ -547,18 +610,27 @@ export const usePlatformStore = defineStore('platform', () => {
     apisSubView.value = 'list'
     apiYamlText.value = ''
     apiOnlineYaml.value = ''
+    apiSavedYaml.value = ''
     apiDraftRevision.value = null
     apiRevisions.value = []
     apiTestResult.value = null
     apiDirty.value = false
 
     runs.value = []
+    runsHasMore.value = false
+    runsPageOffset.value = 0
     selectedRunId.value = ''
     runsSubView.value = 'list'
     runDetail.value = null
     runDateFrom.value = ''
     runDateTo.value = ''
+
+    regressionCases.value = []
+    regressionBatches.value = []
+    activeRegressionBatch.value = null
+    regressionResults.value = []
     regressionDiffs.value = []
+    regressionProgress.value = { done: 0, total: 0, currentLabel: '' }
     regSelectedTemplates.value = []
 
     globalReleases.value = []
@@ -568,6 +640,10 @@ export const usePlatformStore = defineStore('platform', () => {
     sysPromptText.value = ''
     sysPromptStatus.value = 'PUBLISHED'
     sysPromptRevisions.value = []
+    compositeTemplateState.value = null
+    compositeTemplateText.value = ''
+    compositeTemplateStatus.value = 'PUBLISHED'
+    compositeTemplateRevisions.value = []
     modelInfo.value = null
     settingsSubView.value = 'workspace'
     settingsTargetPromptRev.value = ''
@@ -578,8 +654,10 @@ export const usePlatformStore = defineStore('platform', () => {
 
   async function bootstrap() {
     applyThemeToDOM()
+    authBootstrapping.value = true
     if (!unauthorizedBound) {
       window.addEventListener('auth:unauthorized', () => {
+        if (authBootstrapping.value) return
         if (currentNav.value !== 'login') {
           resetSessionState()
           currentNav.value = 'login'
@@ -594,9 +672,11 @@ export const usePlatformStore = defineStore('platform', () => {
     } catch {
       currentUser.value = null
       currentNav.value = 'login'
+      authBootstrapping.value = false
       return
     }
     if (currentNav.value === 'login') currentNav.value = 'templates'
+    authBootstrapping.value = false
     await loadAll()
   }
 
@@ -634,8 +714,10 @@ export const usePlatformStore = defineStore('platform', () => {
     if (list) globalReleases.value = list
   }
 
-  async function refreshRuns() {
+  async function refreshRuns(opts?: { offset?: number; limit?: number }) {
     const seq = ++runsReqSeq
+    const limit = opts?.limit ?? 500
+    const offset = Math.max(0, opts?.offset ?? 0)
     const parsedTplId =
       runTemplateFilter.value && runTemplateFilter.value !== 'ALL'
         ? Number.parseInt(runTemplateFilter.value, 10)
@@ -643,7 +725,7 @@ export const usePlatformStore = defineStore('platform', () => {
     const templateId = Number.isFinite(parsedTplId) && parsedTplId > 0 ? parsedTplId : undefined
     const status = runStatusFilter.value && runStatusFilter.value !== 'ALL' ? runStatusFilter.value : undefined
     const mobile = runMobileSearch.value.trim() || undefined
-    const q = runBatchSearch.value.trim() || undefined
+    const batchNo = runBatchSearch.value.trim() || undefined
     const list = await guard(
       () =>
         platformApi.fetchRuns({
@@ -652,13 +734,18 @@ export const usePlatformStore = defineStore('platform', () => {
           mobile,
           templateId,
           status,
-          q,
-          limit: 500,
+          batchNo,
+          limit,
+          offset: offset > 0 ? offset : undefined,
         }),
       '加载运行记录失败',
     )
     if (seq !== runsReqSeq) return
-    if (list) runs.value = list
+    if (list) {
+      runs.value = list
+      runsPageOffset.value = offset
+      runsHasMore.value = list.length === limit
+    }
   }
 
   /** 进入某个页面时需要加载的数据 */
@@ -692,7 +779,7 @@ export const usePlatformStore = defineStore('platform', () => {
     skillId?: string
     apiName?: string
   }): string | null {
-    if (currentNav.value === 'workbench' && hasUnsavedChanges.value) {
+    if (currentNav.value === 'workbench' && (hasUnsavedChanges.value || inspectorFieldDirty.value)) {
       if (target?.nav !== 'workbench' || (target.tplId !== undefined && target.tplId !== currentTemplateId.value)) {
         return '当前模板草稿有未保存的修改'
       }
@@ -724,14 +811,36 @@ export const usePlatformStore = defineStore('platform', () => {
     return null
   }
 
-  function clearCurrentDirtyState() {
-    if (currentNav.value === 'workbench') {
+  /** 放弃指定编辑页的内存态修改，同步还原到最近一次加载或保存的干净快照 */
+  function discardUnsavedMemoryChanges(navKey: NavKey = currentNav.value) {
+    if (navKey === 'workbench') {
+      if (savedTemplateSnapshotObj) {
+        templateName.value = savedTemplateSnapshotObj.name
+        templateDescription.value = savedTemplateSnapshotObj.description
+        bodyText.value = savedTemplateSnapshotObj.bodyText
+        templateSkills.value = [...savedTemplateSnapshotObj.skills]
+        templateInputs.value = JSON.parse(JSON.stringify(savedTemplateSnapshotObj.inputs)) as TemplateInput[]
+        templateFields.value = JSON.parse(JSON.stringify(savedTemplateSnapshotObj.fields)) as TemplateField[]
+        ideCreatingFieldDraft.value = ''
+        if (ideSelectedFieldIdx.value < 0 || ideSelectedFieldIdx.value >= templateFields.value.length) {
+          ideSelectedFieldIdx.value = templateFields.value.length > 0 ? 0 : -1
+        }
+        if (ideSelectedInputIdx.value >= templateInputs.value.length) {
+          ideSelectedInputIdx.value = Math.max(0, templateInputs.value.length - 1)
+        }
+        recomputeFieldBodyUsage()
+      }
+      inspectorFieldDirty.value = false
+      inspectorResetSeq.value += 1
       hasUnsavedChanges.value = false
-    } else if (currentNav.value === 'skills') {
+    } else if (navKey === 'skills') {
+      skillMarkdown.value = skillSavedMarkdown.value
+      skillDocs.value = { ...skillSavedDocs.value }
       skillDirty.value = false
-    } else if (currentNav.value === 'apis') {
+    } else if (navKey === 'apis') {
+      apiYamlText.value = apiSavedYaml.value
       apiDirty.value = false
-    } else if (currentNav.value === 'settings') {
+    } else if (navKey === 'settings') {
       if (sysPromptState.value) {
         sysPromptText.value = sysPromptState.value.sysPromptText
       }
@@ -740,6 +849,10 @@ export const usePlatformStore = defineStore('platform', () => {
       }
       runtimeFormDirty.value = false
     }
+  }
+
+  function clearCurrentDirtyState() {
+    discardUnsavedMemoryChanges(currentNav.value)
   }
 
   async function confirmBeforeLeave(target?: {
@@ -761,12 +874,8 @@ export const usePlatformStore = defineStore('platform', () => {
         '留在当前页',
       )
       if (!ok) {
-        if (
-          typeof window !== 'undefined' &&
-          window.location.hash.startsWith('#/') &&
-          window.location.hash !== `#/${stayNav}`
-        ) {
-          window.location.hash = `#/${stayNav}`
+        if (router.currentRoute.value.name !== stayNav) {
+          void router.replace({ name: stayNav }).catch(() => {})
         }
         return false
       }
@@ -938,6 +1047,15 @@ export const usePlatformStore = defineStore('platform', () => {
 
   function snapshotSavedTemplate() {
     templateSavedSnapshot.value = serializeTemplateState()
+    savedTemplateSnapshotObj = {
+      name: templateName.value,
+      description: templateDescription.value,
+      bodyText: bodyText.value,
+      skills: [...templateSkills.value],
+      inputs: JSON.parse(JSON.stringify(templateInputs.value)) as TemplateInput[],
+      fields: JSON.parse(JSON.stringify(templateFields.value)) as TemplateField[],
+    }
+    inspectorFieldDirty.value = false
     hasUnsavedChanges.value = false
   }
 
@@ -999,8 +1117,22 @@ export const usePlatformStore = defineStore('platform', () => {
     ideLocateRequest.value = { fieldName, seq: ideLocateSeq }
   }
 
-  /** IDE 选中字段联动：匹配到已有字段则选中编辑，未定义变量则预填新建字段草稿 */
-  function selectIdeFieldByName(fieldName: string) {
+  /** IDE 编辑器联动指令：定位到模板正文指定行号 */
+  function requestLocateLineInBody(line: number) {
+    if (!line || line < 1) return
+    if (ideCenterMode.value !== 'code' && ideCenterMode.value !== 'split') {
+      ideCenterMode.value = 'code'
+    }
+    ideLocateLineSeq += 1
+    ideLocateLineRequest.value = { line, seq: ideLocateLineSeq }
+  }
+
+  /** IDE 选中字段联动：先刷写右侧待应用字段编辑，再切换目标字段或预填新建草稿 */
+  async function selectIdeFieldByName(fieldName: string) {
+    if (inspectorFieldDirty.value) {
+      const flushed = await flushPendingInspectorEdits('switch-field')
+      if (!flushed) return
+    }
     const idx = templateFields.value.findIndex(f => f.name === fieldName)
     ideLeftSection.value = 'fields'
     if (idx >= 0) {
@@ -1148,7 +1280,7 @@ export const usePlatformStore = defineStore('platform', () => {
 
   function handleBackFromWorkbench() {
     ideDebugMaximized.value = false
-    if (hasUnsavedChanges.value) openModal('unsaved-leave')
+    if (hasUnsavedChanges.value || inspectorFieldDirty.value) openModal('unsaved-leave')
     else navigate('templates')
   }
 
@@ -1234,6 +1366,7 @@ export const usePlatformStore = defineStore('platform', () => {
   async function handleSaveDraft(): Promise<boolean> {
     const id = currentTemplateId.value
     if (!id) return false
+    if (!(await flushPendingInspectorEdits('save'))) return false
     if (!templateName.value.trim()) {
       showToast('模板名称不能为空', 'warning')
       return false
@@ -1265,10 +1398,12 @@ export const usePlatformStore = defineStore('platform', () => {
     const res = await guard(() => platformApi.discardTemplateDraft(id), '放弃草稿失败')
     if (!res) return
     closeModal()
+    inspectorFieldDirty.value = false
     hasUnsavedChanges.value = false
     await Promise.all([refreshTemplates(), refreshSkills(), refreshReleases()])
     if (res.deleted) {
       templateDetail.value = null
+      savedTemplateSnapshotObj = null
       onlineBaselineSeq.value += 1
       navigate('templates', true)
       showToast('草稿已删除（该模板从未发布）')
@@ -1278,16 +1413,21 @@ export const usePlatformStore = defineStore('platform', () => {
     showToast(`已放弃草稿，恢复为线上 ${res.rev} 内容`)
   }
 
-  /** 校验当前编辑内容（包括未保存的修改） */
+  /** 校验当前编辑内容（包括未保存的修改；带请求序号守卫防跨模板串写） */
   async function validateCurrentTemplate() {
     const id = currentTemplateId.value
+    if (!id) return undefined
+    if (!(await flushPendingInspectorEdits('validate'))) return undefined
+    const seq = ++validateTemplateReqSeq
     const res = await guard(() => platformApi.validateTemplate(id, draftPayload()), '校验失败')
+    if (seq !== validateTemplateReqSeq || currentTemplateId.value !== id) return undefined
     if (res) templateValidation.value = res
     return res
   }
 
   async function publishCurrentTemplate(note: string) {
     const id = currentTemplateId.value
+    if (!(await flushPendingInspectorEdits('publish'))) return
     if (hasUnsavedChanges.value) {
       const saved = await handleSaveDraft()
       if (!saved) return
@@ -1449,10 +1589,12 @@ export const usePlatformStore = defineStore('platform', () => {
     showToast(`已删除字段「${f.name}」，保存草稿后生效`)
   }
 
-  /** 拖拽排序后调用：from → to */
+  /** 拖拽排序后调用：from → to（含上下界防护） */
   function moveTemplateField(from: number, to: number) {
-    if (from === to || from < 0 || to < 0) return
+    const len = templateFields.value.length
+    if (from === to || from < 0 || to < 0 || from >= len || to >= len) return
     const [item] = templateFields.value.splice(from, 1)
+    if (!item) return
     templateFields.value.splice(to, 0, item)
     if (ideSelectedFieldIdx.value === from) {
       ideSelectedFieldIdx.value = to
@@ -1615,25 +1757,72 @@ export const usePlatformStore = defineStore('platform', () => {
     if (isFromOther) {
       const other = otherTemplateFields.value.find(f => f.name === fieldName)
       if (other && !templateFields.value.some(f => f.name === fieldName)) {
-        const { fromTemplate: _from, ...rest } = other
-        templateFields.value.push({ ...rest, bodyUsageCount: 0, refByFields: [] })
+        templateFields.value.push(cloneAdoptedTemplateField(other))
       }
     }
-    bodyText.value = `${bodyText.value}\n{{${fieldName}}}`
+    const targetField = templateFields.value.find(f => f.name === fieldName)
+    const snippet = targetField
+      ? buildFieldInsertSnippet(targetField)
+      : `{{${fieldName}}}`
+    bodyText.value = `${bodyText.value}\n${snippet}`
     markCurrentTemplateDirty()
-    showToast(`已插入字段变量 {{${fieldName}}}`)
+    showToast(
+      targetField?.type === '列表'
+        ? `已插入列表字段循环 {% for item in ${fieldName} %}`
+        : `已插入字段变量 {{${fieldName}}}`,
+    )
   }
 
   // ---------------- 入参与技能（本地修改）
   function addTemplateInput() {
-    templateInputs.value.push({ key: `新入参_${templateInputs.value.length + 1}`, required: false,
-      preset: '无格式限制', pattern: '', desc: '', sample: '' })
+    let seq = templateInputs.value.length + 1
+    while (templateInputs.value.some(i => i.key === `新入参_${seq}`)) {
+      seq += 1
+    }
+    templateInputs.value.push({
+      key: `新入参_${seq}`,
+      required: false,
+      preset: '无格式限制',
+      pattern: '',
+      desc: '',
+      sample: '',
+    })
     ideSelectedInputIdx.value = templateInputs.value.length - 1
     markCurrentTemplateDirty()
   }
 
+  function renameTemplateInputKey(idx: number, rawNextKey: string): boolean {
+    const inp = templateInputs.value[idx]
+    if (!inp) return false
+    const nextKey = rawNextKey.trim()
+    if (!nextKey) {
+      showToast('入参键名不能为空', 'warning')
+      return false
+    }
+    const oldKey = inp.key
+    if (nextKey === oldKey) return true
+    if (templateInputs.value.some((other, i) => i !== idx && other.key === nextKey)) {
+      showToast(`入参键名「${nextKey}」已存在`, 'warning')
+      return false
+    }
+    inp.key = nextKey
+    if (dryRunPreset.value.inputs && oldKey in dryRunPreset.value.inputs) {
+      const prevVal = dryRunPreset.value.inputs[oldKey] ?? ''
+      if (!(nextKey in dryRunPreset.value.inputs) || !dryRunPreset.value.inputs[nextKey]) {
+        dryRunPreset.value.inputs[nextKey] = prevVal
+      }
+      delete dryRunPreset.value.inputs[oldKey]
+    }
+    markCurrentTemplateDirty()
+    return true
+  }
+
   function removeTemplateInput(idx: number) {
+    const removed = templateInputs.value[idx]
     templateInputs.value.splice(idx, 1)
+    if (removed?.key && dryRunPreset.value.inputs && removed.key in dryRunPreset.value.inputs) {
+      delete dryRunPreset.value.inputs[removed.key]
+    }
     if (ideSelectedInputIdx.value >= templateInputs.value.length) {
       ideSelectedInputIdx.value = Math.max(0, templateInputs.value.length - 1)
     }
@@ -1660,7 +1849,11 @@ export const usePlatformStore = defineStore('platform', () => {
 
   // ---------------- 用例
   async function refreshCases() {
-    const cases = await guard(() => platformApi.fetchTemplateCases(currentTemplateId.value), '加载用例失败')
+    const id = currentTemplateId.value
+    if (!id) return
+    const seq = ++casesReqSeq
+    const cases = await guard(() => platformApi.fetchTemplateCases(id), '加载用例失败')
+    if (seq !== casesReqSeq || currentTemplateId.value !== id) return
     if (cases) templateCases.value = cases
   }
 
@@ -1741,9 +1934,12 @@ export const usePlatformStore = defineStore('platform', () => {
   /** 执行试运行（SSE 实时推送过程事件），返回完整结果 */
   async function executeDryRun(payload: DryRunPayload): Promise<RunDetail | undefined> {
     const id = currentTemplateId.value
-    if (payload.targetVersion === 'draft' && hasUnsavedChanges.value) {
-      const saved = await handleSaveDraft()
-      if (!saved) return undefined
+    if (payload.targetVersion === 'draft') {
+      if (!(await flushPendingInspectorEdits('dryrun'))) return undefined
+      if (hasUnsavedChanges.value) {
+        const saved = await handleSaveDraft()
+        if (!saved) return undefined
+      }
     }
     abortActiveDryRun()
     const controller = new AbortController()
@@ -1798,17 +1994,17 @@ export const usePlatformStore = defineStore('platform', () => {
 
   function selectEvidence(fieldName: string, tab?: 'api' | 'doc' | 'input') {
     activeEvidenceKey.value = fieldName
-    if (tab) {
-      inspectorTab.value = tab
-    } else {
-      const runField = activeRun.value?.fields.find(f => f.name === fieldName)
-      if (runField?.evidenceTarget?.tab) {
-        inspectorTab.value = runField.evidenceTarget.tab
-      }
+    const runField = activeRun.value?.fields.find(f => f.name === fieldName)
+    const resolvedTab = tab ?? resolveEvidenceInspectorTab(runField)
+    if (resolvedTab) {
+      inspectorTab.value = resolvedTab
     }
     if (currentNav.value === 'workbench') {
       ideRightMode.value = 'evidence'
+    } else if (currentNav.value === 'runs' && runDetailTab.value === 'timeline') {
+      runDetailTab.value = 'fields'
     }
+    evidenceLocateSeq.value += 1
   }
 
   function setInspectorTab(tabKey: 'api' | 'doc' | 'input') {
@@ -1820,10 +2016,11 @@ export const usePlatformStore = defineStore('platform', () => {
   }
 
   // ======================================================================== 12. 技能库
-  async function loadSkill(skillId: string) {
+  async function loadSkill(skillId: string): Promise<boolean> {
+    if (!skillId) return false
     const reqSeq = ++loadSkillReqSeq
     const detail = await guard(() => platformApi.getSkill(skillId), `加载技能 ${skillId} 失败`)
-    if (!detail || reqSeq !== loadSkillReqSeq) return
+    if (!detail || reqSeq !== loadSkillReqSeq) return false
     const hasOnline = detail.item.status !== 'DRAFT'
       && detail.draft?.action !== 'create'
       && Boolean(detail.item.onlineRev && detail.item.onlineRev !== '—')
@@ -1831,7 +2028,7 @@ export const usePlatformStore = defineStore('platform', () => {
       !hasOnline ? Promise.resolve(null) : detail.draft ? guard(() => platformApi.getSkill(skillId, 'online')) : Promise.resolve(detail),
       guard(() => platformApi.fetchSkillRevisions(skillId)),
     ])
-    if (reqSeq !== loadSkillReqSeq) return
+    if (reqSeq !== loadSkillReqSeq) return false
     skillMarkdown.value = detail.markdown
     skillSavedMarkdown.value = detail.markdown
     skillDocs.value = { ...(detail.docs || {}) }
@@ -1843,6 +2040,7 @@ export const usePlatformStore = defineStore('platform', () => {
     skillOnlineMarkdown.value = online?.markdown || ''
     skillOnlineDocs.value = { ...(online?.docs || {}) }
     skillRevisions.value = revs || []
+    return true
   }
 
   function recordsEqual(a: Record<string, string>, b: Record<string, string>): boolean {
@@ -1858,15 +2056,28 @@ export const usePlatformStore = defineStore('platform', () => {
       || !recordsEqual(skillDocs.value, skillSavedDocs.value)
   }
 
-  async function openSkillDetail(skillId: string, skipLeaveGuard = false) {
+  async function openSkillDetail(skillId: string, skipLeaveGuard = false): Promise<boolean> {
+    if (!skillId) return false
     if (!skipLeaveGuard && !(await confirmBeforeLeave({ nav: 'skills', skillId }))) {
-      return
+      return false
     }
+    const prevSkillId = selectedSkillId.value
+    const prevNav = currentNav.value
+    const prevSubView = skillsSubView.value
+    const prevTab = skillDetailTab.value
     selectedSkillId.value = skillId
     currentNav.value = 'skills'
     skillsSubView.value = 'detail'
     skillDetailTab.value = 'editor'
-    await loadSkill(skillId)
+    const loaded = await loadSkill(skillId)
+    if (!loaded && selectedSkillId.value === skillId) {
+      selectedSkillId.value = prevSkillId
+      currentNav.value = prevNav
+      skillsSubView.value = prevSubView
+      skillDetailTab.value = prevTab
+      return false
+    }
+    return loaded
   }
 
   function openSkillByName(ref: string) {
@@ -2274,11 +2485,14 @@ export const usePlatformStore = defineStore('platform', () => {
   }
 
   async function refreshRegressionCases(params?: { scope?: string; q?: string }) {
+    const seq = ++regCasesReqSeq
     const list = await guard(() => platformApi.fetchRegressionCases(params), '加载回归用例列表失败')
+    if (seq !== regCasesReqSeq) return
     if (list) regressionCases.value = list
   }
 
   async function loadRegressionBatch(batchId: string) {
+    const seq = ++regBatchReqSeq
     if (!batchId) {
       activeRegressionBatch.value = null
       regressionResults.value = []
@@ -2286,10 +2500,16 @@ export const usePlatformStore = defineStore('platform', () => {
       return
     }
     const detail = await guard(() => platformApi.getRegressionBatch(batchId), '加载回归批次详情失败')
-    if (!detail) return
-    activeRegressionBatch.value = detail
-    regressionResults.value = detail.results || []
-    regressionDiffs.value = detail.diffs || []
+    if (!detail || seq !== regBatchReqSeq) return
+    const rawResults = (detail.results || []).map(r => markRaw(r))
+    const rawDiffs = (detail.diffs || []).map(d => markRaw(d))
+    activeRegressionBatch.value = {
+      ...detail,
+      results: rawResults,
+      diffs: rawDiffs,
+    }
+    regressionResults.value = rawResults
+    regressionDiffs.value = rawDiffs
   }
 
   async function loadRegressionWorkspace() {
@@ -2366,6 +2586,7 @@ export const usePlatformStore = defineStore('platform', () => {
       regressionAbortController.abort()
       regressionAbortController = null
     }
+    regRunToken += 1
     isRegressionRunning.value = false
   }
 
@@ -2381,16 +2602,35 @@ export const usePlatformStore = defineStore('platform', () => {
 
     const ctrl = new AbortController()
     regressionAbortController = ctrl
+    const runToken = ++regRunToken
+    let currentBatchId = ''
+    // 失效任何挂起的历史批次拉取，防止旧请求覆盖正在流式执行的当前批次
+    regBatchReqSeq += 1
     isRegressionRunning.value = true
     regressionProgress.value = { done: 0, total: payload.cases.length, currentLabel: '正在初始化回归批次…' }
     regressionResults.value = []
     regressionDiffs.value = []
+
+    const isCurrentStream = (incomingBatchId?: string) => {
+      if (runToken !== regRunToken || ctrl.signal.aborted) return false
+      if (currentBatchId && incomingBatchId && incomingBatchId !== currentBatchId) return false
+      if (
+        currentBatchId &&
+        activeRegressionBatch.value &&
+        activeRegressionBatch.value.batchId !== currentBatchId
+      ) {
+        return false
+      }
+      return true
+    }
 
     try {
       const batch = await platformApi.streamRegressionRun(
         payload,
         {
           onStart: meta => {
+            if (runToken !== regRunToken || ctrl.signal.aborted) return
+            currentBatchId = meta.batchId
             activeRegressionBatch.value = {
               batchId: meta.batchId,
               mode: meta.mode,
@@ -2419,22 +2659,26 @@ export const usePlatformStore = defineStore('platform', () => {
             }
           },
           onCaseStart: info => {
+            if (!isCurrentStream(info.batchId)) return
             regressionProgress.value = {
               ...regressionProgress.value,
               currentLabel: `正在核查 [${info.index}/${info.total}] ${info.caseId} ${info.caseName}`,
             }
           },
           onCaseDone: ev => {
+            if (!isCurrentStream(ev.batchId)) return
             regressionProgress.value = {
               done: ev.done,
               total: ev.total,
               currentLabel: `已完成 ${ev.done}/${ev.total} · ${ev.result.caseId}（${ev.result.verdict}）`,
             }
-            regressionResults.value = [...regressionResults.value, ev.result]
+            const rawRes = markRaw(ev.result)
+            regressionResults.value = [...regressionResults.value, rawRes]
             if (ev.diffs.length) {
-              regressionDiffs.value = [...regressionDiffs.value, ...ev.diffs]
+              const rawDiffItems = ev.diffs.map(d => markRaw(d))
+              regressionDiffs.value = [...regressionDiffs.value, ...rawDiffItems]
             }
-            if (activeRegressionBatch.value) {
+            if (activeRegressionBatch.value && activeRegressionBatch.value.batchId === currentBatchId) {
               const cur = activeRegressionBatch.value
               const rs = regressionResults.value
               const passed = rs.filter(r => r.verdict === '通过').length
@@ -2455,13 +2699,24 @@ export const usePlatformStore = defineStore('platform', () => {
             }
           },
           onDone: finalBatch => {
-            activeRegressionBatch.value = finalBatch
-            regressionResults.value = finalBatch.results || []
-            regressionDiffs.value = finalBatch.diffs || []
+            if (runToken !== regRunToken || ctrl.signal.aborted) return
+            if (currentBatchId && finalBatch.batchId && finalBatch.batchId !== currentBatchId) return
+            const rawResults = (finalBatch.results || []).map(r => markRaw(r))
+            const rawDiffs = (finalBatch.diffs || []).map(d => markRaw(d))
+            if (!activeRegressionBatch.value || activeRegressionBatch.value.batchId === finalBatch.batchId) {
+              activeRegressionBatch.value = {
+                ...finalBatch,
+                results: rawResults,
+                diffs: rawDiffs,
+              }
+              regressionResults.value = rawResults
+              regressionDiffs.value = rawDiffs
+            }
           },
         },
         ctrl.signal,
       )
+      if (runToken !== regRunToken) return undefined
       await Promise.all([
         refreshRegressionCases(),
         refreshTemplates(),
@@ -2487,7 +2742,9 @@ export const usePlatformStore = defineStore('platform', () => {
       if (regressionAbortController === ctrl) {
         regressionAbortController = null
       }
-      isRegressionRunning.value = false
+      if (runToken === regRunToken) {
+        isRegressionRunning.value = false
+      }
     }
   }
 
@@ -2842,16 +3099,16 @@ export const usePlatformStore = defineStore('platform', () => {
     runsSubView, selectedRunId, runDetailTab, settingsSubView, settingsTargetPromptRev,
     activeDrawer, editingRegDiffIndex,
     activeModal, targetOfflineTemplateId, copySourceTemplateId, targetEmergencyRev, rollbackTargetRev, targetRollbackInfo, conflictInfo,
-    reportViewMode, activeEvidenceKey, inspectorTab, historyDiffTab, historyVerA, historyVerB, expandedTexts,
+    reportViewMode, activeEvidenceKey, inspectorTab, evidenceLocateSeq, historyDiffTab, historyVerA, historyVerB, expandedTexts,
     // 模板专业 IDE 工作台状态
     ideLeftSection, ideLeftCollapsed, ideCenterMode, ideRightMode,
     ideSelectedFieldIdx, ideCreatingFieldDraft, ideSelectedInputIdx, ideSelectedSkillId, ideSelectedCaseIdx,
     ideSelectedRev, ideDiffTargetRev, ideDebugTab, ideDebugCollapsed, ideDebugMaximized, ideCursorPos,
-    ideInsertRequest, ideLocateRequest, onlineBaselineSeq,
+    ideInsertRequest, ideLocateRequest, ideLocateLineRequest, inspectorFieldDirty, inspectorResetSeq, onlineBaselineSeq,
     templateSearch, templateStatusFilter, skillSearch, apiSearch,
     runMobileSearch, runTemplateFilter, runStatusFilter, runBatchSearch, runDateFrom, runDateTo,
     // 登录
-    loginError, loginErrorText, loginUser, loginPass, loginShowPass, loginRemember,
+    authBootstrapping, loginError, loginErrorText, loginUser, loginPass, loginShowPass, loginRemember,
     currentUser, currentUserLabel, currentUserRole,
     // 数据
     templates, templateDetail, templateFields, otherTemplateFields, templateInputs, templateSkills, templateName, templateDescription, templateCases,
@@ -2859,7 +3116,7 @@ export const usePlatformStore = defineStore('platform', () => {
     checkedFieldIndices, undefinedBodyFields,
     skills, skillMarkdown, skillOnlineMarkdown, skillDocs, skillOnlineDocs, skillDraftRevision, skillRevisions, skillDirty,
     apis, apiYamlText, apiOnlineYaml, apiDraftRevision, apiRevisions, apiTestResult, apiDirty,
-    runs, runDetail,
+    runs, runsHasMore, runsPageOffset, runDetail,
     regressionCases, regressionBatches, activeRegressionBatch, regressionResults, regressionDiffs,
     isRegressionRunning, regressionProgress, regSelectedTemplates, regCompareMode, regScopeFilter,
     globalReleases, releaseDiff,
@@ -2875,7 +3132,7 @@ export const usePlatformStore = defineStore('platform', () => {
     showToast, showError, confirmDialog, copyText, applyThemeToDOM, setTheme, toggleTheme, toggleSidebar, toggleFocusFullscreen, openModal,
     closeModal, closeDrawer, toggleFold,
     // 会话
-    bootstrap, loadAll, navigate, handleLoginSubmit, logout,
+    bootstrap, loadAll, navigate, handleLoginSubmit, logout, discardUnsavedMemoryChanges,
     refreshTemplates, refreshSkills, refreshApis, refreshReleases, refreshRuns,
     // 模板与 IDE 联动
     createNewTemplate, copyExistingTemplate, confirmOfflineTemplate, restoreOfflineTemplate, deleteTemplate,
@@ -2885,9 +3142,10 @@ export const usePlatformStore = defineStore('platform', () => {
     jumpToFieldDrawer, newFieldTemplate, upsertTemplateField, deleteTemplateField, moveTemplateField,
     toggleFieldCheck, toggleAllFieldChecks, batchUpdateEvidenceType, insertFieldIntoBody,
     saveTemplateFieldRemote, deleteTemplateFieldRemote, batchUpdateEvidenceRemote, reorderTemplateFieldsRemote, updateTemplateSkillsRemote,
-    requestInsertIntoBody, requestLocateFieldInBody, selectIdeFieldByName,
+    requestInsertIntoBody, requestLocateFieldInBody, requestLocateLineInBody, selectIdeFieldByName,
+    registerInspectorFlushHandler, flushPendingInspectorEdits,
     refreshTemplateDebugRuns, selectTemplateDebugRun, clearSelectedDebugRun,
-    addTemplateInput, removeTemplateInput, updateTemplateSkills, removeTemplateSkill,
+    addTemplateInput, renameTemplateInputKey, removeTemplateInput, updateTemplateSkills, removeTemplateSkill,
     refreshCases, saveTemplateCase, createRegressionCase, createCaseFromRun, deleteTemplateCase,
     loadCaseIntoDryRun, loadRunIntoDryRun, executeDryRun, abortActiveDryRun, selectEvidence, setInspectorTab, setReportViewMode,
     // Skill

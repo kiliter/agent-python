@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import json
 
 import pytest
@@ -220,8 +219,7 @@ async def test_runner_auto_injects_global_skill_and_chat_loads_chat_scope(contai
         }
         return ModelResponse(parts=[ToolCallPart("submit_report", report)])
 
-    container.runner._bundle = dataclasses.replace(container.runner._bundle, model=FunctionModel(_global_flow))
-    container.runner._agent_cache.clear()
+    container.runner.model = FunctionModel(_global_flow)
     run_detail = await container.runner.run(
         RunRequest(
             template_id=1001,

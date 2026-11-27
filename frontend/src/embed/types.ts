@@ -1,6 +1,8 @@
 // #Created By AiCoding(codex)
 // 嵌入式聊天选模板窗口 · 前端数据结构（严格对应 docs/chat-embed-api.md §3 及模板预览/原样记录扩展配置）
 
+import { formatDurationMs } from '@/utils/duration'
+
 export type RunStatus = 'RUNNING' | 'SUCCESS' | 'PARTIAL' | 'FAILED' | 'CANCELLED' | 'INTERRUPTED'
 
 export type ChatTarget = 'online' | 'draft'
@@ -303,13 +305,7 @@ export const STATUS_TAG_TYPE: Record<RunStatus, 'primary' | 'success' | 'warning
 /** 可确认的运行状态（其余状态后端返回 NOT_CONFIRMABLE） */
 export const CONFIRMABLE_STATUS: RunStatus[] = ['SUCCESS', 'PARTIAL']
 
-/** 毫秒耗时转可读文本 */
+/** 毫秒耗时转可读文本（复用全局零依赖 duration 工具） */
 export function formatDuration(ms: number | null | undefined): string {
-  const v = Number(ms || 0)
-  if (v <= 0) return ''
-  if (v < 1000) return `${v}ms`
-  if (v < 60_000) return `${(v / 1000).toFixed(1)}s`
-  const m = Math.floor(v / 60_000)
-  const s = Math.round((v % 60_000) / 1000)
-  return `${m}分${s}秒`
+  return formatDurationMs(ms, { emptyText: '', zeroText: '' })
 }

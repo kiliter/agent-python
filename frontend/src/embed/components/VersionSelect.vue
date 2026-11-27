@@ -183,7 +183,7 @@ onBeforeUnmount(() => {
   border: 1px solid var(--gpt-border);
   background: #ffffff;
   box-shadow: var(--gpt-shadow-popover);
-  z-index: 1260;
+  z-index: var(--z-dropdown, 1260);
   display: flex;
   flex-direction: column;
   gap: 2px;

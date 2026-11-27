@@ -19,9 +19,7 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import inspect
-import json
 from typing import Any
 
 import httpx
@@ -36,6 +34,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
+from conftest import parse_sse as _parse_sse
 from report_agent.api.auth import UserStore
 from report_agent.chat.steps import StepMapper, events_to_steps
 from report_agent.container import Container, build_container
@@ -68,29 +67,8 @@ def _route_and_report_model(route_fn: Any, report_fn: Any = scripted) -> Functio
 
 
 def _swap_model(container: Container, model: FunctionModel) -> None:
-    """热替换测试容器内 AgentRunner 的桩模型并清空缓存（含路由器缓存）。"""
-    container.runner._bundle = dataclasses.replace(container.runner._bundle, model=model)
-    container.runner._agent_cache.clear()
-    container.runner._router._cached_agent = None
-
-
-def _parse_sse(raw: str) -> list[dict[str, Any]]:
-    """解析标准 SSE 响应帧，忽略注释心跳行。"""
-    events: list[dict[str, Any]] = []
-    for block in raw.split("\n\n"):
-        lines = [ln for ln in block.splitlines() if ln.strip() and not ln.startswith(":")]
-        if not lines:
-            continue
-        evt_name = "message"
-        data_lines: list[str] = []
-        for ln in lines:
-            if ln.startswith("event:"):
-                evt_name = ln[6:].strip()
-            elif ln.startswith("data:"):
-                data_lines.append(ln[5:].lstrip())
-        if data_lines:
-            events.append({"event": evt_name, "data": json.loads("\n".join(data_lines))})
-    return events
+    """通过公开属性热替换测试容器内 AgentRunner 的桩模型（自动递增快照序号使 Agent 与路由器缓存失效）。"""
+    container.runner.model = model
 
 
 def _responses_count(messages: list[ModelMessage]) -> int:
@@ -1099,12 +1077,8 @@ async def test_router_agent_cache_invalidates_on_reload_model(settings, case_c01
             )
             assert r1.status_code == 200 and r1.json()["routing"]["confidence"] == "高"
 
-            # 模拟热更新切换 _bundle（seq 递增，不手动清空 _router._cached_agent）
-            c.runner._bundle = dataclasses.replace(
-                c.runner._bundle,
-                model=_route_and_report_model(_router_v2, scripted),
-                seq=c.runner._bundle.seq + 1,
-            )
+            # 模拟通过公开属性热更新切换模型，验证 TemplateRouter 缓存随序号递增自动失效重建
+            c.runner.model = _route_and_report_model(_router_v2, scripted)
             r2 = await cl.post(
                 "/api/v1/reports",
                 json={"params": case_c01["inputs"], "document": case_c01["documentText"]},

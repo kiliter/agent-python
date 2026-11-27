@@ -24,22 +24,25 @@ from pydantic import ValidationError
 
 from .api_contract import ApiContract, parse_api_yaml
 from .composite import COMPOSITE_TEMPLATE_FILE, validate_composite_template
-from .jinja_env import BodySyntaxError, parse_body
+from .jinja_env import RESERVED_FIELD_NAMES, BodySyntaxError, parse_body
 from .skill import (
+    ROUTER_SKILL_ID,
     SKILL_FILE,
     Skill,
     SkillParseError,
     extract_md_doc_links,
     load_skill_dir,
+    strip_code_blocks,
     validate_skill_docs_map,
 )
-from .template import (BODY_FILE, OFFLINE_FILE, TEMPLATE_FILE, Template, TemplateDef, body_variable_lines,
+from .template import (BODY_FILE, OFFLINE_FILE, TEMPLATE_FILE, FieldDef, Template, TemplateDef, body_variable_lines,
                        parse_template_yaml, safe_regex_compile)
 
 log = logging.getLogger(__name__)
 
+_RESERVED_FIELD_NAMES = RESERVED_FIELD_NAMES
+
 SYSTEM_PROMPT_FILE = "system-prompt.md"
-ROUTER_SKILL_ID = "template-router"
 _ROUTER_TPL_HEADING_RE = re.compile(r"^###\s+(\d{1,10})\b", re.MULTILINE)
 ResourceKind = Literal["template", "skill", "api", "system-prompt", "composite-template"]
 
@@ -70,6 +73,7 @@ class ResourceSet:
     skills: dict[str, Skill] = field(default_factory=dict)
     apis: dict[str, ApiContract] = field(default_factory=dict)
     load_issues: list[Issue] = field(default_factory=list)
+    has_composite_template: bool = False
 
     def skill_by_ref(self, ref: str) -> Skill | None:
         """按标识或中文名称查找 Skill。"""
@@ -158,6 +162,7 @@ def load_resource_dir(root: Path) -> ResourceSet:
         else:
             try:
                 rs.composite_template = ct.read_text(encoding="utf-8")
+                rs.has_composite_template = True
             except (ValueError, OSError) as exc:
                 rs.load_issues.append(Issue("error", "LOAD_FAILED", f"汇总大模板无法读取：{exc}", "composite-template", "composite-template"))
 
@@ -230,11 +235,9 @@ def read_offline_marker(path: Path) -> dict | None:
 # ---------------------------------------------------------------------------
 
 _BAD_NAME_RE = re.compile(r"[{}%\s]")
-_RESERVED_FIELD_NAMES = {
-    "true", "false", "none", "True", "False", "None",
-    "if", "elif", "else", "endif", "for", "endfor", "in", "and", "or", "not", "is",
-    "set", "block", "endblock", "macro", "endmacro", "call", "filter", "import", "from", "include", "extends",
-}
+_ROW_PRESERVING_FILTERS = frozenset({
+    "reverse", "sort", "select", "reject", "selectattr", "rejectattr", "unique", "list", "default", "d",
+})
 
 
 def _ast_variable_lines(tree: nodes.Template | None) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
@@ -254,7 +257,7 @@ def _ast_variable_lines(tree: nodes.Template | None) -> tuple[dict[str, list[int
 
 def _bad_identifier(name: str) -> bool:
     """字段名/列名是否不合法（与字段名规则一致）。#Created By AiCoding(codex)"""
-    return (not name.isidentifier() or name.startswith("_") or name in _RESERVED_FIELD_NAMES
+    return (not name.isidentifier() or name.startswith("_") or name in RESERVED_FIELD_NAMES
             or bool(_BAD_NAME_RE.search(name)))
 
 
@@ -263,6 +266,30 @@ def _for_target_binds(target: nodes.Node, var: str) -> bool:
     if isinstance(target, nodes.Name):
         return target.name == var
     return any(n.name == var for n in target.find_all(nodes.Name))
+
+
+def _store_names(target: nodes.Node) -> set[str]:
+    return {n.name for n in target.find_all(nodes.Name) if n.ctx == "store"}
+
+
+def _unwrap_for_iter(expr: nodes.Node) -> tuple[nodes.Name | None, bool]:
+    """解包 for 循环迭代表达式外层的 Filter / Getitem，返回 (底层 Name 节点, 是否仍保持列表行元素语义)。#Created By AiCoding(codex)"""
+    cur = expr
+    preserves_rows = True
+    while True:
+        if isinstance(cur, nodes.Filter) and cur.node is not None:
+            if cur.name not in _ROW_PRESERVING_FILTERS:
+                preserves_rows = False
+            cur = cur.node
+        elif isinstance(cur, nodes.Getitem):
+            if not isinstance(cur.arg, nodes.Slice):
+                preserves_rows = False
+            cur = cur.node
+        else:
+            break
+    if isinstance(cur, nodes.Name) and cur.ctx == "load":
+        return cur, preserves_rows
+    return None, False
 
 
 def _loop_attr_uses(items: Iterable[nodes.Node], var: str) -> list[tuple[str, int | None]]:
@@ -289,24 +316,96 @@ def _loop_attr_uses(items: Iterable[nodes.Node], var: str) -> list[tuple[str, in
     return out
 
 
+def _scalar_getattr_issues(
+    tree: nodes.Template,
+    by_name: dict[str, FieldDef],
+) -> list[tuple[str, str, str, str, int | None]]:
+    """检查正文中对非列表（标量）顶层字段误用点号属性访问（放行合法 str 方法调用如 .split()）。#Created By AiCoding(codex)"""
+    out: list[tuple[str, str, str, str, int | None]] = []
+    seen: set[tuple[str, str, int | None]] = set()
+    called_getattrs: set[int] = {
+        id(call.node) for call in tree.find_all(nodes.Call) if isinstance(call.node, nodes.Getattr)
+    }
+
+    def _walk_expr(node: nodes.Node, local_vars: frozenset[str]) -> None:
+        if isinstance(node, nodes.Getattr) and isinstance(node.node, nodes.Name) and node.node.ctx == "load":
+            fname = node.node.name
+            if fname not in local_vars and fname in by_name:
+                fd = by_name[fname]
+                if not fd.is_list:
+                    is_valid_str_method = (
+                        id(node) in called_getattrs
+                        and not node.attr.startswith("_")
+                        and hasattr(str, node.attr)
+                    )
+                    if not is_valid_str_method:
+                        key = (fname, node.attr, node.lineno)
+                        if key not in seen:
+                            seen.add(key)
+                            out.append((
+                                "error",
+                                "SCALAR_ATTR_ACCESS",
+                                f"正文第 {node.lineno} 行对非列表字段「{fname}」使用了属性访问「{fname}.{node.attr}」，"
+                                "标量字段不支持点号取子属性",
+                                fname,
+                                node.lineno,
+                            ))
+        for child in node.iter_child_nodes():
+            _walk_expr(child, local_vars)
+
+    def _walk_stmts(stmts: Iterable[nodes.Node], local_vars: frozenset[str]) -> None:
+        cur_locals = set(local_vars)
+        for stmt in stmts:
+            if isinstance(stmt, nodes.For):
+                _walk_expr(stmt.iter, frozenset(cur_locals))
+                loop_locals = frozenset(cur_locals | _store_names(stmt.target) | {"loop"})
+                if stmt.test is not None:
+                    _walk_expr(stmt.test, loop_locals)
+                _walk_stmts(stmt.body, loop_locals)
+                if stmt.else_:
+                    _walk_stmts(stmt.else_, frozenset(cur_locals))
+            elif isinstance(stmt, nodes.If):
+                _walk_expr(stmt.test, frozenset(cur_locals))
+                _walk_stmts(stmt.body, frozenset(cur_locals))
+                for elif_node in stmt.elif_:
+                    _walk_expr(elif_node.test, frozenset(cur_locals))
+                    _walk_stmts(elif_node.body, frozenset(cur_locals))
+                if stmt.else_:
+                    _walk_stmts(stmt.else_, frozenset(cur_locals))
+            elif isinstance(stmt, nodes.Assign):
+                _walk_expr(stmt.node, frozenset(cur_locals))
+                cur_locals.update(_store_names(stmt.target))
+            elif isinstance(stmt, nodes.AssignBlock):
+                _walk_stmts(stmt.body, frozenset(cur_locals))
+                cur_locals.update(_store_names(stmt.target))
+            else:
+                _walk_expr(stmt, frozenset(cur_locals))
+
+    _walk_stmts(tree.body, frozenset())
+    return out
+
+
 def _list_field_issues(tree: nodes.Template, d: TemplateDef) -> list[tuple[str, str, str, str, int | None]]:
-    """校验正文中列表字段的用法，返回 (level, code, message, field, line)。
+    """校验正文中列表与标量字段的结构用法，返回 (level, code, message, field, line)。
 
     #Created By AiCoding(codex)
-    - {% for x in 字段 %} 只能遍历 type=list 的字段；
+    - {% for x in 字段 %}（含切片/过滤器包装）只能遍历 type=list 的字段；
     - 循环体内 x.列名 / x["列名"] 必须是该列表字段声明过的列；
+    - 标量字段误用点号属性访问（非合法 str 方法调用）报错；
     - 直接输出整个列表（{{列表字段}}）给出警告。
     """
     by_name = {f.name: f for f in d.fields}
     out: list[tuple[str, str, str, str, int | None]] = []
     for loop in tree.find_all(nodes.For):
-        it = loop.iter
-        if not isinstance(it, nodes.Name) or it.ctx != "load" or it.name not in by_name:
+        it_name, preserves_rows = _unwrap_for_iter(loop.iter)
+        if it_name is None or it_name.name not in by_name:
             continue
-        fd = by_name[it.name]
+        fd = by_name[it_name.name]
         if not fd.is_list:
             out.append(("error", "FOR_NON_LIST", f"正文第 {loop.lineno} 行用 for 循环遍历了非列表字段「{fd.name}」，"
                         "只有 type=list 的字段可以遍历", fd.name, loop.lineno))
+            continue
+        if not preserves_rows:
             continue
         if not isinstance(loop.target, nodes.Name):
             out.append(("error", "LIST_LOOP_TARGET", f"正文第 {loop.lineno} 行遍历列表字段「{fd.name}」时，"
@@ -325,6 +424,7 @@ def _list_field_issues(tree: nodes.Template, d: TemplateDef) -> list[tuple[str, 
             out.append(("error", "LIST_COLUMN_UNDEFINED",
                         f"正文第 {line} 行使用了列表字段「{fd.name}」中未定义的列：{var}.{attr}"
                         f"（可用列：{'、'.join(fd.column_names()) or '无'}）", fd.name, line))
+    out.extend(_scalar_getattr_issues(tree, by_name))
     for output in tree.find_all(nodes.Output):
         for expr in output.nodes:
             if isinstance(expr, nodes.Name) and expr.ctx == "load" and expr.name in by_name \
@@ -425,6 +525,10 @@ def validate_template(tpl: Template, rs: ResourceSet) -> list[Issue]:
                 add("error", "LIST_VALUES", f"列表字段「{f.name}」不能填写 values，枚举值请写在列定义中", field=f.name)
         elif f.columns:
             add("error", "COLUMNS_NOT_LIST", f"字段「{f.name}」不是列表字段（type=list），不能定义 columns", field=f.name)
+        if f.type in ("string", "date") and f.values:
+            add("warning", "FIELD_VALUES_IGNORED",
+                f"字段「{f.name}」不是枚举字段（type={f.type}），values 将被忽略；如需枚举约束请将 type 设为 enum",
+                field=f.name)
 
     tree: nodes.Template | None = None
     try:
@@ -465,7 +569,7 @@ def validate_template(tpl: Template, rs: ResourceSet) -> list[Issue]:
         elif skill_obj.is_global:
             add("warning", "GLOBAL_SKILL_REDUNDANT",
                 f"「{ref}」已设为全局填报 Skill（scope: global），所有模板自动持有，无需重复绑定")
-    if not d.skills and not rs.global_report_skills():
+    if not rs.allowed_skills(tpl):
         add("warning", "NO_SKILL", "模板没有关联任何 Skill，模型只能从入参和单据中取值")
     return out
 
@@ -535,9 +639,9 @@ def validate_skill(skill: Skill, rs: ResourceSet) -> list[Issue]:
                 skill.id,
             ))
         covered_ids: set[int] = set()
-        # #Created By AiCoding(codex) 同时扫描 SKILL.md 与所有子文档中的 ### <ID> 标题，支持拆分子文档的路由技能
+        # #Created By AiCoding(codex) 同时扫描 SKILL.md 与所有子文档中的 ### <ID> 标题（剥离代码块避免示例标题误报）
         for scan_text in (skill.body, *docs_map.values()):
-            for m in _ROUTER_TPL_HEADING_RE.finditer(scan_text):
+            for m in _ROUTER_TPL_HEADING_RE.finditer(strip_code_blocks(scan_text)):
                 tid = int(m.group(1))
                 if tid in covered_ids:
                     continue
@@ -589,7 +693,7 @@ def validate_all(rs: ResourceSet) -> list[Issue]:
         issues.extend(validate_api(api))
     if not rs.system_prompt.strip():
         issues.append(Issue("error", "SYSTEM_PROMPT_EMPTY", "系统提示词不能为空", "system-prompt", "system-prompt"))
-    if rs.composite_template.strip():
+    if rs.has_composite_template or rs.composite_template != "":
         for msg in validate_composite_template(rs.composite_template):
             issues.append(Issue("error", "COMPOSITE_TEMPLATE_SYNTAX", msg, "composite-template", "composite-template"))
     return issues

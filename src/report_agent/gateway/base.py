@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -13,9 +14,25 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from ..domain.api_contract import ApiContract
+from ..domain.sanitize import sanitize_sensitive_text
 
 MAX_XML_CHARS = 5_000_000
 MAX_JSON_CHARS = 5_000_000
+_BUSINESS_ERROR_KEYS: tuple[str, ...] = (
+    "resp_desc",
+    "respDesc",
+    "resultDesc",
+    "result_desc",
+    "ret_msg",
+    "retMsg",
+    "errMsg",
+    "err_msg",
+    "message",
+    "msg",
+    "error_msg",
+    "errorMessage",
+    "faultstring",
+)
 _XSI_NIL_ATTRS = ("{http://www.w3.org/2001/XMLSchema-instance}nil", "xsi:nil", "nil")
 # XML 1.0 非法控制字符（保留 \t \n \r）及代理对/非字符，以及对应的数字字符引用
 _INVALID_XML_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
@@ -51,6 +68,19 @@ class GatewayClient(Protocol):
 _DECL_RE = re.compile(rb"^(?:\xef\xbb\xbf)?\s*<\?xml[^>]*encoding=[\"']([A-Za-z0-9_\-]+)[\"']", re.I)
 _XML_DECL_STRIP_RE = re.compile(r"^\s*<\?xml[^>]*\?>")
 _DOCTYPE_OR_ENTITY_HINT_RE = re.compile(r"<!\s*(?:DOCTYPE|ENTITY)", re.IGNORECASE)
+
+
+def merge_http_headers(defaults: dict[str, str], custom: dict[str, str]) -> dict[str, str]:
+    """合并默认请求头与契约自定义请求头（忽略大小写去重，以用户配置优先）。#Created By AiCoding(codex)"""
+    merged = dict(defaults)
+    lower_to_actual = {k.lower(): k for k in merged}
+    for k, v in (custom or {}).items():
+        existing = lower_to_actual.get(k.lower())
+        if existing:
+            merged.pop(existing, None)
+        merged[k] = v
+        lower_to_actual[k.lower()] = k
+    return merged
 
 
 def sanitize_xml_text(text: str) -> str:
@@ -280,18 +310,19 @@ def element_to_record(
     flatten: bool = False,
     columns: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    """把一条记录元素转成 子元素名→文本。没有子元素时整个文本作为 value；支持嵌套展平与点分列提取。"""
+    """把一条记录元素转成 子元素名→文本。没有子元素时整个文本作为 value；同名重复子元素自动聚合成 JSON 数组。#Created By AiCoding(codex)"""
     if flatten:
         rec = _flatten_xml_element(el)
     else:
-        children = [c for c in el if isinstance(c.tag, str)]
-        if not children:
+        grouped = _group_xml_children(el)
+        if not grouped:
             return {"value": "" if _is_xsi_nil(el) else (el.text or "").strip()}
         rec = {}
-        for child in children:
-            key = _local_tag(child.tag)
-            if not key:
+        for key, els in grouped:
+            if len(els) > 1:
+                rec[key] = _json_cell_to_str([_xml_node_to_json(x) for x in els])
                 continue
+            child = els[0]
             if _is_xsi_nil(child):
                 rec[key] = ""
             elif not any(isinstance(sub.tag, str) for sub in child):
@@ -350,11 +381,7 @@ def extract_records(contract: ApiContract, root: ET.Element) -> ApiCallResult:
             if resp.success.missingAs == "failure":
                 return ApiCallResult(ok=False, error=f"响应中没有 {resp.success.path}")
         elif code != resp.success.equals:
-            desc = _first_text(
-                root,
-                ["resp_desc", "respDesc", "resultDesc", "result_desc", "ret_msg", "retMsg", "errMsg", "err_msg",
-                 "message", "msg", "errorMessage", "faultstring"],
-            )
+            desc = _first_text(root, _BUSINESS_ERROR_KEYS)
             return ApiCallResult(ok=False, error=f"业务返回码 {code}" + (f"：{desc}" if desc else ""))
     if mode == "none":
         return ApiCallResult(ok=True, records=[], no_data=False)
@@ -373,7 +400,7 @@ def extract_records(contract: ApiContract, root: ET.Element) -> ApiCallResult:
     return ApiCallResult(ok=True, records=records, no_data=not records)
 
 
-def _first_text(root: ET.Element, tags: list[str]) -> str | None:
+def _first_text(root: ET.Element, tags: Sequence[str]) -> str | None:
     if not tags:
         return None
     top = tags[0]
@@ -569,7 +596,7 @@ def _json_item_to_record(
     return {"value": _json_cell_to_str(item)}
 
 
-def _first_json_text(data: Any, keys: list[str]) -> str | None:
+def _first_json_text(data: Any, keys: Sequence[str]) -> str | None:
     """按优先级在 JSON 树中单遍迭代查找首个非空错误说明字段（显式栈防范超深嵌套触发 RecursionError）。"""
     if not keys:
         return None
@@ -635,11 +662,7 @@ def extract_json_records(contract: ApiContract, data: Any) -> ApiCallResult:
                 if resp.success.missingAs == "failure":
                     return ApiCallResult(ok=False, error=f"响应中没有 {resp.success.path}")
             elif code != resp.success.equals:
-                desc = _first_json_text(
-                    data,
-                    ["resp_desc", "respDesc", "resultDesc", "result_desc", "ret_msg", "retMsg",
-                     "errMsg", "err_msg", "message", "msg", "error_msg", "errorMessage", "faultstring"],
-                )
+                desc = _first_json_text(data, _BUSINESS_ERROR_KEYS)
                 return ApiCallResult(ok=False, error=f"业务返回码 {code}" + (f"：{desc}" if desc else ""))
         if mode == "none":
             return ApiCallResult(ok=True, records=[], no_data=False)
@@ -689,3 +712,85 @@ def xml_to_json_data(root: ET.Element) -> dict[str, Any]:
     """将统一网关 XML 根元素无损转换为等价的 {operation_out: ...} JSON 字典结构。"""
     root_key = _local_tag(root.tag) or "operation_out"
     return {root_key: _xml_node_to_json(root)}
+
+
+def parse_gateway_response(
+    contract: ApiContract,
+    text: str,
+    status: int | None,
+    cost: int,
+    preview: str,
+    attempts: int = 1,
+) -> ApiCallResult:
+    """解析 XML 响应文本并按契约抽取记录（供统一网关、常规 HTTP 与 Mock 网关公共复用）。#Created By AiCoding(codex)"""
+    try:
+        root = parse_xml(text)
+    except Exception as exc:  # noqa: BLE001
+        return ApiCallResult(
+            ok=False,
+            error=sanitize_sensitive_text(f"响应不是合法的 XML：{exc}"),
+            http_status=status,
+            cost_ms=cost,
+            raw=text[:20_000],
+            request_preview=preview,
+            attempts=attempts,
+        )
+    result = extract_records(contract, root)
+    if result.error:
+        result.error = sanitize_sensitive_text(result.error)
+    result.http_status = status
+    result.cost_ms = cost
+    result.raw = text if len(text) <= 200_000 else text[:200_000]
+    result.request_preview = preview
+    result.attempts = attempts
+    return result
+
+
+def parse_gateway_json_response(
+    contract: ApiContract,
+    text: str,
+    status: int | None,
+    cost: int,
+    preview: str,
+    attempts: int = 1,
+) -> ApiCallResult:
+    """解析 JSON 响应文本、按契约抽取记录并输出格式化 raw 报文（供统一网关、常规 HTTP 与 Mock 公共复用）。#Created By AiCoding(codex)"""
+    try:
+        data = parse_json_body(text)
+    except (Exception, RecursionError) as exc:  # noqa: BLE001
+        return ApiCallResult(
+            ok=False,
+            error=sanitize_sensitive_text(f"响应不是合法的 JSON：{exc}"),
+            http_status=status,
+            cost_ms=cost,
+            raw=text[:20_000],
+            request_preview=preview,
+            attempts=attempts,
+        )
+    try:
+        result = extract_json_records(contract, data)
+    except (Exception, RecursionError) as exc:  # noqa: BLE001
+        return ApiCallResult(
+            ok=False,
+            error=sanitize_sensitive_text(f"JSON 响应解析失败：{exc}"),
+            http_status=status,
+            cost_ms=cost,
+            raw=text[:20_000],
+            request_preview=preview,
+            attempts=attempts,
+        )
+    if result.error:
+        result.error = sanitize_sensitive_text(result.error)
+    result.http_status = status
+    result.cost_ms = cost
+    if len(text) <= 200_000:
+        try:
+            pretty = json.dumps(data, ensure_ascii=False, indent=2)
+        except (Exception, RecursionError):  # noqa: BLE001
+            pretty = text
+        result.raw = pretty if len(pretty) <= 200_000 else pretty[:200_000]
+    else:
+        result.raw = text[:200_000]
+    result.request_preview = preview
+    result.attempts = attempts
+    return result

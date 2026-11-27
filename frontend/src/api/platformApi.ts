@@ -44,10 +44,15 @@ import type {
   ValidationIssue,
   ValidationResult,
 } from '@/types/platform'
-import { parseSseJson, readSseStream } from '@/utils/sse'
+import {
+  ADMIN_SESSION_TOKEN_KEY,
+  extractApiErrorInfo,
+  isAbortError,
+  normalizeApiBase,
+} from '@/utils/httpCore'
+import { parseSseJson, readSseStream, type SseFrame } from '@/utils/sse'
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'api/v1'
-const TOKEN_KEY = 'agent-python-token'
+const API_BASE = normalizeApiBase(import.meta.env.VITE_API_BASE_URL, 'api/v1')
 
 /** 后端错误：status 为 HTTP 状态码，code / message 来自后端统一错误格式 */
 export class ApiError extends Error {
@@ -73,34 +78,39 @@ export function errorMessage(err: unknown): string {
       : Array.isArray(errors) && errors.length && typeof errors[0] === 'string'
         ? `：${errors.join('；')}`
         : ''
-    return `${err.message}${extra}`
+    return extra && !err.message.includes(extra) ? `${err.message}${extra}` : err.message
   }
   if (err instanceof Error) return err.message
   return String(err)
 }
 
 function authHeaders(): Record<string, string> {
-  const token = sessionStorage.getItem(TOKEN_KEY)
-  return token ? { Authorization: `Bearer ${token}` } : {}
+  try {
+    const token = sessionStorage.getItem(ADMIN_SESSION_TOKEN_KEY)
+    return token ? { Authorization: `Bearer ${token}` } : {}
+  } catch {
+    return {}
+  }
+}
+
+function notifyUnauthorized() {
+  try {
+    sessionStorage.removeItem(ADMIN_SESSION_TOKEN_KEY)
+  } catch {
+    /* 忽略受限存储环境异常 */
+  }
+  window.dispatchEvent(new CustomEvent('auth:unauthorized'))
 }
 
 async function parseError(resp: Response): Promise<ApiError> {
-  let body: Record<string, unknown> = {}
+  let rawText = ''
   try {
-    body = (await resp.json()) as Record<string, unknown>
+    rawText = await resp.text()
   } catch {
-    /* 非 JSON 错误体 */
+    rawText = ''
   }
-  // 兼容 FastAPI HTTPException 默认包装格式 { detail: "..." } 或 { detail: { code, message, ... } }
-  const detail = body.detail
-  if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
-    body = { ...(detail as Record<string, unknown>), ...body }
-    delete body.detail
-  }
-  const { code, message, ...rest } = body as { code?: string; message?: string }
-  const msg =
-    message || (typeof detail === 'string' && detail ? detail : `请求失败（HTTP ${resp.status}）`)
-  return new ApiError(resp.status, code || `HTTP_${resp.status}`, msg, rest)
+  const info = extractApiErrorInfo(resp.status, rawText)
+  return new ApiError(resp.status, info.code, info.message, info.details)
 }
 
 function query(params?: Record<string, string | number | boolean | null | undefined>): string {
@@ -132,7 +142,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   if (!resp.ok) {
     const err = await parseError(resp)
     if (resp.status === 401 && !path.startsWith('/auth/login')) {
-      window.dispatchEvent(new CustomEvent('auth:unauthorized'))
+      notifyUnauthorized()
     }
     throw err
   }
@@ -141,13 +151,13 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 
 const enc = encodeURIComponent
 
-/** 读取 SSE 流：每收到一个过程事件调用 onEvent，返回 final 结果；支持 AbortSignal、CRLF 分块与流尾冲刷 */
-async function streamRun<T>(
+/** 私有通用 POST SSE 流请求封装：统一处理鉴权失效、AbortError 透传与流读取断网错误包装 */
+async function postSseStream(
   path: string,
   body: unknown,
-  onEvent: (ev: ProcessEvent) => void,
+  onFrame: (frame: SseFrame) => boolean | void | Promise<boolean | void>,
   signal?: AbortSignal,
-): Promise<T> {
+): Promise<void> {
   let resp: Response
   try {
     resp = await fetch(`${API_BASE}${path}`, {
@@ -158,20 +168,37 @@ async function streamRun<T>(
       signal,
     })
   } catch (err) {
-    if ((err as { name?: string })?.name === 'AbortError') throw err
+    if (isAbortError(err) || signal?.aborted) throw err
     throw new ApiError(0, 'NETWORK_ERROR', `无法连接后端服务：${(err as Error).message}`)
   }
   if (!resp.ok || !resp.body) {
     const err = await parseError(resp)
-    if (resp.status === 401) window.dispatchEvent(new CustomEvent('auth:unauthorized'))
+    if (resp.status === 401) notifyUnauthorized()
     throw err
   }
+  try {
+    await readSseStream(resp, onFrame, signal)
+  } catch (err) {
+    if (isAbortError(err) || signal?.aborted || err instanceof ApiError) {
+      throw err
+    }
+    throw new ApiError(0, 'STREAM_ERROR', `流式传输连接中断：${(err as Error).message || String(err)}`)
+  }
+}
 
+/** 读取单次运行 SSE 流：每收到一个过程事件调用 onEvent，返回 final 结果 */
+async function streamRun<T>(
+  path: string,
+  body: unknown,
+  onEvent: (ev: ProcessEvent) => void,
+  signal?: AbortSignal,
+): Promise<T> {
   let finalResult: T | undefined
   let hasFinal = false
 
-  await readSseStream(
-    resp,
+  await postSseStream(
+    path,
+    body,
     frame => {
       const data = parseSseJson<Record<string, unknown>>(frame.data)
       if (!data) return false
@@ -248,20 +275,29 @@ export interface RunsQuery {
   batchNo?: string
   q?: string
   limit?: number
+  offset?: number
 }
 
 export const platformApi = {
   // ==================== 认证 ====================
   async login(username: string, password: string): Promise<LoginResponse> {
     const res = await request<LoginResponse>('POST', '/auth/login', { username, password })
-    sessionStorage.setItem(TOKEN_KEY, res.token)
+    try {
+      sessionStorage.setItem(ADMIN_SESSION_TOKEN_KEY, res.token)
+    } catch {
+      /* 忽略受限存储环境异常 */
+    }
     return res
   },
   async logout(): Promise<{ ok: boolean }> {
     try {
       return await request<{ ok: boolean }>('POST', '/auth/logout')
     } finally {
-      sessionStorage.removeItem(TOKEN_KEY)
+      try {
+        sessionStorage.removeItem(ADMIN_SESSION_TOKEN_KEY)
+      } catch {
+        /* 忽略受限存储环境异常 */
+      }
     }
   },
   me: () => request<CurrentUser>('GET', '/auth/me'),
@@ -458,27 +494,10 @@ export const platformApi = {
     },
     signal?: AbortSignal,
   ): Promise<RegressionBatchDetail> => {
-    let resp: Response
-    try {
-      resp = await fetch(`${API_BASE}/regression/run/stream`, {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...authHeaders() },
-        body: JSON.stringify(payload),
-        signal,
-      })
-    } catch (err) {
-      if ((err as { name?: string })?.name === 'AbortError') throw err
-      throw new ApiError(0, 'NETWORK_ERROR', `无法连接后端服务：${(err as Error).message}`)
-    }
-    if (!resp.ok || !resp.body) {
-      const err = await parseError(resp)
-      if (resp.status === 401) window.dispatchEvent(new CustomEvent('auth:unauthorized'))
-      throw err
-    }
     let finalBatch: RegressionBatchDetail | undefined
-    await readSseStream(
-      resp,
+    await postSseStream(
+      '/regression/run/stream',
+      payload,
       frame => {
         const data = parseSseJson<Record<string, unknown>>(frame.data)
         if (!data) return false
@@ -604,7 +623,7 @@ export const platformApi = {
     }
     if (!resp.ok) {
       const err = await parseError(resp)
-      if (resp.status === 401) window.dispatchEvent(new CustomEvent('auth:unauthorized'))
+      if (resp.status === 401) notifyUnauthorized()
       throw err
     }
     const cd = resp.headers.get('Content-Disposition') || ''
@@ -679,10 +698,22 @@ export const platformApi = {
       { targetRev, mode, reason },
     ),
   fetchCompositeTemplateRevisions: () => request<Revision[]>('GET', '/settings/composite-template/revisions'),
-  previewCompositeTemplate: (templateText?: string) =>
-    request<CompositeTemplatePreviewResult>('POST', '/settings/composite-template/preview', {
-      ...(templateText !== undefined ? { templateText } : {}),
-    }),
+  previewCompositeTemplate: async (templateText = ''): Promise<CompositeTemplatePreviewResult> => {
+    const res = await request<{ ok: boolean; error?: string | null; errors?: string[]; rendered?: string }>(
+      'POST',
+      '/settings/composite-template/preview',
+      { templateText },
+    )
+    const errs = Array.isArray(res.errors) ? res.errors.filter(Boolean) : []
+    const normalizedError =
+      typeof res.error === 'string' && res.error ? res.error : errs.length > 0 ? errs.join('；') : null
+    return {
+      ok: Boolean(res.ok),
+      error: normalizedError,
+      errors: errs,
+      rendered: res.rendered ?? '',
+    }
+  },
   fetchModelInfo: () => request<ModelInfo>('GET', '/settings/model'),
   fetchRuntimeConfig: () => request<RuntimeConfigState>('GET', '/settings/runtime'),
   updateRuntimeConfig: (payload: RuntimeConfigUpdatePayload) =>

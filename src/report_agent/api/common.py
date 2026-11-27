@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 import json
 import logging
 from typing import Any, Callable, Literal
@@ -16,6 +17,7 @@ from pydantic import BaseModel
 
 from ..container import Container
 from ..domain.resources import Issue
+from ..domain.sanitize import sanitize_sensitive_text
 from ..runtime.router import TemplateRouteError
 from ..runtime.runner import AgentRunner, InputValidationError, RunRequest, TemplateUnavailable
 from ..runtime.workspace import queue_listener
@@ -118,11 +120,35 @@ def sse_frame(kind: str, data: Any, *, event_id: Any = None) -> str:
 # 保留历史内部别名，兼容外部或测试直接引用
 _sse = sse_frame
 
+SSE_KEEPALIVE_S = 15.0
+
+
+async def iter_sse_queue(
+    queue: asyncio.Queue[tuple[str, Any] | None],
+    *,
+    keepalive_s: float = SSE_KEEPALIVE_S,
+    terminal_kinds: tuple[str, ...] = ("final", "error"),
+) -> AsyncIterator[str]:
+    """通用 SSE 队列消费生成器：补齐首帧 connected 注释与周期性 keep-alive 保活帧。#Created By AiCoding(codex)"""
+    yield ": connected\n\n"
+    while True:
+        try:
+            item = await asyncio.wait_for(queue.get(), timeout=keepalive_s)
+        except TimeoutError:
+            yield ": keep-alive\n\n"
+            continue
+        if item is None:
+            break
+        kind, data = item
+        yield sse_frame(kind, data)
+        if terminal_kinds and kind in terminal_kinds:
+            break
+
 
 def sse_run(runner: AgentRunner, req: RunRequest, shape: Callable[[dict[str, Any]], dict[str, Any]]) -> StreamingResponse:
     """以 SSE 推送运行过程事件，最后推送 final（shape 处理后的结果）或 error。
     客户端断开不会取消运行，运行记录照常写入。"""
-    queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+    queue: asyncio.Queue[tuple[str, Any] | None] = asyncio.Queue()
 
     async def worker() -> None:
         try:
@@ -149,23 +175,16 @@ def sse_run(runner: AgentRunner, req: RunRequest, shape: Callable[[dict[str, Any
             await queue.put(("error", {"code": "TEMPLATE_UNAVAILABLE", "message": str(exc)}))
         except Exception as exc:  # noqa: BLE001
             log.exception("SSE 运行异常")
-            await queue.put(("error", {"code": "INTERNAL_ERROR", "message": f"{type(exc).__name__}: {exc}"}))
+            safe_msg = sanitize_sensitive_text(f"{type(exc).__name__}: {exc}", fallback=type(exc).__name__)
+            await queue.put(("error", {"code": "INTERNAL_ERROR", "message": safe_msg}))
 
     task = asyncio.create_task(worker())
     _BG_TASKS.add(task)
     task.add_done_callback(_BG_TASKS.discard)
 
-    async def gen():
-        yield ": connected\n\n"
-        while True:
-            try:
-                kind, data = await asyncio.wait_for(queue.get(), timeout=15)
-            except TimeoutError:
-                yield ": keep-alive\n\n"
-                continue
-            yield sse_frame(kind, data)
-            if kind in ("final", "error"):
-                break
+    async def gen() -> AsyncIterator[str]:
+        async for frame in iter_sse_queue(queue):
+            yield frame
         await task
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers=SSE_HEADERS)

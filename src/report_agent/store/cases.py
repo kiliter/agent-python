@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import shutil
 import threading
 from pathlib import Path
 from typing import Any
@@ -17,8 +16,8 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .fsutil import atomic_write_text, now_iso
-from .layout import CASE_ID_RE, DataLayout, InvalidResource, ensure_within
+from .fsutil import atomic_write_text, now_iso, unlink_or_rmtree
+from .layout import CASE_ID_RE, TEMPLATE_KEY_RE, DataLayout, InvalidResource, ensure_entry_within, ensure_within
 
 log = logging.getLogger(__name__)
 _CASE_ID_RE = CASE_ID_RE
@@ -43,7 +42,7 @@ def parse_case_scope(scope: int | str | None) -> int | None:
     raw = str(scope).strip().lower()
     if not raw or raw in (AUTO_CASE_SCOPE, "none", "null"):
         return None
-    if raw.isdigit() and int(raw) > 0:
+    if raw.isascii() and raw.isdigit() and int(raw) > 0:
         return int(raw)
     raise InvalidResource(f"非法的回归用例归属标识：{scope}")
 
@@ -141,7 +140,7 @@ class CaseStore:
         if not isinstance(raw, dict):
             log.warning("用例文件结构不是对象 %s", path)
             return None
-        raw.setdefault("id", path.stem)
+        raw = {**raw, "id": path.stem}
         try:
             return CaseDef.model_validate(raw)
         except ValidationError as exc:
@@ -178,7 +177,7 @@ class CaseStore:
             for entry in os.scandir(self.layout.cases):
                 if entry.name.startswith(".") or not entry.is_dir(follow_symlinks=False):
                     continue
-                if entry.name.isdigit() and int(entry.name) > 0:
+                if TEMPLATE_KEY_RE.match(entry.name):
                     tids.append(int(entry.name))
         except OSError:
             return out
@@ -216,14 +215,15 @@ class CaseStore:
 
     def get(self, tid: int | None, case_id: str) -> CaseDef | None:
         p = self._case_path(tid, case_id)
-        if not p.is_file():
+        if p.is_symlink() or not p.is_file():
             return None
         return self._load_file(p)
 
     def next_id(self, tid: int | None) -> str:
-        prefix = "A" if parse_case_scope(tid) is None else "C"
-        nums = [int(m.group(1)) for c in self.list(tid) if (m := re.match(rf"{prefix}-(\d+)$", c.id))]
-        return f"{prefix}-{(max(nums, default=0) + 1):02d}"
+        with self.lock:
+            prefix = "A" if parse_case_scope(tid) is None else "C"
+            nums = [int(m.group(1)) for c in self.list(tid) if (m := re.match(rf"{prefix}-([0-9]+)$", c.id))]
+            return f"{prefix}-{(max(nums, default=0) + 1):02d}"
 
     def save(self, tid: int | None, case: CaseDef) -> CaseDef:
         p = self._case_path(tid, case.id)
@@ -240,15 +240,14 @@ class CaseStore:
     def delete(self, tid: int | None, case_id: str) -> bool:
         p = self._case_path(tid, case_id)
         with self.lock:
-            if p.is_file():
-                p.unlink()
+            if unlink_or_rmtree(p):
                 with self._cache_lock:
                     self._valid_cache.pop(str(p), None)
                 return True
         return False
 
     def move(self, src_tid: int | None, case_id: str, dst_tid: int | None, updated: CaseDef | None = None) -> CaseDef:
-        """在自动路由与指定模板之间无损迁移用例归属（同目录则原地更新）。#Created By AiCoding(codex)"""
+        """在自动路由与指定模板之间无损迁移用例归属（同目录改 ID 时同样校验冲突并删除旧文件）。#Created By AiCoding(codex)"""
         src_norm = parse_case_scope(src_tid)
         dst_norm = parse_case_scope(dst_tid)
         with self.lock:
@@ -256,7 +255,7 @@ class CaseStore:
             if cur is None:
                 raise InvalidResource(f"用例「{case_id}」不存在")
             target_case = updated or cur
-            if src_norm == dst_norm:
+            if src_norm == dst_norm and target_case.id == case_id:
                 return self.save(dst_norm, target_case)
             if self.get(dst_norm, target_case.id) is not None:
                 raise InvalidResource(f"目标归属下已存在同编号用例「{target_case.id}」")
@@ -266,16 +265,15 @@ class CaseStore:
 
     def delete_all(self, tid: int) -> int:
         """删除模板时清理其全部回归用例及目录，返回已删除的用例数量。#Created By AiCoding(codex)"""
-        d = self._dir(tid)
+        norm = parse_case_scope(tid)
+        seg = AUTO_CASE_SCOPE if norm is None else str(norm)
+        d = ensure_entry_within(self.layout.cases, self.layout.cases / seg)
         with self.lock:
-            if not d.exists():
+            if not os.path.lexists(d):
                 return 0
-            removed = self.count(tid)
+            removed = 0 if d.is_symlink() else self.count(tid)
             prefix = str(d)
-            if d.is_symlink() or d.is_file():
-                d.unlink(missing_ok=True)
-            else:
-                shutil.rmtree(d, ignore_errors=True)
+            unlink_or_rmtree(d, ignore_errors=True)
             with self._cache_lock:
                 for k in [k for k in self._valid_cache if k == prefix or k.startswith(prefix + os.sep)]:
                     self._valid_cache.pop(k, None)
@@ -283,11 +281,12 @@ class CaseStore:
 
     def copy_all(self, src_tid: int, dst_tid: int) -> int:
         """复制模板时一并复制用例。"""
-        n = 0
-        for case in self.list(src_tid):
-            self.save(dst_tid, case.model_copy(update={"source": f"复制自模板 {src_tid}"}))
-            n += 1
-        return n
+        with self.lock:
+            n = 0
+            for case in self.list(src_tid):
+                self.save(dst_tid, case.model_copy(update={"source": f"复制自模板 {src_tid}"}))
+                n += 1
+            return n
 
     @staticmethod
     def from_payload(data: dict[str, Any], base: CaseDef | None = None) -> CaseDef:
@@ -309,6 +308,8 @@ class CaseStore:
         merged["inputs"] = inputs
         if "expectedTemplateId" in data:
             raw_et = data.get("expectedTemplateId")
+            if isinstance(raw_et, bool):
+                raise InvalidResource("期望模板编号必须为正整数")
             if raw_et in (None, "", 0, "0"):
                 merged["expectedTemplateId"] = None
             else:

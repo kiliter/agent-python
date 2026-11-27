@@ -22,6 +22,7 @@ from report_agent.main import create_app
 @pytest.fixture
 def del_client(tmp_path):
     settings = Settings(
+        _env_file=None,
         data_dir=tmp_path / "data",
         report_api_keys="upstream-key",
         admin_bootstrap_password="admin-password-123",
